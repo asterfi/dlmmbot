@@ -7,9 +7,11 @@ import {
   gmgnBucketId,
   gmgnTokenBudgetOk,
   gmgnSpendOk,
+  gmgnOneMinuteFlow,
   _setGmgnBucketForTests,
   _resetGmgnPaceForTests,
 } from "./gmgn.js";
+import type { GmgnPresence, GmgnTrendingToken } from "./gmgn.js";
 
 // tokenSecurity is the pipeline's ONLY honeypot/sell-tax check (vet.ts).
 // The parser must fail closed (null) on shape drift, never read a payload it
@@ -90,5 +92,40 @@ describe("gmgn rate-limit helpers", () => {
     _setGmgnBucketForTests("token", 1);
     expect(gmgnSpendOk(1, "token")).toBe(true);
     expect(gmgnSpendOk(5, "token", { optional: true })).toBe(false);
+  });
+});
+
+describe("Eys one-minute GMGN provenance", () => {
+  const token = (volumeUsd: number): GmgnTrendingToken => ({
+    address: "mint",
+    symbol: "TST",
+    priceChangePct1h: 2,
+    volumeUsd,
+    liquidityUsd: 100_000,
+    marketCapUsd: 1_000_000,
+    holderCount: 100,
+    top10HolderRate: 0.2,
+    renouncedMint: true,
+    renouncedFreeze: true,
+    launchpad: "",
+    creator: "creator",
+    openTimestamp: 0,
+  });
+
+  it("uses only a fresh interval-specific 1m row", () => {
+    const now = 1_700_000_000_000;
+    const presence: GmgnPresence = {
+      token: token(1),
+      intervals: new Set(["1m", "5m"]),
+      tokenByInterval: new Map([["1m", token(125_000)], ["5m", token(500_000)]]),
+      fetchedAtMsByInterval: new Map([["1m", now - 30_000], ["5m", now - 30_000]]),
+    };
+    expect(gmgnOneMinuteFlow(presence, now, 180_000)).toEqual({
+      source: "gmgn-market-trending",
+      cadence: "1m",
+      volumeUsd: 125_000,
+      observedAtMs: now - 30_000,
+    });
+    expect(gmgnOneMinuteFlow(presence, now, 10_000)).toBeNull();
   });
 });

@@ -1,6 +1,32 @@
 # meteora-farmer configuration.
 # Every value here maps to a [bracketed] default in STRATEGY.md. Hot-reloaded on change.
 
+# Hosted strategy selection. Core remains the default; Eys requires both
+# strategy.mode = "eys" and [eys].enabled = true in the runtime config.
+[strategy]
+mode = "core"
+
+[eys]
+enabled = false
+flow_floor_usd = 100000
+flow_persistence = 3
+observation_ttl_s = 180
+exit_persistence = 3
+entry_sol = 0.1
+anchor_range_below_pct = 40
+tight_price_change_pct = 10
+token_breakout_pct = 25
+dump_bonus_price_change_pct = 20
+flow_refresh_s = 60
+
+# Optional local Laya model gate. Keep off until the model is Eys-calibrated
+# and the isolated replay/validation gates pass.
+[laya]
+mode = "off"                         # off | shadow | gate
+base_url = "http://127.0.0.1:18150"
+timeout_ms = 750
+min_approval_probability = 0.90
+
 [scanner]
 interval_s = 60
 pages = 3                  # datapi pages per sweep (100 pools/page)
@@ -575,7 +601,7 @@ rpc_blind_after_min = 5          # alert-only: freeze entries, never liquidate b
 
 [gmgn]                     # discovery enrichment via official gmgn-cli (query tier only)
 enabled = true             # auto-off when GMGN_API_KEY is empty
-intervals = ["5m", "1h"]   # trending windows checked each scan (1m is noise below our entry horizon)
+intervals = ["1m", "5m", "1h"]   # Eys requires the genuine 1m GMGN flow row; longer windows are context
 min_liquidity_usd = 10000
 # Tiered score bonus by which windows the token trends in (clamped at 100):
 bonus_sustained = 8        # 5m AND 1h — momentum confirmed and holding

@@ -81,7 +81,7 @@ export const WIKI_SECTIONS: WikiSection[] = [
           {
             title: "Farmer",
             badge: "brain",
-            text: "Scans, vets, opens, manages, closes. This is the strategy.",
+            text: "Scans, vets, opens, manages, closes. The core owns safety and execution; an explicitly enabled hosted strategy plugin may supply proposals and evidence, and an optional localhost Laya sidecar may veto a fully qualified setup without bypassing hard gates.",
             icon: "bot",
           },
           {

@@ -1,0 +1,31 @@
+[Unit]
+Description=DLMbot local Laya Eys decision sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hermes/.hermes/laya
+ExecStart=/home/hermes/.cache/laya-venv/bin/python /home/hermes/.hermes/laya/laya_server.py
+Environment=LAYA_HOST=127.0.0.1
+Environment=LAYA_PORT=18150
+Environment=LAYA_DEVICE=cpu
+Environment=LAYA_MODEL=convaiinnovations/laya
+Environment=LAYA_SUBFOLDER=typed-decisions
+Environment=HF_HOME=/home/hermes/.cache/laya-huggingface
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=30
+MemoryHigh=3G
+MemoryMax=4G
+CPUQuota=350%
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/hermes/.cache/laya-huggingface
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

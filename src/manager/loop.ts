@@ -30,7 +30,8 @@ import { applyMicroSize, isMicroMcap, microPoolSharePct, microSleeveExposure } f
 import { enterMajorsPositions } from "./majorsEntry.js";
 import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
-import type { Position } from "../types.js";
+import type { Candidate, Position } from "../types.js";
+import { activeStrategyPlugin } from "../strategy/registry.js";
 import { vetToken } from "../vetting/vet.js";
 
 // STRATEGY.md §4 — P0–P5 state machine. Live: P0 (TVL/price/rugcheck + GMGN
@@ -921,6 +922,23 @@ export async function managePositions(exec: Executor): Promise<void> {
       const valueFrac = pos.entrySol > 0 ? mark.valueSol / pos.entrySol : 1;
       const sleeve = sleeveAtEntry(pos);
       const pm = manageForSleeve(sleeve);
+      // Strategy advice is subordinate to the core mark/safety pipeline. A
+      // plugin may request a close, but it never performs the close itself.
+      const strategy = activeStrategyPlugin();
+      let strategyExit = null;
+      try {
+        strategyExit = await strategy.manage({ executor: exec, position: pos, mark });
+      } catch (e) {
+        console.warn(`[strategy] ${strategy.id} manage advice unavailable for pos#${pos.id}: ${(e as Error).message}`);
+      }
+      if (strategyExit) {
+        await closeAndReport(exec, pos, strategyExit.reason, config().exec.exit_slippage_bps, "close", strategyExit.detail);
+        recordDecision(pos.tokenMint, pos.poolAddress, "exited", strategyExit.code, null, {
+          strategy: strategy.id, posId: pos.id, mark, detail: strategyExit.detail,
+        });
+        clearRangeTimers(pos.id);
+        continue;
+      }
 
       // --- TELEMETRY ONLY: young-launch quick-exit candidate ---
       // 2026-08-20 research (38 clean young-pool closes + Railway's 21): every
@@ -1582,10 +1600,33 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
   let bankroll = computeBankroll(walletSol);
   const rot = config().rotation;
   const normalCap = Math.max(0, bankroll.effectiveSlots - rot.alpha_slots);
-
-  let candidates;
+  const strategy = activeStrategyPlugin();
+  let candidates: Candidate[] = [];
+  let discoverySummary: Record<string, unknown> = {};
+  let gmgnByMint: ReadonlyMap<string, import("../scanner/gmgn.js").GmgnPresence> = new Map();
+  const strategyProposals = new Map<string, Awaited<ReturnType<typeof strategy.discover>>[number]>();
   try {
-    ({ candidates } = await scan());
+    const scanned = await scan();
+    gmgnByMint = scanned.gmgnByMint ?? new Map();
+    const rejectionCounts = scanned.rejected.reduce<Record<string, number>>((counts, rejected) => {
+      for (const failure of rejected.gateFailures) counts[failure.gate] = (counts[failure.gate] ?? 0) + 1;
+      return counts;
+    }, {});
+    discoverySummary = {
+      sweptPools: scanned.sweptPools,
+      coreCandidates: scanned.candidates.length,
+      coreRejected: scanned.rejected.length,
+      rejectionCounts,
+    };
+    const proposals = await strategy.discover({
+      candidates: scanned.candidates,
+      gmgnByMint,
+    });
+    for (const proposal of proposals) strategyProposals.set(proposal.candidate.pool.address, proposal);
+    candidates = scanned.candidates.filter((candidate) => strategyProposals.has(candidate.pool.address));
+    if (strategy.id === "eys") {
+      console.log(`[strategy] eys: ${proposals.length}/${scanned.candidates.length} core candidate(s) have qualifying proposals`);
+    }
   } catch (e) {
     logError({
       source: "scanner",
@@ -1597,6 +1638,19 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     return;
   }
   for (const cand of candidates) {
+    const proposal = strategyProposals.get(cand.pool.address);
+    if (!proposal) continue;
+    const strategyDecision = strategy.evaluate({ candidate: cand, proposal });
+    if (!strategyDecision.accepted) {
+      recordDecision(cand.tokenMint, cand.pool.address, "skipped", `strategy_${strategyDecision.reason ?? "rejected"}`, cand.score, { strategy: strategy.id });
+      continue;
+    }
+    if (proposal.fundingSide === "token") {
+      recordDecision(cand.tokenMint, cand.pool.address, "skipped", "strategy_token_funding_unavailable", cand.score, {
+        strategy: proposal.strategyId, stage: proposal.stage, evidence: proposal.evidence,
+      });
+      continue;
+    }
     const opened = openPositionCount();
     // Cheap admission pre-check before spending vetting calls: when the normal
     // book is full, only candidates that could plausibly reach alpha (pre-vet
@@ -1698,6 +1752,11 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
 
     const kelly = kellyStats();
     let size = positionSize(bankroll, score, isMicro ? "micro" : "core");
+    // Strategy sizing is intent only. Core risk sizing remains authoritative;
+    // Eys can cap a position to its requested clip but cannot raise it.
+    if (proposal.requestedSizeSol != null && proposal.requestedSizeSol > 0) {
+      size = Math.min(size, proposal.requestedSizeSol);
+    }
     if (size <= 0) {
       const gate = sizingMode() === "kelly" && kelly.regime === "negative_edge" ? "kelly_negative_edge" : "size_zero";
       if (sizingMode() === "kelly" && kelly.regime === "negative_edge")
@@ -1846,24 +1905,29 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // the score, not just the price. A failed re-quote falls through on the old
     // one: datapi hiccups must not cost every entry.
     let entryPrice = cand.pool.price;
+    let quoteRefreshStatus: "not_attempted" | "fresh" | "unavailable" = "not_attempted";
+    let freshQuotePrice: number | null = null;
+    let quoteDriftBins: number | null = null;
     const driftLimit = config().entry.max_quote_drift_bins ?? DEFAULT_MAX_QUOTE_DRIFT_BINS;
     if (driftLimit > 0 && entryPrice > 0 && cand.pool.binStep > 0) {
       const fresh = await fetchPool(cand.pool.address).catch(() => null);
       if (fresh && fresh.price > 0) {
-        const driftBins = Math.log(fresh.price / entryPrice) / Math.log(1 + cand.pool.binStep / 10_000);
-        if (Math.abs(driftBins) > driftLimit) {
+        quoteRefreshStatus = "fresh";
+        freshQuotePrice = fresh.price;
+        quoteDriftBins = Math.log(fresh.price / entryPrice) / Math.log(1 + cand.pool.binStep / 10_000);
+        if (Math.abs(quoteDriftBins) > driftLimit) {
           recordDecision(cand.tokenMint, cand.pool.address, "skipped", "quote_stale", score, {
             symbol: cand.symbol, quotedPrice: entryPrice, freshPrice: fresh.price,
-            driftBins, driftLimit, binStep: cand.pool.binStep,
+            driftBins: quoteDriftBins, driftLimit, binStep: cand.pool.binStep,
           });
           console.log(
-            `[enter] ${cand.symbol}: quote moved ${driftBins > 0 ? "+" : ""}${driftBins.toFixed(1)} bins ` +
+            `[enter] ${cand.symbol}: quote moved ${quoteDriftBins > 0 ? "+" : ""}${quoteDriftBins.toFixed(1)} bins ` +
             `since the scan (limit ${driftLimit}) — skipping rather than chasing`
           );
           continue;
         }
         entryPrice = fresh.price;
-      }
+      } else quoteRefreshStatus = "unavailable";
     }
 
     // A fine-step pool cannot hold a range as deep as min_down_pct: planRange
@@ -1880,7 +1944,20 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     }
 
     const candles = await fetchCandlesDeep(cand.pool.address, "5m").catch(() => []);
-    const planned = planRange(entryPrice, cand.pool.binStep, candles, cand.pool.decimalsX);
+    const strategyPlan = strategy.plan({
+      candidate: cand,
+      proposal,
+      entryPrice,
+      candles,
+      requestedSizeSol: size,
+    });
+    if (strategy.id !== "core" && !strategyPlan) {
+      recordDecision(cand.tokenMint, cand.pool.address, "skipped", "strategy_plan_unavailable", score, {
+        strategy: proposal.strategyId, stage: proposal.stage, fundingSide: proposal.fundingSide,
+      });
+      continue;
+    }
+    const planned = strategyPlan?.range ?? planRange(entryPrice, cand.pool.binStep, candles, cand.pool.decimalsX);
     const rent = await applyBinRentGate({
       range: planned,
       score,
@@ -1909,6 +1986,91 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       );
     }
     const range = rent.range;
+
+    let modelGateDetail: Record<string, unknown> | undefined;
+    if (strategy.modelGate) {
+      const gmgn = gmgnByMint.get(cand.tokenMint);
+      const candidateGmgn = gmgn ? {
+        intervals: [...gmgn.intervals],
+        rowsByInterval: Object.fromEntries(
+          [...gmgn.tokenByInterval.entries()].map(([interval, token]) => [interval, token]),
+        ),
+        fetchedAtMsByInterval: Object.fromEntries(gmgn.fetchedAtMsByInterval.entries()),
+      } : null;
+      const modelDecision = await strategy.modelGate({
+        candidate: cand,
+        proposal,
+        discovery: {
+          ...discoverySummary,
+          candidateGmgn,
+        },
+        vetting: vet,
+        score,
+        requestedSizeSol: size,
+        bankroll: {
+          walletSol: bankroll.walletSol,
+          deployableSol: bankroll.deployableSol,
+          deployedSol: bankroll.deployedSol,
+          effectiveSlots: bankroll.effectiveSlots,
+        },
+        range,
+        hardGates: {
+          candidateGatesPassed: cand.gateFailures.length === 0,
+          vettingPassed: vet.verdict === "pass",
+          scorePassed: true,
+          sizingPassed: size >= sizeFloor,
+          tokenExposurePassed: exposure === 0,
+          poolSharePassed: true,
+          rangeReachable: reach.ok,
+          rentPassed: true,
+          finalExecutorChecksStillRequired: true,
+        },
+        quote: {
+          scanPrice: cand.pool.price,
+          entryPrice,
+          freshPrice: freshQuotePrice,
+          refreshStatus: quoteRefreshStatus,
+          driftBins: quoteDriftBins,
+          driftLimitBins: driftLimit,
+        },
+        rent: {
+          ...rent.meta,
+          range: rent.range,
+        },
+        positionContext: {
+          openPositions: opened,
+          normalCap,
+          effectiveSlots: bankroll.effectiveSlots,
+          needsDisplacement,
+          isAlpha,
+          isMicro,
+          priorEntries24h,
+          tokenExposureSol: exposure,
+        },
+      });
+      modelGateDetail = modelDecision.detail;
+      if (modelGateDetail) {
+        console.log(
+          `[strategy] ${strategy.id} model=${String(modelGateDetail.model ?? "unknown")} ` +
+          `approved=${String(modelGateDetail.approved)} stage=${String(modelGateDetail.stage ?? "unknown")} ` +
+          `latency=${String(modelGateDetail.latencyMs ?? "n/a")}ms`
+        );
+      }
+      if (!modelDecision.accepted) {
+        recordDecision(cand.tokenMint, cand.pool.address, "skipped", `strategy_${modelDecision.reason ?? "model_rejected"}`, score, {
+          strategy: strategy.id,
+          model: modelGateDetail,
+        });
+        continue;
+      }
+      if (modelDecision.reason === "laya_shadow") {
+        recordDecision(cand.tokenMint, cand.pool.address, "skipped", "laya_shadow_observed", score, {
+          strategy: strategy.id,
+          continues: true,
+          model: modelGateDetail,
+        });
+      }
+    }
 
     if (needsDisplacement) {
       const displaced = await tryDisplacement(exec, score, cand.tokenMint);
@@ -1978,6 +2140,13 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     recordDecision(cand.tokenMint, cand.pool.address, "entered", null, score, {
       size, range, vet: vet.facts, pool: cand.pool, kelly, isAlpha, flow,
       sleeve: isMicro ? "micro" : "meme",
+      strategy: {
+        id: proposal.strategyId,
+        stage: proposal.stage,
+        fundingSide: proposal.fundingSide,
+        evidence: proposal.evidence,
+      },
+      laya: modelGateDetail ?? null,
       entryOfSwingHigh: ofSwingHigh,
       experiment: { feePath, isMicro, baseScore, trendingBonus, flowBonus, flowPenalty },
     });

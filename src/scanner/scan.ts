@@ -87,6 +87,8 @@ export interface ScanResult {
   candidates: Candidate[];   // passed all pool gates, sorted by score desc
   rejected: Candidate[];     // failed gates (kept for the decisions log)
   sweptPools: number;
+  /** Shared discovery evidence for the hosted strategy boundary. */
+  gmgnByMint?: ReadonlyMap<string, import("./gmgn.js").GmgnPresence>;
 }
 
 export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanResult> {
@@ -181,13 +183,17 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
     // GMGN enrichment (§1): tiered trending bonus + cheap pre-vet from trending metadata.
     const g = config().gmgn;
     const gm = gmgnTrending.get(p.mintX);
-    if (gm) {
-      const t = gm.token;
+    // The tracked core strategy historically used only the 5m/1h enrichment
+    // windows. Eys may consume the additional 1m row, but a 1m-only sighting
+    // must not silently change core admission or renounced-token behavior.
+    const coreGm = gm && (gm.intervals.has("5m") || gm.intervals.has("1h")) ? gm : undefined;
+    if (coreGm) {
+      const t = coreGm.tokenByInterval.get("5m") ?? coreGm.tokenByInterval.get("1h") ?? coreGm.token;
       if (g.require_renounced && (!t.renouncedMint || !t.renouncedFreeze)) {
         gateFailures.push({ gate: "gmgn_renounced", value: `mint=${t.renouncedMint} freeze=${t.renouncedFreeze}`, limit: "both renounced" });
       } else {
-        const in5m = gm.intervals.has("5m");
-        const in1h = gm.intervals.has("1h");
+        const in5m = coreGm.intervals.has("5m");
+        const in1h = coreGm.intervals.has("1h");
         const bonus = in5m && in1h ? g.bonus_sustained : in5m ? g.bonus_emerging : in1h ? g.bonus_fading : 0;
         if (bonus > 0) {
           score = Math.min(100, score + bonus);
@@ -216,5 +222,5 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  return { candidates, rejected, sweptPools: pools.length };
+  return { candidates, rejected, sweptPools: pools.length, gmgnByMint: gmgnTrending };
 }

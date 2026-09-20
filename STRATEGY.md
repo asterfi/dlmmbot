@@ -8,6 +8,36 @@ Philosophy (from the Tux/Gmet playbook): **capital preservation first**. One-sid
 
 ---
 
+## Hosted strategy boundary
+
+The core strategy remains the tracked default. Hosted strategies are selected only
+when `strategy.mode` and the strategy-specific enable flag are both explicit.
+Eys plugin owns hot-pool proposal intake, exact Meteora pool identity, fresh
+GMGN mint-level one-minute flow evidence associated with that candidate pool,
+persistence, Eys stage/range intent, and flow-decay exit recommendations. DLMbot
+core remains authoritative for pool/token gates, vetting,
+score and alpha admission, sizing, reserves, bin rent, quote checks, wallet and
+asset acquisition, execution, management, reconciliation, and accounting.
+
+The current live-capable Eys slice is the SOL-side Spot anchor. Token-side breakout
+proposals are retained as strategy evidence but fail closed until a core-owned
+funding and accounting service is implemented; the plugin never performs token
+acquisition or transactions itself.
+
+### Hosted Laya decision boundary
+
+When explicitly configured, Eys sends Laya one normalized snapshot after the
+core has completed deterministic vetting, quote, sizing, range, reserve, and
+bin-rent checks. The snapshot includes discovery summary, exact pool identity,
+GMGN one-minute mint-flow/persistence evidence, vetting facts, bankroll context,
+quote/rent status, and the planned range. Laya can recommend a stage and veto the
+setup; it cannot waive a
+hard gate, discover missing pools, choose size, sign/broadcast, manage exits,
+or replace reconciliation/accounting. `shadow` is the validation mode and
+`gate` is fail-closed and opt-in. Removing hard safety gates is not supported.
+
+---
+
 ## 1. Scanning — building the candidate list
 
 Runs every `[60s]`. The scan fires from inside the manage tick, so it can only start on a `poll_s` boundary. Because `interval_s` is an exact multiple of `poll_s` (60 = 3x20), the old `elapsed > interval` test sat exactly ON the 4th boundary and a millisecond of timer jitter decided it: measured over 637 sweeps on 2026-08-21, 288 fired on the 4th tick and **348 waited a whole extra poll**, two clean spikes at 60s and 75s with nothing between, averaging **7.8s of extra staleness per scan**. The test now carries half a poll of tolerance so it snaps to the nearest tick; it cannot fire early, since the previous boundary sits a full poll below the target.

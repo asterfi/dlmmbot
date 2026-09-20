@@ -27,7 +27,32 @@ import { parse } from "smol-toml";
 })();
 
 // Typed mirror of config.toml. Sections/keys must match STRATEGY.md defaults.
+export interface EysConfig {
+  enabled: boolean;
+  flow_floor_usd: number;
+  flow_persistence: number;
+  observation_ttl_s: number;
+  exit_persistence: number;
+  entry_sol: number;
+  anchor_range_below_pct: number;
+  tight_price_change_pct: number;
+  token_breakout_pct: number;
+  dump_bonus_price_change_pct: number;
+  flow_refresh_s: number;
+}
+
+export interface LayaConfig {
+  /** off = no call, shadow = observe only, gate = explicit fail-closed veto. */
+  mode: "off" | "shadow" | "gate";
+  base_url: string;
+  timeout_ms: number;
+  min_approval_probability: number;
+}
+
 export interface Config {
+  strategy: { mode: "core" | "eys" };
+  eys: EysConfig;
+  laya: LayaConfig;
   scanner: {
     interval_s: number; pages: number; copycat_ignore_h: number;
     /**
@@ -353,7 +378,7 @@ const CONFIG_PATH = resolve(process.env.FARMER_CONFIG_PATH!);
 // file — swapping it in would make gate comparisons like `tvl < undefined`
 // silently false, i.e. hard gates silently passing.
 const REQUIRED_SECTIONS = [
-  "scanner", "gates", "vetting", "timing", "score_caps", "smartflow", "score",
+  "strategy", "eys", "laya", "scanner", "gates", "vetting", "timing", "score_caps", "smartflow", "score",
   "entry", "manage", "sizing", "follow", "majors", "rotation", "exec", "gmgn",
   "watchdog", "apis",
 ] as const;

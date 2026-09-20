@@ -41,12 +41,45 @@ export interface GmgnTrendingToken {
 }
 
 export interface GmgnPresence {
+  /** First-seen token row retained for existing score/bonus consumers. */
   token: GmgnTrendingToken;
-  intervals: Set<string>;   // which trending windows the mint appears in
+  /** Which trending windows the mint appears in. */
+  intervals: Set<string>;
+  /** Interval-specific normalized rows; Eys must read the genuine 1m row. */
+  tokenByInterval: Map<string, GmgnTrendingToken>;
+  /** Fetch time for each interval row, used for freshness checks. */
+  fetchedAtMsByInterval: Map<string, number>;
 }
 
 let cache: { at: number; byMint: Map<string, GmgnPresence> } | null = null;
-const CACHE_MS = 600_000; // 10m — trending is enrichment, not tick-critical
+// Eys admission consumes a 1m row. A ten-minute cache would let a stale row
+// satisfy a three-minute evidence TTL, so the cache cannot outlive that cadence.
+const CACHE_MS = 60_000;
+
+export interface GmgnOneMinuteFlow {
+  source: "gmgn-market-trending";
+  cadence: "1m";
+  volumeUsd: number;
+  observedAtMs: number;
+}
+
+export function gmgnOneMinuteFlow(
+  presence: GmgnPresence | undefined,
+  nowMs = Date.now(),
+  freshnessMs = 180_000,
+): GmgnOneMinuteFlow | null {
+  const token = presence?.tokenByInterval.get("1m");
+  const observedAtMs = presence?.fetchedAtMsByInterval.get("1m");
+  if (!token || observedAtMs == null || !Number.isFinite(observedAtMs)) return null;
+  if (observedAtMs > nowMs || nowMs - observedAtMs > Math.max(1, freshnessMs)) return null;
+  if (!Number.isFinite(token.volumeUsd) || token.volumeUsd <= 0) return null;
+  return {
+    source: "gmgn-market-trending",
+    cadence: "1m",
+    volumeUsd: token.volumeUsd,
+    observedAtMs,
+  };
+}
 
 /** Documented bucket (gmgn-skills, 2026): rate=20 capacity=20 per module. */
 export const GMGN_BUCKET_RATE = 20;
@@ -394,10 +427,24 @@ export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
   for (const iv of g.intervals) {
     try {
       const tokens = await fetchInterval(iv, g.min_liquidity_usd);
+      const fetchedAtMs = Date.now();
       for (const t of tokens) {
         const cur = byMint.get(t.address);
-        if (cur) cur.intervals.add(iv);
-        else byMint.set(t.address, { token: t, intervals: new Set([iv]) });
+        if (cur) {
+          cur.intervals.add(iv);
+          cur.tokenByInterval.set(iv, t);
+          cur.fetchedAtMsByInterval.set(iv, fetchedAtMs);
+          // The 1m row is the authoritative short-window Eys flow row. Keep
+          // the existing first-seen `token` fallback for legacy score readers.
+          if (iv === "1m") cur.token = t;
+        } else {
+          byMint.set(t.address, {
+            token: t,
+            intervals: new Set([iv]),
+            tokenByInterval: new Map([[iv, t]]),
+            fetchedAtMsByInterval: new Map([[iv, fetchedAtMs]]),
+          });
+        }
       }
     } catch (e) {
       const msg = (e as Error).message;
