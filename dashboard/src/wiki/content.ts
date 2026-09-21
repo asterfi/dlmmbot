@@ -185,7 +185,7 @@ export const WIKI_SECTIONS: WikiSection[] = [
         title: "Candidate pipeline",
         steps: [
           { label: "Sweep pools", detail: "Meteora DLMM list", icon: "radar" },
-          { label: "Event intake (optional)", detail: "Exact Meteora pool creations — off by default", icon: "radar" },
+          { label: "Event intake (optional)", detail: "Exact Meteora pool creations — newest pending work first; off by default", icon: "radar" },
           { label: "Dedupe", detail: "One mint wins per ticker", icon: "check" },
           { label: "Lane intake", detail: "Eys: structural only · core: pool gates", icon: "chart" },
           { label: "Pick the pool", detail: "Deepest active-lane pool per token — not the highest fee/TVL, which picks the thinnest one", icon: "chart" },

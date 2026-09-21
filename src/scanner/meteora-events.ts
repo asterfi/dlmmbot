@@ -307,16 +307,36 @@ function advanceBackfillRange(
 }
 
 function pendingSignatures(db: ReturnType<typeof getDb>, limit: number): DiscoverySignature[] {
-  return db.prepare(
+  const bounded = Math.max(1, Math.min(100, limit));
+  const headLimit = bounded > 1 ? Math.min(bounded - 1, Math.ceil(bounded * 0.8)) : 1;
+  const row = (value: unknown) => {
+    const item = value as { signature: string; slot: number; blockTime: number | null };
+    return { ...item, err: null };
+  };
+  const newest = db.prepare(
+    `SELECT signature, slot, block_time AS blockTime
+       FROM discovery_signatures
+      WHERE status = 'pending'
+      ORDER BY slot DESC, rowid DESC
+      LIMIT ?`,
+  ).all(headLimit).map(row);
+  if (newest.length >= bounded) return newest.slice(0, bounded);
+
+  const seen = new Set(newest.map((item) => item.signature));
+  const oldest = db.prepare(
     `SELECT signature, slot, block_time AS blockTime
        FROM discovery_signatures
       WHERE status = 'pending'
       ORDER BY slot ASC, rowid ASC
       LIMIT ?`,
-  ).all(Math.max(1, Math.min(100, limit))).map((row) => ({
-    ...(row as { signature: string; slot: number; blockTime: number | null }),
-    err: null,
-  }));
+  ).all(bounded).map(row);
+  for (const item of oldest) {
+    if (newest.length >= bounded) break;
+    if (seen.has(item.signature)) continue;
+    seen.add(item.signature);
+    newest.push(item);
+  }
+  return newest;
 }
 
 function unavailableSignatureCount(db: ReturnType<typeof getDb>): number {

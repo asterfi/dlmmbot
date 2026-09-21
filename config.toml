@@ -68,8 +68,10 @@ db_max_mb = 200
 # recent Meteora DLMM program signatures, resolve exact pool-creation accounts,
 # and supplement—not replace—the Datapi sweep. Keep false until replay checks pass.
 event_intake_enabled = false
-max_signatures_per_poll = 100
-max_signature_pages_per_poll = 4
+# Keep signature intake aligned with the per-scan transaction budget. The parser
+# prioritizes the newest pending head while retaining a bounded old-work slice.
+max_signatures_per_poll = 25
+max_signature_pages_per_poll = 1
 max_transactions_per_poll = 25
 max_transaction_retries = 3
 # Hard bounds on retained intake work; when full, the head cursor does not advance.

@@ -33,9 +33,9 @@ This source is **off by default** and supplements, rather than replaces, the ran
 | Key | Default | Meaning |
 |---|---|---|
 | `event_intake_enabled` | `false` | Enable the supplemental Meteora event source |
-| `max_signatures_per_poll` | `100` | RPC signatures per page |
-| `max_signature_pages_per_poll` | `4` | Maximum pages per scan; a full bound is reported as `windowTruncated` |
-| `max_transactions_per_poll` | `25` | Maximum pending signatures parsed per scan |
+| `max_signatures_per_poll` | `25` | RPC signatures per page; aligned with the transaction parse budget |
+| `max_signature_pages_per_poll` | `1` | Maximum page per scan; a full bound is reported as `windowTruncated` and retained as backfill |
+| `max_transactions_per_poll` | `25` | Maximum pending signatures parsed per scan; newest pending work is prioritized while a bounded oldest slice drains |
 | `max_transaction_retries` | `3` | Null parsed transactions are retried this many times before `unavailable` |
 | `max_pending_signatures` | `1000` | Maximum pending signatures retained; the head cursor pauses when full |
 | `max_backfill_ranges` | `8` | Maximum active pagination gaps retained; new head advancement pauses when full |

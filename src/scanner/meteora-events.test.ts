@@ -248,6 +248,50 @@ describe("Meteora event intake", () => {
     expect(calls).toEqual([{ limit: 2 }, { limit: 2, before: "sig-3" }]);
   });
 
+  it.each([2, 3, 4, 5])("prioritizes new head signatures and retains old work for parse budget %i", async (limit) => {
+    installConfig((c) => {
+      c.discovery.event_intake_enabled = true;
+      c.discovery.max_signatures_per_poll = 6;
+      c.discovery.max_signature_pages_per_poll = 1;
+      c.discovery.max_transactions_per_poll = limit;
+    });
+    let signaturePolls = 0;
+    const transactionBatches: string[][] = [];
+    const client = {
+      getSignaturesForAddress: async () => {
+        signaturePolls++;
+        return signaturePolls === 1
+          ? Array.from({ length: 6 }, (_, index) => ({
+              signature: `old-${6 - index}`,
+              slot: 6 - index,
+              blockTime: null,
+              err: null,
+            }))
+          : Array.from({ length: 6 }, (_, index) => ({
+              signature: `new-${6 - index}`,
+              slot: 16 - index,
+              blockTime: null,
+              err: null,
+            }));
+      },
+      getParsedTransactions: async (signatures: string[]) => {
+        transactionBatches.push([...signatures]);
+        return signatures.map(() =>
+          transaction([0, 0, 0, 0, 0, 0, 0, 0], [key(), key(), key(), key()], { programId: key() }),
+        );
+      },
+    };
+
+    await discoverRecentMeteoraPools(client);
+    await discoverRecentMeteoraPools(client);
+
+    const secondBatch = transactionBatches[1]!;
+    expect(secondBatch).toHaveLength(limit);
+    expect(secondBatch[0]).toBe("new-6");
+    expect(secondBatch.some((signature) => signature.startsWith("old-"))).toBe(true);
+    expect(new Set(secondBatch).size).toBe(limit);
+  });
+
   it("bounds sustained head truncation and reports a capped backlog", async () => {
     installConfig((c) => {
       c.discovery.event_intake_enabled = true;
@@ -360,7 +404,7 @@ describe("Meteora event intake", () => {
 
     const row = getDb().prepare(
       "SELECT status, attempts FROM discovery_signatures WHERE signature = ?",
-    ).get("sig-old") as { status: string; attempts: number };
+    ).get("sig-new") as { status: string; attempts: number };
     expect(row).toEqual({ status: "unavailable", attempts: 2 });
     expect(transactionPolls).toBe(2);
   });
