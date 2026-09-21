@@ -10,6 +10,10 @@ import {
   gmgnOneMinuteFlow,
   _setGmgnBucketForTests,
   _resetGmgnPaceForTests,
+  _gmgnEnterBanForTests,
+  _gmgnAgeThrottleForTests,
+  gmgnPaceState,
+  gmgnSpendBudget,
 } from "./gmgn.js";
 import type { GmgnPresence, GmgnTrendingToken } from "./gmgn.js";
 
@@ -148,5 +152,45 @@ describe("Eys one-minute GMGN provenance", () => {
       observedAtMs: now - 30_000,
     });
     expect(gmgnOneMinuteFlow(presence, now, 10_000)).toBeNull();
+  });
+});
+
+// A local bucket cannot see GMGN's real remaining budget, so resuming after a
+// ban at exactly the rate that earned it reproduces the ban. Each ban has to
+// cost us a step of rate, or the error log fills with the same sawtooth.
+describe("adaptive throttle", () => {
+  beforeEach(() => _resetGmgnPaceForTests());
+
+  it("tightens the rolling budget one step per ban", () => {
+    const full = gmgnSpendBudget();
+    _gmgnEnterBanForTests(Date.now() - 1);        // already expired: only the throttle persists
+    const once = gmgnSpendBudget();
+    expect(once).toBeLessThan(full);
+    _gmgnEnterBanForTests(Date.now() - 1);
+    expect(gmgnSpendBudget()).toBeLessThan(once);
+  });
+
+  it("stops tightening at the floor instead of starving the scanner", () => {
+    for (let i = 0; i < 12; i++) _gmgnEnterBanForTests(Date.now() - 1);
+    expect(gmgnPaceState().throttleLevel).toBe(4);
+    expect(gmgnSpendBudget()).toBeGreaterThanOrEqual(6);
+  });
+
+  it("relaxes one step per clean 15 minutes", () => {
+    _gmgnEnterBanForTests(Date.now() - 1);
+    _gmgnEnterBanForTests(Date.now() - 1);
+    expect(gmgnPaceState().throttleLevel).toBe(2);
+    _gmgnAgeThrottleForTests(15 * 60_000 + 1_000);
+    expect(gmgnPaceState().throttleLevel).toBe(1);
+    _gmgnAgeThrottleForTests(60 * 60_000);
+    expect(gmgnPaceState().throttleLevel).toBe(0);
+    expect(gmgnSpendBudget()).toBe(36);
+  });
+
+  it("keeps optional calls off the wire while the ban is live", () => {
+    _gmgnEnterBanForTests(Date.now() + 30_000);
+    _setGmgnBucketForTests("token", 20);
+    expect(gmgnSpendOk(5, "token", { optional: true })).toBe(false);
+    expect(gmgnTokenBudgetOk(5)).toBe(false);
   });
 });
