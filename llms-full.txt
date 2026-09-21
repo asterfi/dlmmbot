@@ -33,6 +33,8 @@ Rules: paper first, burner only, never commit .env/keys, require Terms acceptanc
 
 An automated Solana bot for Meteora DLMM liquidity. It scans hot SOL-quoted meme pools (and majors sleeves where configured), vets the non-SOL token, opens a one-sided SOL LP position shaped for the strategy, manages claims/exits by fixed rules, and records PnL in SQLite. A private ops dashboard ships with the bot.
 
+The scanner includes an optional **off-by-default** Meteora DLMM event-intake lane. It paginates bounded RPC signatures, persists/retries the queue, resolves exact pool addresses through Datapi, and uses direct GMGN token info for event-only `1m` flow evidence. It supplements the ranked sweep and never bypasses hard safety or execution gates.
+
 ## Who it is for
 
 Operators who want paper trading first, then a burner wallet for live. Not custody, not a hosted trading service that holds user keys on our servers as a product — keys live on the user’s Railway volume / host.

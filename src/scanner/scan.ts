@@ -3,7 +3,8 @@ import { getDb, isBlacklisted, now, recordDecision } from "../db/db.js";
 import type { Candidate } from "../types.js";
 import { poolGates } from "./gates.js";
 import { priceDivergenceGate } from "./priceGate.js";
-import { trendingByMint } from "./gmgn.js";
+import { trendingByMint, tokenInfoByMint, mergeGmgnPresenceMaps } from "./gmgn.js";
+import { discoverRecentMeteoraPools } from "./meteora-events.js";
 import { sweepPools } from "./meteora.js";
 import { fetchCandlesDeep } from "./candles.js";
 import { feeMomentumPart, opportunityScore, structurePart, timingPart, turnoverPart } from "./score.js";
@@ -89,10 +90,30 @@ export interface ScanResult {
   sweptPools: number;
   /** Shared discovery evidence for the hosted strategy boundary. */
   gmgnByMint?: ReadonlyMap<string, import("./gmgn.js").GmgnPresence>;
+  /** Supplemental event-intake telemetry; no admission authority. */
+  discovery?: {
+    enabled: boolean;
+    signaturesFetched: number;
+    signaturesParsed: number;
+    eventsFound: number;
+    unavailableSignatures: number;
+    backlogCapped: boolean;
+    windowTruncated: boolean;
+    exactPoolsResolved: number;
+  };
 }
 
 export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanResult> {
-  const [pools, gmgnTrending] = await Promise.all([sweepPools(), trendingByMint()]);
+  const [sweptPools, gmgnTrending, eventDiscovery] = await Promise.all([
+    sweepPools(),
+    trendingByMint(),
+    discoverRecentMeteoraPools(),
+  ]);
+  const eventGmgn = await tokenInfoByMint(eventDiscovery.tokenMints);
+  const gmgnByMint = mergeGmgnPresenceMaps(gmgnTrending, eventGmgn);
+  const pools = [...new Map(
+    [...sweptPools, ...eventDiscovery.pools].map((pool) => [pool.address, pool]),
+  ).values()];
   const db = getDb();
 
   // Snapshot every swept pool (offline replay/tuning dataset, §7).
@@ -182,7 +203,7 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
 
     // GMGN enrichment (§1): tiered trending bonus + cheap pre-vet from trending metadata.
     const g = config().gmgn;
-    const gm = gmgnTrending.get(p.mintX);
+    const gm = gmgnByMint.get(p.mintX);
     // The tracked core strategy historically used only the 5m/1h enrichment
     // windows. Eys may consume the additional 1m row, but a 1m-only sighting
     // must not silently change core admission or renounced-token behavior.
@@ -222,5 +243,20 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  return { candidates, rejected, sweptPools: pools.length, gmgnByMint: gmgnTrending };
+  return {
+    candidates,
+    rejected,
+    sweptPools: sweptPools.length,
+    gmgnByMint,
+    discovery: {
+      enabled: eventDiscovery.enabled,
+      signaturesFetched: eventDiscovery.signaturesFetched,
+      signaturesParsed: eventDiscovery.signaturesParsed,
+      eventsFound: eventDiscovery.eventsFound,
+      unavailableSignatures: eventDiscovery.unavailableSignatures,
+      backlogCapped: eventDiscovery.backlogCapped,
+      windowTruncated: eventDiscovery.windowTruncated,
+      exactPoolsResolved: eventDiscovery.pools.length,
+    },
+  };
 }

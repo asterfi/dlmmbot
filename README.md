@@ -34,6 +34,14 @@ score/alpha admission, sizing, reserves, rent, execution, management,
 reconciliation, and accounting. Token-side Eys proposals are recorded but fail
 closed until a core-owned funding/accounting service is available.
 
+The scanner also has an opt-in, bounded Meteora DLMM event-intake path. It polls the
+configured Solana RPC (Helius recommended), decodes published pool-initialization
+instructions, persists signatures, resolves the exact pool through Datapi, and can
+fetch direct GMGN `token info` for the event mint so Eys can see a fresh 1m row even
+when the mint is outside the capped trending snapshot. It supplements the normal
+sweep and never bypasses core gates. `[discovery].event_intake_enabled = false` is
+the tracked default.
+
 ### Optional local Laya gate
 
 The Eys plugin can send a bounded normalized snapshot to a localhost Laya

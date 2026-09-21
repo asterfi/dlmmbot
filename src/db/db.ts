@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { resolveBuildLabel } from "../buildLabel.js";
-import { currentMode } from "../config.js";
+import { config, currentMode } from "../config.js";
 import { presentError } from "../errors/present.js";
 
 // Schema per STRATEGY.md §7. On-chain state is the source of truth for live
@@ -35,6 +35,48 @@ CREATE TABLE IF NOT EXISTS pools (
   bin_step INTEGER,
   base_fee_pct REAL,
   first_seen INTEGER NOT NULL
+);
+
+-- Bounded, restart-safe Meteora DLMM event intake. Raw signatures are kept
+-- separately from decoded pool events so non-pool transactions advance the
+-- checkpoint without being re-fetched forever.
+CREATE TABLE IF NOT EXISTS discovery_signatures (
+  signature TEXT PRIMARY KEY,
+  slot INTEGER NOT NULL,
+  block_time INTEGER,
+  observed_ts INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  processed_ts INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_signatures_slot ON discovery_signatures(slot);
+
+CREATE TABLE IF NOT EXISTS discovery_pool_events (
+  signature TEXT NOT NULL,
+  instruction_index TEXT NOT NULL,
+  slot INTEGER NOT NULL,
+  block_time INTEGER,
+  pool TEXT NOT NULL,
+  mint_x TEXT NOT NULL,
+  mint_y TEXT NOT NULL,
+  instruction TEXT NOT NULL,
+  observed_ts INTEGER NOT NULL,
+  PRIMARY KEY (signature, instruction_index)
+);
+
+CREATE TABLE IF NOT EXISTS discovery_backfill_ranges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  before_signature TEXT NOT NULL,
+  until_signature TEXT NOT NULL,
+  created_ts INTEGER NOT NULL,
+  UNIQUE (before_signature, until_signature)
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_pool_events_observed ON discovery_pool_events(observed_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_discovery_pool_events_pool ON discovery_pool_events(pool, observed_ts DESC);
+
+CREATE TABLE IF NOT EXISTS discovery_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS pool_snapshots (
@@ -271,7 +313,17 @@ function migrate(database: Database.Database): void {
   database.pragma("journal_mode = WAL");
   database.pragma(`journal_size_limit = ${WAL_SIZE_LIMIT_BYTES}`);
   database.exec(SCHEMA);
-  // Idempotent migrations for columns added after the initial schema.
+  // Discovery signatures gained retry/status columns after the initial opt-in
+  // implementation. Keep existing local DBs restart-safe when the feature is
+  // upgraded without destructive migration.
+  for (const col of [
+    "status TEXT NOT NULL DEFAULT 'pending'",
+    "attempts INTEGER NOT NULL DEFAULT 0",
+    "processed_ts INTEGER",
+  ]) {
+    try { database.exec(`ALTER TABLE discovery_signatures ADD COLUMN ${col}`); } catch { /* column already exists */ }
+  }
+  database.exec("CREATE INDEX IF NOT EXISTS idx_discovery_signatures_pending ON discovery_signatures(status, slot)");
   try {
     database.exec("ALTER TABLE positions ADD COLUMN ever_in_range INTEGER NOT NULL DEFAULT 0");
   } catch { /* column already exists */ }
@@ -587,7 +639,8 @@ export function recordCreatorRug(creator: string, reason = "rugged token (P0)"):
 }
 
 /**
- * Bound the two append-only tables that grow every sweep.
+ * Bound the append-only decision, snapshot, and discovery tables that grow
+ * during scanning.
  *
  * Nothing pruned them before: the Railway volume was 83% full inside a day and
  * a 200-hour local run had 27 MB of `decisions` — ~100 gate-rejection rows an
@@ -597,6 +650,9 @@ export function recordCreatorRug(creator: string, reason = "rugged token (P0)"):
  *  - `skipped` rows feed the dashboard funnel, whose longest range is 30 days.
  *  - `pool_snapshots` is read `ORDER BY ts DESC LIMIT 1` per pool; the rest is
  *    an offline replay dataset that no one has replayed. Kept a few days.
+ *  - discovery signatures/events are a bounded intake ledger; recent event rows
+ *    remain available for the configured event TTL, while old observations are
+ *    disposable because the slot checkpoint prevents reprocessing them.
  * Returns the row counts removed so the caller can log a non-zero sweep.
  */
 /** Bytes the SQLite file currently occupies on disk (pages × page size). */
@@ -610,6 +666,7 @@ export function dbFileBytes(): number {
 export interface PruneResult {
   decisions: number;
   snapshots: number;
+  discovery: number;
   vacuumed: boolean;
   /** Which rule fired: the age windows, or the size ceiling. */
   mode: "age" | "size" | "none";
@@ -684,16 +741,23 @@ export function pruneHistory(opts: {
   let snapshots = db.prepare(
     "DELETE FROM pool_snapshots WHERE ts < ?"
   ).run(t - opts.snapshotDays * 86_400).changes;
-  let mode: PruneResult["mode"] = decisions + snapshots > 0 ? "age" : "none";
+  const discoveryCutoff = t - Math.max(86_400, config().discovery.event_ttl_s * 2);
+  let discovery = db.prepare(
+    "DELETE FROM discovery_pool_events WHERE observed_ts < ?"
+  ).run(discoveryCutoff).changes;
+  discovery += db.prepare(
+    "DELETE FROM discovery_signatures WHERE status <> 'pending' AND observed_ts < ?"
+  ).run(discoveryCutoff).changes;
+  let mode: PruneResult["mode"] = decisions + snapshots + discovery > 0 ? "age" : "none";
 
   // Size ceiling second. The age windows are calibrated to what the dashboard
   // READS (30 days of funnel), not to what the volume can HOLD — and on a
   // one-day-old install nothing is older than 30 days, so the age rule pruned
   // zero rows, printed nothing, and the Railway volume filled to ENOSPC
   // overnight at ~890 rejection rows/hour. Below the ceiling this is a no-op;
-  // above it, trim the two append-only tables oldest-first in chunks until the
-  // file is under the ceiling. entered/exited rows are never touched here
-  // either — they are the audit trail and are rare.
+  // above it, trim old snapshots, skipped decisions, and completed discovery
+  // evidence oldest-first in chunks until the file is under the ceiling. Pending
+  // signatures and active backfill ranges are never touched.
   //
   // Note the file does not shrink on DELETE; VACUUM below gives the space back.
   // We measure "used pages" rather than file size for the loop so freed pages
@@ -708,15 +772,22 @@ export function pruneHistory(opts: {
     };
     let guard = 0;
     while (usedBytes() > ceiling && guard++ < 200) {
-      const s = db.prepare(
+      const snapshotRows = db.prepare(
         "DELETE FROM pool_snapshots WHERE rowid IN (SELECT rowid FROM pool_snapshots ORDER BY ts ASC LIMIT 5000)"
       ).run().changes;
-      const d = db.prepare(
+      const decisionRows = db.prepare(
         `DELETE FROM decisions WHERE rowid IN (SELECT rowid FROM decisions WHERE action = 'skipped' AND ${NOT_TELEMETRY_SQL} AND ${BACKFILLED_SQL} ORDER BY ts ASC LIMIT 5000)`
       ).run().changes;
-      snapshots += s;
-      decisions += d;
-      if (s + d === 0) break; // nothing prunable left — never touch entered/exited or telemetry
+      const eventRows = db.prepare(
+        "DELETE FROM discovery_pool_events WHERE rowid IN (SELECT rowid FROM discovery_pool_events WHERE observed_ts < ? ORDER BY observed_ts ASC LIMIT 5000)"
+      ).run(discoveryCutoff).changes;
+      const signatureRows = db.prepare(
+        "DELETE FROM discovery_signatures WHERE rowid IN (SELECT rowid FROM discovery_signatures WHERE status <> 'pending' AND observed_ts < ? ORDER BY observed_ts ASC LIMIT 5000)"
+      ).run(discoveryCutoff).changes;
+      snapshots += snapshotRows;
+      decisions += decisionRows;
+      discovery += eventRows + signatureRows;
+      if (snapshotRows + decisionRows + eventRows + signatureRows === 0) break;
       mode = "size";
     }
   }
@@ -726,10 +797,10 @@ export function pruneHistory(opts: {
   // data, so on a FULL disk it can fail — hence the try, and hence the size
   // loop above deleting first so there is something to reclaim.
   let vacuumed = false;
-  if (decisions + snapshots >= 10_000 || mode === "size") {
+  if (decisions + snapshots + discovery >= 10_000 || mode === "size") {
     try { db.exec("VACUUM"); vacuumed = true; } catch { /* no scratch space or busy — next pass */ }
   }
-  return { decisions, snapshots, vacuumed, mode, bytesBefore, bytesAfter: dbFileBytes() };
+  return { decisions, snapshots, discovery, vacuumed, mode, bytesBefore, bytesAfter: dbFileBytes() };
 }
 
 /**

@@ -140,6 +140,7 @@ function normalize(p: RawPool): PoolInfo & { extras: RawPoolExtras } {
     feeTvl24hPct: p.fee_tvl_ratio?.["24h"] ?? 0,
     // collect_fee_mode: 0 = both tokens, 1 = quote only (verified on-chain 2026-08-07).
     feesBothTokens: p.pool_config.collect_fee_mode === 0,
+    isBlacklisted: p.is_blacklisted !== false,
     createdAt: p.created_at ? new Date(p.created_at).toISOString() : null,
     extras: {
       holders: p.token_x.holders,

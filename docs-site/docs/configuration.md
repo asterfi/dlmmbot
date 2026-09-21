@@ -26,6 +26,23 @@ Every knob the bot obeys lives in one TOML file. Key facts before the tables:
 | `retain_skipped_days` | `30` | Prune `skipped` decision rows older than this (hourly). `entered`/`exited` rows — the audit trail — are **never** pruned. Nothing pruned these before; a Railway volume hit 83% inside a day |
 | `retain_snapshots_days` | `3` | Prune `pool_snapshots` older than this. Only the latest row per pool is read; the rest was an offline replay dataset. Every ~300-row sweep lands here |
 
+## `[discovery]` — optional exact-pool event intake
+
+This source is **off by default** and supplements, rather than replaces, the ranked Meteora Datapi sweep. When enabled it polls the configured Solana RPC (Helius recommended), paginates a bounded signature window for the Meteora DLMM program, persists a restart-safe signature queue, decodes published pool-initialization instructions, resolves exact `lbPair` addresses through Datapi, and enriches event mints through GMGN direct `token info` for a genuine `1m` flow row. Window truncation, backlog caps, and unavailable parsed transactions are surfaced in telemetry; they do not authorize entries.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `event_intake_enabled` | `false` | Enable the supplemental Meteora event source |
+| `max_signatures_per_poll` | `100` | RPC signatures per page |
+| `max_signature_pages_per_poll` | `4` | Maximum pages per scan; a full bound is reported as `windowTruncated` |
+| `max_transactions_per_poll` | `25` | Maximum pending signatures parsed per scan |
+| `max_transaction_retries` | `3` | Null parsed transactions are retried this many times before `unavailable` |
+| `max_pending_signatures` | `1000` | Maximum pending signatures retained; the head cursor pauses when full |
+| `max_backfill_ranges` | `8` | Maximum active pagination gaps retained; new head advancement pauses when full |
+| `event_ttl_s` | `21600` | How long decoded events remain eligible for exact-pool resolution |
+| `max_event_pools` | `25` | Maximum recent event pools considered per scan |
+| `pool_fetch_concurrency` | `4` | Concurrent Datapi lookups for exact event pools |
+
 ## `[gates]` — pool hard gates
 
 | Key | Default | Meaning |

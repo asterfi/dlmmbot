@@ -369,6 +369,8 @@ export function _resetGmgnPaceForTests(): void {
   spendWindowWeight = 0;
   buckets.clear();
   cache = null;
+  infoCache.clear();
+  infoCursor = 0;
   secCache.clear();
   tagCache.clear();
 }
@@ -466,52 +468,330 @@ export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
   return byMint;
 }
 
+// --- Direct token-info enrichment for exact event discoveries ---
+
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonRecord
+    : null;
+}
+
+function asNumber(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function asBool(value: unknown): boolean {
+  return value === true || value === 1 || value === "1" || value === "true" || value === "yes";
+}
+
+function tokenInfoPayload(raw: string): JsonRecord | null {
+  let root: unknown;
+  try {
+    root = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const envelope = asRecord(root);
+  let data: unknown = envelope?.data ?? root;
+  const dataRecord = asRecord(data);
+  if (dataRecord?.token && asRecord(dataRecord.token)) data = dataRecord.token;
+  return asRecord(data);
+}
+
+/** Parse the documented `token info --raw` shape; unknown fields fail closed. */
+export function parseTokenInfo(raw: string): GmgnTrendingToken | null {
+  const data = tokenInfoPayload(raw);
+  if (!data) return null;
+  const price = asRecord(data.price) ?? {};
+  const pool = asRecord(data.pool) ?? {};
+  const dev = asRecord(data.dev) ?? {};
+  const stat = asRecord(data.stat) ?? {};
+  const address = asString(data.address);
+  if (!address) return null;
+
+  const currentPrice = asNumber(price.price);
+  const startPrice1h = asNumber(price.price_1h);
+  const priceChangePct1h = currentPrice > 0 && startPrice1h > 0
+    ? (currentPrice / startPrice1h - 1) * 100
+    : 0;
+  const supply = asNumber(data.circulating_supply);
+  const marketCap = asNumber(data.market_cap) || currentPrice * supply;
+  const top10 = asNumber(dev.top_10_holder_rate ?? stat.top_10_holder_rate);
+
+  return {
+    address,
+    symbol: asString(data.symbol),
+    priceChangePct1h,
+    volumeUsd: asNumber(price.volume_1m),
+    liquidityUsd: asNumber(data.liquidity ?? pool.liquidity),
+    marketCapUsd: marketCap,
+    holderCount: asNumber(data.holder_count),
+    top10HolderRate: top10,
+    renouncedMint: asBool(data.renounced_mint),
+    renouncedFreeze: asBool(data.renounced_freeze_account),
+    launchpad: asString(data.launchpad_platform ?? data.launchpad),
+    creator: asString(dev.creator_address ?? data.creator),
+    openTimestamp: asNumber(data.open_timestamp ?? data.creation_timestamp),
+  };
+}
+
+const infoCache = new Map<string, { at: number; token: GmgnTrendingToken }>();
+const MAX_DIRECT_INFO_CALLS = 5;
+const MAX_INFO_CACHE_ENTRIES = 1000;
+let infoCursor = 0;
+
+function trimInfoCache(): void {
+  while (infoCache.size > MAX_INFO_CACHE_ENTRIES) {
+    const oldest = [...infoCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]?.[0];
+    if (!oldest) break;
+    infoCache.delete(oldest);
+  }
+}
+
 // --- Vetting enrichment (phase 1 of GMGN adoption, 2026-08-07) ---
 
 export interface GmgnSecurity {
   honeypot: boolean;
   sellTaxPct: number;
   buyTaxPct: number;
+  renouncedMint: boolean | null;
+  renouncedFreeze: boolean | null;
+  /** Internal sentinel: a response arrived but could not be trusted. */
+  invalid?: boolean;
 }
 
 const SECURITY_FIELDS = ["honeypot", "is_honeypot", "can_not_sell", "sell_tax", "buy_tax"];
-const ENRICH_TTL_MS = 300_000;
+const ENRICH_TTL_MS = 60_000;
 const secCache = new Map<string, { at: number; v: GmgnSecurity | null }>();
 const tagCache = new Map<string, { at: number; v: TraderTagStats | null }>();
 
-/** Exported for tests: parse a raw `token security` payload. null = unrecognizable. */
-export function parseTokenSecurity(raw: string): GmgnSecurity | null {
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  // Like every other endpoint, --raw wraps the payload in { code, data }.
-  // Unwrap up to two levels (some endpoints nest data.security-style objects).
-  let d = parsed;
-  for (let i = 0; i < 2 && typeof d.data === "object" && d.data !== null; i++) {
-    d = d.data as Record<string, unknown>;
+type SecurityParseResult = { value: GmgnSecurity | null; invalid: boolean };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function strictBoolean(value: unknown): boolean | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number" && (value === 0 || value === 1)) return value === 1;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") return true;
+    if (normalized === "false" || normalized === "0") return false;
   }
-  // Fail closed on shape drift: no recognizable security field means we know
-  // NOTHING — never synthesize honeypot=false from a payload we can't read.
-  if (!SECURITY_FIELDS.some((k) => k in d)) return null;
+  return null;
+}
+
+function strictNumber(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && /^[+-]?(?:\\d+\\.?\\d*|\\.\\d+)$/.test(value.trim())) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function parseTokenSecurityInternal(raw: string): SecurityParseResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { value: null, invalid: true };
+  }
+  if (!isRecord(parsed)) return { value: null, invalid: true };
+  let d = parsed;
+  for (let i = 0; i < 2 && isRecord(d.data); i++) d = d.data;
+  // A response without any known security field is shape drift, not a safe result.
+  if (!SECURITY_FIELDS.some((key) => key in d)) return { value: null, invalid: true };
+
+  const honeypot = strictBoolean(d.honeypot ?? d.is_honeypot);
+  const cannotSell = strictBoolean(d.can_not_sell);
+  const sellTax = strictNumber(d.sell_tax);
+  const buyTax = strictNumber(d.buy_tax);
+  const renouncedMint = strictBoolean(d.renounced_mint);
+  const renouncedFreeze = strictBoolean(d.renounced_freeze_account);
+  const invalidTax = [sellTax, buyTax].some((value) => value !== undefined && value !== null && (value < 0 || value > 1));
+  if (invalidTax || [honeypot, cannotSell, sellTax, buyTax, renouncedMint, renouncedFreeze].some((value) => value === null)) {
+    return { value: null, invalid: true };
+  }
   return {
-    honeypot: Number(d.honeypot ?? d.is_honeypot ?? 0) === 1 || Number(d.can_not_sell ?? 0) === 1,
-    sellTaxPct: Number(d.sell_tax ?? 0) * 100,
-    buyTaxPct: Number(d.buy_tax ?? 0) * 100,
+    invalid: false,
+    value: {
+      honeypot: honeypot === true || cannotSell === true,
+      sellTaxPct: (sellTax ?? 0) * 100,
+      buyTaxPct: (buyTax ?? 0) * 100,
+      renouncedMint: renouncedMint ?? null,
+      renouncedFreeze: renouncedFreeze ?? null,
+    },
   };
 }
 
-/** Token security cross-check. null = unavailable (no key / API failure / unrecognizable payload) — vet.ts records the blind spot. */
+/** Exported for tests: parse a raw `token security` payload. null = unrecognizable or invalid. */
+export function parseTokenSecurity(raw: string): GmgnSecurity | null {
+  return parseTokenSecurityInternal(raw).value;
+}
+
+function invalidSecurity(): GmgnSecurity {
+  return {
+    honeypot: false,
+    sellTaxPct: 0,
+    buyTaxPct: 0,
+    renouncedMint: null,
+    renouncedFreeze: null,
+    invalid: true,
+  };
+}
+
+/** Token security cross-check. Transport failure remains unavailable; invalid payloads fail closed. */
 export async function tokenSecurity(mint: string): Promise<GmgnSecurity | null> {
-  if (!env().gmgnApiKey || !gmgnSpendOk(1, "token")) return null;
   const hit = secCache.get(mint);
   if (hit && Date.now() - hit.at < ENRICH_TTL_MS) return hit.v;
+  if (!env().gmgnApiKey || !gmgnSpendOk(1, "token")) return null;
   try {
-    const raw = await cli(["token", "security", "--chain", "sol", "--address", mint, "--raw"]);
-    const sec = parseTokenSecurity(raw);
-    if (!sec) console.warn(`[gmgn] token security payload unrecognizable for ${mint} — honeypot gate skipped`);
-    secCache.set(mint, { at: Date.now(), v: sec });
-    return sec;
+    const parsed = parseTokenSecurityInternal(await cli(["token", "security", "--chain", "sol", "--address", mint, "--raw"]));
+    if (parsed.invalid || !parsed.value) {
+      const invalid = invalidSecurity();
+      secCache.set(mint, { at: Date.now(), v: invalid });
+      logError({
+        source: "gmgn",
+        code: "token_security_shape",
+        level: "warn",
+        message: `token security payload for ${mint} was invalid; vetting will fail closed`,
+        dedupeSec: 300,
+      });
+      return invalid;
+    }
+    secCache.set(mint, { at: Date.now(), v: parsed.value });
+    return parsed.value;
   } catch {
     return null;
   }
+}
+
+/**
+ * Direct GMGN enrichment for event-discovered mints. This is intentionally
+ * separate from the capped trending feed: an exact Meteora event must not be
+ * discarded merely because the mint was outside the top-100 snapshot.
+ *
+ * The result is represented as a fresh 1m presence so Eys can apply its normal
+ * flow/freshness gate. No direct token-info row changes core scoring bonuses.
+ */
+export async function tokenInfoByMint(mints: readonly string[]): Promise<Map<string, GmgnPresence>> {
+  const out = new Map<string, GmgnPresence>();
+  if (!config().gmgn.enabled || !env().gmgnApiKey || gmgnIsBanned()) return out;
+
+  const unique = [...new Set(mints)].filter(Boolean);
+  if (!unique.length) return out;
+  const start = infoCursor % unique.length;
+  let fetchedCount = 0;
+  for (let offset = 0; offset < unique.length; offset++) {
+    const mint = unique[(start + offset) % unique.length]!;
+    const cached = infoCache.get(mint);
+    const cachedFresh = cached != null && Date.now() - cached.at < ENRICH_TTL_MS;
+    let token = cachedFresh ? cached!.token : null;
+    let fetchedAtMs = cachedFresh ? cached!.at : 0;
+    if (!token) {
+      if (fetchedCount >= MAX_DIRECT_INFO_CALLS) continue;
+      fetchedCount++;
+      try {
+        const raw = await cli(["token", "info", "--chain", "sol", "--address", mint, "--raw"]);
+        token = parseTokenInfo(raw);
+        if (!token || token.address !== mint) {
+          logError({
+            source: "gmgn",
+            code: "token_info_shape",
+            level: "warn",
+            message: `direct token info for ${mint} did not contain the requested mint`,
+            dedupeSec: 300,
+          });
+          continue;
+        }
+        if (config().vetting.gmgn_security_enabled) {
+          const security = await tokenSecurity(mint);
+          if (security) {
+            const enriched = { ...token };
+            if (security.renouncedMint !== null) enriched.renouncedMint = security.renouncedMint;
+            if (security.renouncedFreeze !== null) enriched.renouncedFreeze = security.renouncedFreeze;
+            token = enriched;
+          }
+        }
+        fetchedAtMs = Date.now();
+        infoCache.set(mint, { at: fetchedAtMs, token });
+        trimInfoCache();
+      } catch (error) {
+        const message = (error as Error).message;
+        if (!/429|cooling down|RATE_LIMIT/i.test(message)) {
+          logError({
+            source: "gmgn",
+            code: "token_info_fetch",
+            level: "warn",
+            message: `direct token info ${mint}: ${message}`.slice(0, 800),
+            dedupeSec: 300,
+          });
+        }
+        continue;
+      }
+    }
+    if (!token) continue;
+    out.set(mint, {
+      token,
+      intervals: new Set(["1m"]),
+      tokenByInterval: new Map([["1m", token]]),
+      fetchedAtMsByInterval: new Map([["1m", fetchedAtMs || Date.now()]]),
+    });
+  }
+  infoCursor = (start + Math.max(1, fetchedCount)) % unique.length;
+  return out;
+}
+
+/** Merge interval rows without mutating the cached trending map. */
+export function mergeGmgnPresenceMaps(
+  primary: ReadonlyMap<string, GmgnPresence>,
+  supplemental: ReadonlyMap<string, GmgnPresence>,
+): Map<string, GmgnPresence> {
+  const out = new Map<string, GmgnPresence>();
+  for (const [mint, presence] of primary) {
+    out.set(mint, {
+      token: presence.token,
+      intervals: new Set(presence.intervals),
+      tokenByInterval: new Map(presence.tokenByInterval),
+      fetchedAtMsByInterval: new Map(presence.fetchedAtMsByInterval),
+    });
+  }
+  for (const [mint, presence] of supplemental) {
+    const existing = out.get(mint);
+    if (!existing) {
+      out.set(mint, {
+        token: presence.token,
+        intervals: new Set(presence.intervals),
+        tokenByInterval: new Map(presence.tokenByInterval),
+        fetchedAtMsByInterval: new Map(presence.fetchedAtMsByInterval),
+      });
+      continue;
+    }
+    for (const interval of presence.intervals) {
+      const incomingAt = presence.fetchedAtMsByInterval.get(interval) ?? 0;
+      const existingAt = existing.fetchedAtMsByInterval.get(interval) ?? 0;
+      if (incomingAt >= existingAt) {
+        const incoming = presence.tokenByInterval.get(interval);
+        if (incoming) existing.tokenByInterval.set(interval, incoming);
+        existing.fetchedAtMsByInterval.set(interval, incomingAt);
+      }
+      existing.intervals.add(interval);
+    }
+    const oneMinute = existing.tokenByInterval.get("1m");
+    if (oneMinute) existing.token = oneMinute;
+  }
+  return out;
 }
 
 const RISK_TAGS = ["bundler", "rat_trader", "sniper", "dev_team"];

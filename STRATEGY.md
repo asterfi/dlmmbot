@@ -44,11 +44,12 @@ Runs every `[60s]`. The scan fires from inside the manage tick, so it can only s
 
 1. **Pool sweep** — `GET dlmm.datapi.meteora.ag/pools`
    `filter_by: is_blacklisted=false && tvl > [5000]`, `sort_by: fee_tvl_ratio_30m:desc`, first `[3]` pages.
+1a. **Optional exact-pool event intake** — when `[discovery].event_intake_enabled = true`, poll the configured Solana RPC (Helius recommended) for a bounded recent window of Meteora DLMM program signatures; decode only published pool-initialization discriminators and persist the signature/checkpoint evidence. Resolve each decoded `lbPair` address directly through Datapi and verify the event mint pair matches Datapi before merging it into this scan. This supplements the ranked sweep; it never bypasses pool gates, vetting, sizing, rent, quote, or executor checks. The default is **off**.
 2. **Dedupe to canonical token** — group pools by token mint; if multiple tokens share a symbol (copycats), only the one with the highest 24h volume is considered; the rest are ignored for `[24h]`.
 3. **Per-token: pick the best pool** — the **deepest** (highest TVL) among that token's pools that pass pool gates (§2.1); `fee_tvl_ratio_24h` breaks ties only within `[25%]` of the deepest pool's TVL. One pool per token. *Was* "highest fee/TVL" — and since fee/TVL is inversely proportional to TVL, that structurally picked the *thinnest* sibling (measured 2026-08-15: 11 of 18 multi-pool mints on the board, and in 9 of those the deeper pool also had more absolute volume). Thin pools cost twice: less fee income, because volume happens where depth is; and TVL that swings 40–50% on ordinary LP repositioning, which is exactly what P0 `tvl_drain` reads as a rug — same token, same 4 minutes, an $8k pool swung 51% while its $67k sibling moved 9%. The gates are the family boundary: a bin-20 pool is never an alternative to a bin-100 pool because `bin_step_new` rejects it, so depth is compared only across shapes the strategy already accepts.
 4. Output: scored candidates → vetting (§3) → entry queue.
 
-Optional secondary source `[off by default]`: GMGN trending list as a *discovery* input (requires API key). Never a substitute for our own vetting.
+Optional secondary source `[off by default]`: GMGN trending list as a *discovery* input (requires API key), plus direct `token info` enrichment for exact event-discovered mints when the event intake is enabled. The direct row supplies the genuine `1m` volume evidence for Eys; it does not add a core score bonus by itself. Never a substitute for our own vetting.
 
 ### 1.1 Three-tier sleeves (shipped 2026-08-13)
 

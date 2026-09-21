@@ -20,7 +20,13 @@ import type { GmgnPresence, GmgnTrendingToken } from "./gmgn.js";
 describe("parseTokenSecurity", () => {
   it("unwraps the --raw { code, data } envelope like every other endpoint", () => {
     const raw = JSON.stringify({ code: 0, data: { honeypot: 1, sell_tax: 0.05, buy_tax: 0.01 } });
-    expect(parseTokenSecurity(raw)).toEqual({ honeypot: true, sellTaxPct: 5, buyTaxPct: 1 });
+    expect(parseTokenSecurity(raw)).toEqual({
+      honeypot: true,
+      sellTaxPct: 5,
+      buyTaxPct: 1,
+      renouncedMint: null,
+      renouncedFreeze: null,
+    });
   });
 
   it("handles nested data envelopes", () => {
@@ -30,7 +36,22 @@ describe("parseTokenSecurity", () => {
 
   it("still reads top-level fields when there is no envelope", () => {
     const raw = JSON.stringify({ honeypot: 0, sell_tax: 0, buy_tax: 0 });
-    expect(parseTokenSecurity(raw)).toEqual({ honeypot: false, sellTaxPct: 0, buyTaxPct: 0 });
+    expect(parseTokenSecurity(raw)).toEqual({
+      honeypot: false,
+      sellTaxPct: 0,
+      buyTaxPct: 0,
+      renouncedMint: null,
+      renouncedFreeze: null,
+    });
+  });
+
+  it("rejects malformed boolean, numeric, and JSON security values", () => {
+    expect(parseTokenSecurity(JSON.stringify({ honeypot: "maybe", sell_tax: 0 }))).toBeNull();
+    expect(parseTokenSecurity(JSON.stringify({ honeypot: 0, sell_tax: "bad", buy_tax: 0 }))).toBeNull();
+    expect(parseTokenSecurity(JSON.stringify({ honeypot: 0, sell_tax: -0.01, buy_tax: 0 }))).toBeNull();
+    expect(parseTokenSecurity(JSON.stringify({ honeypot: 0, sell_tax: 1.01, buy_tax: 0 }))).toBeNull();
+    expect(parseTokenSecurity(JSON.stringify({ honeypot: 0, sell_tax: 0, buy_tax: -1 }))).toBeNull();
+    expect(parseTokenSecurity("{not-json")).toBeNull();
   });
 
   it("returns null (not honeypot=false) when no security field is recognizable", () => {

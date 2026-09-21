@@ -62,6 +62,22 @@ retain_snapshots_days = 3
 # never touched. Set well under your volume size — Railway's default is 0.5 GB.
 db_max_mb = 200
 
+[discovery]
+# Opt-in only. Uses the configured Solana RPC (Helius is recommended) to poll
+# recent Meteora DLMM program signatures, resolve exact pool-creation accounts,
+# and supplement—not replace—the Datapi sweep. Keep false until replay checks pass.
+event_intake_enabled = false
+max_signatures_per_poll = 100
+max_signature_pages_per_poll = 4
+max_transactions_per_poll = 25
+max_transaction_retries = 3
+# Hard bounds on retained intake work; when full, the head cursor does not advance.
+max_pending_signatures = 1000
+max_backfill_ranges = 8
+event_ttl_s = 21600
+max_event_pools = 25
+pool_fetch_concurrency = 4
+
 [gates]                    # STRATEGY.md §2.1 — pool hard gates
 tvl_min_usd = 5000
 tvl_max_usd = 2000000

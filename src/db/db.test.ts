@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { describeError, getDb, isBlacklisted, REALIZED_PNL_SQL, STRANDED_GRACE_S, TELEMETRY_GATES, WAL_SIZE_LIMIT_BYTES, logError, now, pruneHistory, recordConfigSnapshot, recordCreatorRug, recordDecision, upsertTokenMeta } from "./db.js";
-import { readdirSync, readFileSync } from "node:fs";
+import { describeError, getDb, isBlacklisted, openDb, REALIZED_PNL_SQL, STRANDED_GRACE_S, TELEMETRY_GATES, WAL_SIZE_LIMIT_BYTES, logError, now, pruneHistory, recordConfigSnapshot, recordCreatorRug, recordDecision, upsertTokenMeta } from "./db.js";
+import Database from "better-sqlite3";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { useTempDb } from "../test/db.js";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { useMemoryDb, resetTestDb, insertClosedPosition } from "../test/db.js";
 
@@ -11,6 +13,25 @@ function pnlFor(id: number): number | null {
     `SELECT (${REALIZED_PNL_SQL}) AS pnl FROM positions WHERE id = ?`
   ).get(id) as { pnl: number | null }).pnl;
 }
+
+describe("discovery schema migration", () => {
+  it("migrates an old signature table before creating the pending index", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dlmm-old-db-"));
+    const path = join(dir, "farmer.db");
+    const old = new Database(path);
+    old.exec("CREATE TABLE discovery_signatures (signature TEXT PRIMARY KEY, slot INTEGER NOT NULL, block_time INTEGER, observed_ts INTEGER NOT NULL)");
+    old.exec("CREATE TABLE positions (id INTEGER PRIMARY KEY, state TEXT NOT NULL DEFAULT 'open')");
+    old.close();
+
+    const migrated = openDb(path);
+    const columns = new Set((migrated.prepare("PRAGMA table_info(discovery_signatures)").all() as Array<{ name: string }>).map((row) => row.name));
+    const indexes = (migrated.prepare("PRAGMA index_list(discovery_signatures)").all() as Array<{ name: string }>).map((row) => row.name);
+    expect([...columns]).toEqual(expect.arrayContaining(["status", "attempts", "processed_ts"]));
+    expect(indexes).toContain("idx_discovery_signatures_pending");
+    migrated.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
 
 describe("REALIZED_PNL_SQL", () => {
   beforeEach(() => useMemoryDb());
@@ -289,6 +310,23 @@ describe("pruneHistory", () => {
     expect(r).toMatchObject({ decisions: 1, snapshots: 1, vacuumed: false, mode: "age" });
     expect(count("SELECT COUNT(*) c FROM decisions")).toBe(1);
     expect(count("SELECT COUNT(*) c FROM pool_snapshots")).toBe(1);
+  });
+
+  it("preserves pending signatures and active backfill ranges", () => {
+    const db = getDb();
+    const t = now();
+    db.prepare("INSERT INTO discovery_signatures (signature, slot, block_time, observed_ts, status, attempts, processed_ts) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("pending-old", 1, null, t - 100 * DAY, "pending", 0, null);
+    db.prepare("INSERT INTO discovery_signatures (signature, slot, block_time, observed_ts, status, attempts, processed_ts) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("processed-old", 2, null, t - 100 * DAY, "processed", 0, t - 100 * DAY);
+    db.prepare("INSERT INTO discovery_backfill_ranges (before_signature, until_signature, created_ts) VALUES (?, ?, ?)")
+      .run("before-old", "until-old", t - 100 * DAY);
+
+    const result = pruneHistory({ skippedDays: 30, snapshotDays: 3 });
+    expect(result.discovery).toBe(1);
+    expect(count("SELECT COUNT(*) c FROM discovery_signatures WHERE status='pending'")).toBe(1);
+    expect(count("SELECT COUNT(*) c FROM discovery_backfill_ranges")).toBe(1);
+    expect(count("SELECT COUNT(*) c FROM discovery_signatures WHERE status='processed'")).toBe(0);
   });
 
   it("never prunes entered or exited rows, however old", () => {

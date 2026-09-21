@@ -33,6 +33,7 @@ GMGN API key: https://gmgn.ai/ai (optional — see docs/setup/api-keys)
 ## Product facts
 
 - Scans SOL-quoted Meteora DLMM pools, vets tokens, opens one-sided SOL LP, exits by fixed rules
+- Optional **off-by-default** DLMM event intake paginates RPC signatures, persists retries, resolves exact pools, and enriches event-only mints with GMGN `1m` flow; it supplements the sweep and cannot bypass hard gates
 - Dashboard: overview, book, analytics, activity, errors, research, wiki (strategy/ops manual), changes, settings
 - Update toasts when GitHub is ahead or the bot restarts on a new build; BEHIND build pill pulses
 - Errors tab streams structured runtime errors over WebSocket (copy dump / open GitHub issue)

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join, resolve } from "node:path";
 import { config } from "../config.js";
 import { mapLimit } from "../concurrent.js";
-import { gmgnOneMinuteFlow, trendingByMint } from "../scanner/gmgn.js";
+import { gmgnOneMinuteFlow, mergeGmgnPresenceMaps, tokenInfoByMint, trendingByMint } from "../scanner/gmgn.js";
 import type { Candidate } from "../types.js";
 import { binArraysSpanned, binIdToPrice, priceToBinId } from "../ranges/planner.js";
 import type {
@@ -252,8 +252,12 @@ async function refreshPositionFlow(poolAddress: string, tokenMint: string): Prom
   if (nowMs - previous < cfg.flow_refresh_s * 1000) return;
   lastRefresh.set(poolAddress, nowMs);
   try {
+    const primary = await trendingByMint();
+    const presence = primary.get(tokenMint)?.tokenByInterval.has("1m")
+      ? primary.get(tokenMint)
+      : mergeGmgnPresenceMaps(primary, await tokenInfoByMint([tokenMint])).get(tokenMint);
     const flow = gmgnOneMinuteFlow(
-      (await trendingByMint()).get(tokenMint),
+      presence,
       nowMs,
       cfg.observation_ttl_s * 1000,
     );

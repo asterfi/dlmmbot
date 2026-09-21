@@ -13,6 +13,7 @@ export function poolGates(p: PoolInfo & { extras: RawPoolExtras }): GateFailure[
   const fail = (gate: string, value: unknown, limit: unknown) =>
     fails.push({ gate, value: String(value), limit: String(limit) });
 
+  if (p.isBlacklisted === true) fail("pool_blacklisted", "true", "false");
   if (p.tvlUsd < g.tvl_min_usd) fail("tvl_min", p.tvlUsd.toFixed(0), g.tvl_min_usd);
   if (p.tvlUsd > g.tvl_max_usd) fail("tvl_max", p.tvlUsd.toFixed(0), g.tvl_max_usd);
 

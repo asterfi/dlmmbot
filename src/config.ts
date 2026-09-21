@@ -68,13 +68,27 @@ export interface Config {
      */
     sibling_tvl_tie_pct?: number;
     /**
-     * DB retention for the two append-only tables that grow every sweep.
+     * DB retention for the append-only decision, snapshot, and discovery tables
+     * that grow during scanning.
      * `entered`/`exited` decisions are never pruned. Optional: defaults in code.
      */
     retain_skipped_days?: number;
     retain_snapshots_days?: number;
     /** Hard ceiling on the SQLite file in MB. Above it, skipped decisions and snapshots are trimmed oldest-first regardless of age. */
     db_max_mb?: number;
+  };
+  /** Bounded, opt-in Meteora DLMM event intake over the configured Solana RPC. */
+  discovery: {
+    event_intake_enabled: boolean;
+    max_signatures_per_poll: number;
+    max_signature_pages_per_poll: number;
+    max_transactions_per_poll: number;
+    max_transaction_retries: number;
+    max_pending_signatures: number;
+    max_backfill_ranges: number;
+    event_ttl_s: number;
+    max_event_pools: number;
+    pool_fetch_concurrency: number;
   };
   gates: {
     tvl_min_usd: number; tvl_max_usd: number; mcap_min_usd: number;
@@ -378,7 +392,7 @@ const CONFIG_PATH = resolve(process.env.FARMER_CONFIG_PATH!);
 // file — swapping it in would make gate comparisons like `tvl < undefined`
 // silently false, i.e. hard gates silently passing.
 const REQUIRED_SECTIONS = [
-  "strategy", "eys", "laya", "scanner", "gates", "vetting", "timing", "score_caps", "smartflow", "score",
+  "strategy", "eys", "laya", "scanner", "discovery", "gates", "vetting", "timing", "score_caps", "smartflow", "score",
   "entry", "manage", "sizing", "follow", "majors", "rotation", "exec", "gmgn",
   "watchdog", "apis",
 ] as const;

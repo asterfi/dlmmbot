@@ -185,6 +185,7 @@ export const WIKI_SECTIONS: WikiSection[] = [
         title: "Candidate pipeline",
         steps: [
           { label: "Sweep pools", detail: "Meteora DLMM list", icon: "radar" },
+          { label: "Event intake (optional)", detail: "Exact Meteora pool creations — off by default", icon: "radar" },
           { label: "Dedupe", detail: "One mint wins per ticker", icon: "check" },
           { label: "Pool gates", detail: "TVL, fees, volume…", icon: "chart" },
           { label: "Pick the pool", detail: "Deepest gate-passing pool per token — not the highest fee/TVL, which picks the thinnest one", icon: "chart" },
@@ -227,7 +228,7 @@ export const WIKI_SECTIONS: WikiSection[] = [
         type: "callout",
         tone: "warn",
         title: "GMGN is paced",
-        text: "Optional trending / honeypot / holder checks share one serial queue with **separate leaky buckets per module** (market, token, track). Local pacing mirrors GMGN’s published limits but cannot see the server’s remaining tokens — another bot on the same key (or a drained bucket after restart) can still 429. Holders/traders cost 5×; trader tags off by default. A real `RATE_LIMIT_*` **parks all GMGN until reset** — queued work is dropped (retries extend the ban). Meteora scanning continues.",
+        text: "Optional trending / honeypot / holder checks share one serial queue with **separate leaky buckets per module** (market, token, track). Exact event-discovered mints can additionally use direct `token info` to recover their genuine 1m flow row, still subject to the same pacing and Eys freshness gate. Local pacing mirrors GMGN’s published limits but cannot see the server’s remaining tokens — another bot on the same key (or a drained bucket after restart) can still 429. Holders/traders cost 5×; trader tags off by default. A real `RATE_LIMIT_*` **parks all GMGN until reset** — queued work is dropped (retries extend the ban). Meteora scanning continues.",
       },
     ],
   },

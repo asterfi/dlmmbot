@@ -21,6 +21,7 @@ export interface PoolInfo {
   feeTvl4hPct: number;
   feeTvl24hPct: number;
   feesBothTokens: boolean;
+  isBlacklisted?: boolean;
   createdAt: string | null;
 }
 

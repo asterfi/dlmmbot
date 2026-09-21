@@ -97,7 +97,7 @@ function runRetention(): void {
   const mb = (b: number) => (b / 1048576).toFixed(1);
   console.log(
     `[farmer] retention: db ${mb(pruned.bytesBefore)}→${mb(pruned.bytesAfter)} MB, ` +
-    `pruned ${pruned.decisions} skipped decisions + ${pruned.snapshots} snapshots` +
+    `pruned ${pruned.decisions} skipped decisions + ${pruned.snapshots} snapshots + ${pruned.discovery} discovery rows` +
     (pruned.mode === "size" ? " (SIZE ceiling hit)" : pruned.mode === "age" ? " (age)" : " (nothing eligible)") +
     (pruned.vacuumed ? ", vacuumed" : "")
   );
@@ -1617,6 +1617,16 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       coreCandidates: scanned.candidates.length,
       coreRejected: scanned.rejected.length,
       rejectionCounts,
+      discovery: scanned.discovery ?? {
+        enabled: false,
+        signaturesFetched: 0,
+        signaturesParsed: 0,
+        eventsFound: 0,
+        unavailableSignatures: 0,
+        backlogCapped: false,
+        windowTruncated: false,
+        exactPoolsResolved: 0,
+      },
     };
     const proposals = await strategy.discover({
       candidates: scanned.candidates,
