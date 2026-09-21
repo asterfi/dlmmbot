@@ -187,8 +187,9 @@ export const WIKI_SECTIONS: WikiSection[] = [
           { label: "Sweep pools", detail: "Meteora DLMM list", icon: "radar" },
           { label: "Event intake (optional)", detail: "Exact Meteora pool creations — off by default", icon: "radar" },
           { label: "Dedupe", detail: "One mint wins per ticker", icon: "check" },
-          { label: "Pool gates", detail: "TVL, fees, volume…", icon: "chart" },
-          { label: "Pick the pool", detail: "Deepest gate-passing pool per token — not the highest fee/TVL, which picks the thinnest one", icon: "chart" },
+          { label: "Lane intake", detail: "Eys: structural only · core: pool gates", icon: "chart" },
+          { label: "Pick the pool", detail: "Deepest active-lane pool per token — not the highest fee/TVL, which picks the thinnest one", icon: "chart" },
+          { label: "Eys evidence", detail: "Fresh 1m flow, market cap, persistence", icon: "zap" },
           { label: "Token vet", detail: "Authorities, holders, rugs", icon: "shield" },
           { label: "Score", detail: "0–100 opportunity", icon: "zap" },
           { label: "Queue", detail: "Best first", icon: "entry" },
@@ -201,8 +202,9 @@ export const WIKI_SECTIONS: WikiSection[] = [
       {
         type: "ul",
         items: [
-          "Too thin or too huge TVL, sleepy fees/volume, weird base fee, non-SOL quote.",
-          "Pool price way off Jupiter (empty / glitchy pool trap).",
+          "Core lane: too thin or too huge TVL, sleepy fees/volume, weird base fee, non-SOL quote.",
+          "Eys lane: invalid/thin TVL, blacklist, non-SOL pair; generic fee, volume, TVL-ceiling and price-divergence filters are not pre-Eys admission gates.",
+          "All lanes: final executable quote/range, reserve, rent, and executor checks still fail closed.",
         ],
       },
       {
@@ -223,6 +225,12 @@ export const WIKI_SECTIONS: WikiSection[] = [
         tone: "fg",
         title: "Soft stuff only tilts size",
         text: "Freefall, ATH blast, sell pressure — these change the score (how big / how soon), they don’t secretly override a hard fail.",
+      },
+      {
+        type: "callout",
+        tone: "ok",
+        title: "Eys gets the broad lane",
+        text: "When Eys is explicitly active, it sees candidates before the core economic filters and owns admission through fresh 1m flow, market cap, persistence, and exact-pool identity. The listing freeze flag, core TVL ceiling, and new-token bin-step fit do not discard it early; fresh on-chain freeze vetting, range/depth, bin rent, quote drift, sizing, reserves, and the executor still can.",
       },
       {
         type: "callout",

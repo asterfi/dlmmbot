@@ -75,23 +75,14 @@ export function eysDiscoveryGates(
   if (p.isBlacklisted === true) fail("pool_blacklisted", "true", "false");
   if (!Number.isFinite(p.tvlUsd) || p.tvlUsd <= 0) {
     fail("tvl_invalid", p.tvlUsd, "finite > 0");
-  } else {
-    if (p.tvlUsd < g.tvl_min_usd) fail("tvl_min", p.tvlUsd.toFixed(0), g.tvl_min_usd);
-    if (p.tvlUsd > g.tvl_max_usd) fail("tvl_max", p.tvlUsd.toFixed(0), g.tvl_max_usd);
-  }
-  const ageMs = p.createdAt ? Date.now() - Date.parse(p.createdAt) : null;
-  const isNewToken = ageMs !== null && Number.isFinite(ageMs) && ageMs > 0 && ageMs < 7 * 86_400_000;
-  if (isNewToken && p.binStep < g.bin_step_min_new) {
-    fail("bin_step_new", p.binStep, g.bin_step_min_new);
+  } else if (p.tvlUsd < g.tvl_min_usd) {
+    fail("tvl_min", p.tvlUsd.toFixed(0), g.tvl_min_usd);
   }
   if (g.fee_collection === "both_only" && !p.feesBothTokens) {
     fail("fee_collection", `collect_fee_mode=${p.extras.collectFeeMode}`, "0 (both tokens)");
   }
   if (g.fee_collection === "quote_only" && p.feesBothTokens) {
     fail("fee_collection", `collect_fee_mode=${p.extras.collectFeeMode}`, "1 (quote/SOL only)");
-  }
-  if (!p.extras.freezeAuthorityDisabled) {
-    fail("freeze_authority_listing", "enabled", "disabled");
   }
   if (p.mintY !== SOL_MINT) fail("quote_mint", p.mintY, SOL_MINT);
   if (p.mintX === SOL_MINT) fail("base_mint", p.mintX, "non-SOL token");

@@ -171,6 +171,14 @@ describe("vetToken fail-closed gates", () => {
     expect(gatesOf(r)).toContain("creator_rug_history");
   });
 
+  it("still rejects a mint whose fresh on-chain freeze authority is active", async () => {
+    reportMock.mockResolvedValue(rugReport());
+    factsMock.mockResolvedValue({ ...onchainFacts(), freezeAuthority: "Freeze1111111111111111111111111111111111111" });
+    const r = await vetToken(MINT, THREE_H_AGO);
+    expect(r.verdict).toBe("fail");
+    expect(gatesOf(r)).toContain("freeze_authority");
+  });
+
   it("records security_data_unavailable when the honeypot source is blind", async () => {
     reportMock.mockResolvedValue(rugReport());
     const r = await vetToken(MINT, THREE_H_AGO);

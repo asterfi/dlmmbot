@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { eysDiscoveryGates, pickBestPool, pickCopycatWinner } from "./scan.js";
+import { poolGates } from "./gates.js";
 import { makePool } from "../test/pool.js";
 
 describe("pickCopycatWinner (copycat cooldown, §1.2)", () => {
@@ -114,14 +115,32 @@ describe("Eys-first discovery boundary", () => {
     expect(eysDiscoveryGates(pool).map((failure) => failure.gate)).toContain("tvl_invalid");
   });
 
-  it("retains structural bin-step and freeze-authority safety checks", () => {
+  it("lets Eys see hot structural candidates rejected by generic listing/range/economic gates", () => {
     const base = makePool();
-    const failures = eysDiscoveryGates({
+    const pool = {
       ...base,
+      tvlUsd: 3_000_000,
+      binStep: 10,
+      feeTvl24hPct: 1,
+      feeTvl30mPct: 0.1,
+      vol30mUsd: 1_000,
+      baseFeePct: 10,
+      extras: { ...base.extras, freezeAuthorityDisabled: false },
+    };
+    expect(eysDiscoveryGates(pool)).toEqual([]);
+  });
+
+  it("keeps those generic gates in core mode", () => {
+    const base = makePool();
+    const pool = {
+      ...base,
+      tvlUsd: 3_000_000,
       binStep: 10,
       extras: { ...base.extras, freezeAuthorityDisabled: false },
-    });
-    expect(failures.map((failure) => failure.gate)).toEqual(expect.arrayContaining(["bin_step_new", "freeze_authority_listing"]));
+    };
+    expect(poolGates(pool).map((failure) => failure.gate)).toEqual(expect.arrayContaining([
+      "tvl_max", "bin_step_new", "freeze_authority_listing",
+    ]));
   });
 
   it("keeps the structural liquidity and blacklist boundary", () => {

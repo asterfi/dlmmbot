@@ -26,7 +26,7 @@ Automated [Meteora DLMM](https://meteora.ag) liquidity bot for Solana. Scans, ve
 
 ## Hosted strategy plugins
 
-The Eys plugin owns exact-pool identity, broad pre-filter intake, fresh GMGN mint-level one-minute flow evidence associated with that pool, persistence, stage/range intent, and flow-decay exit recommendations. DLMbot core remains authoritative for structural safety, vetting, sizing, reserves, rent, fresh quote/range checks, execution, management, reconciliation, and accounting. When explicitly active, Eys replaces the core economic discovery filters and alpha-score reservation; it does not bypass shared safety or execution checks. Token-side Eys proposals are recorded but fail closed until a core-owned funding/accounting service is available.
+The Eys plugin owns exact-pool identity, broad pre-filter intake, fresh GMGN mint-level one-minute flow evidence associated with that pool, persistence, stage/range intent, and flow-decay exit recommendations. DLMbot core remains authoritative for exact-pool verification, token vetting, sizing, reserves, rent, fresh quote/range checks, execution, management, reconciliation, and accounting. When explicitly active, Eys replaces the core economic discovery filters and alpha-score reservation. Its intake also avoids the core TVL ceiling, new-token bin-step fit, and listing-level freeze flag; freeze is rechecked from fresh on-chain mint facts, while bin-step/depth/rent remains a later executable check. Core mode is unchanged. Token-side Eys proposals are recorded but fail closed until a core-owned funding/accounting service is available.
 
 The scanner also has an opt-in, bounded Meteora DLMM event-intake path. It polls the
 configured Solana RPC (Helius recommended), decodes published pool-initialization

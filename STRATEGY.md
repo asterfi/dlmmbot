@@ -15,12 +15,18 @@ when `strategy.mode` and the strategy-specific enable flag are both explicit.
 Eys plugin owns hot-pool proposal intake, exact Meteora pool identity, broad
 GMGN mint-level one-minute flow evidence associated with that candidate pool,
 persistence, Eys stage/range intent, and flow-decay exit recommendations. DLMbot
-core remains authoritative for structural pool identity, token vetting, sizing,
-reserves, bin rent, fresh quote/range checks, wallet and asset acquisition,
-execution, management, reconciliation, and accounting. Eys-specific admission
-replaces the core economic discovery filters and alpha-score reservation only
-when Eys is explicitly active; it does not waive the shared safety or execution
-checks.
+core remains authoritative for exact pool identity, token vetting, sizing, reserves,
+bin rent, fresh quote/range checks, wallet and asset acquisition, execution,
+management, reconciliation, and accounting. Eys-specific admission replaces the
+core economic discovery filters and alpha-score reservation only when Eys is
+explicitly active; it does not waive the shared safety or execution checks.
+
+In active Eys mode, the intake boundary deliberately does not apply the core
+TVL ceiling, new-token bin-step fit, or listing-level freeze-authority flag. The
+TVL floor, SOL-pair identity, blacklist, and finite-value checks remain at intake.
+Freeze authority is rechecked from fresh on-chain mint facts during vetting; bin
+step is evaluated by the Eys entry range/depth and bin-rent checks. Core mode keeps
+the original listing gates unchanged.
 
 The current live-capable Eys slice is the SOL-side Spot anchor. Token-side breakout
 proposals are retained as strategy evidence but fail closed until a core-owned
@@ -49,7 +55,7 @@ Runs every `[60s]`. The scan fires from inside the manage tick, so it can only s
    `filter_by: is_blacklisted=false && tvl > [5000]`, `sort_by: fee_tvl_ratio_30m:desc`, first `[3]` pages.
 1a. **Optional exact-pool event intake** — when `[discovery].event_intake_enabled = true`, poll the configured Solana RPC (Helius recommended) for a bounded recent window of Meteora DLMM program signatures; decode only published pool-initialization discriminators and persist the signature/checkpoint evidence. Resolve each decoded `lbPair` address directly through Datapi and verify the event mint pair matches Datapi before merging it into this scan. This supplements the ranked sweep. In core mode it never bypasses pool gates, vetting, sizing, rent, quote, or executor checks; in active Eys mode it enters the broad Eys intake and still never bypasses shared vetting, sizing, rent, quote, or executor checks. The default is **off**.
 2. **Dedupe to canonical token** — group pools by token mint; if multiple tokens share a symbol (copycats), only the one with the highest 24h volume is considered; the rest are ignored for `[24h]`.
-3. **Per-token: pick the best pool** — the **deepest** (highest TVL) among that token's pools that pass the active lane's structural discovery gates; `fee_tvl_ratio_24h` breaks ties only within `[25%]` of the deepest pool's TVL. One pool per token. *Was* "highest fee/TVL" — and since fee/TVL is inversely proportional to TVL, that structurally picked the *thinnest* sibling (measured 2026-08-15: 11 of 18 multi-pool mints on the board, and in 9 of those the deeper pool also had more absolute volume). Thin pools cost twice: less fee income, because volume happens where depth is; and TVL that swings 40–50% on ordinary LP repositioning, which is exactly what P0 `tvl_drain` reads as a rug — same token, same 4 minutes, an $8k pool swung 51% while its $67k sibling moved 9%. The gates are the family boundary: a bin-20 pool is never an alternative to a bin-100 pool because `bin_step_new` rejects it, so depth is compared only across shapes the strategy already accepts.
+3. **Per-token: pick the best pool** — the **deepest** (highest TVL) among that token's pools that pass the active lane's structural discovery gates; `fee_tvl_ratio_24h` breaks ties only within `[25%]` of the deepest pool's TVL. One pool per token. *Was* "highest fee/TVL" — and since fee/TVL is inversely proportional to TVL, that structurally picked the *thinnest* sibling (measured 2026-08-15: 11 of 18 multi-pool mints on the board, and in 9 of those the deeper pool also had more absolute volume). Thin pools cost twice: less fee income, because volume happens where it does, and TVL that swings 40–50% on ordinary LP moves, which is exactly what P0 `tvl_drain` reads as a rug — same token, same 4 min: $8k pool swung 51%, $67k pool 9%). In core mode the bin-step gate remains a family boundary; active Eys instead lets its own range/depth and rent checks decide whether a fine-step pool is executable.
 4. Output: strategy-qualified candidates → shared vetting (§3) → entry queue.
 
 Optional secondary source `[off by default]`: GMGN trending list as a *discovery* input (requires API key), plus direct `token info` enrichment for exact event-discovered mints when the event intake is enabled. The direct row supplies the genuine `1m` volume evidence for Eys; it does not add a core score bonus by itself. Never a substitute for our own vetting.
@@ -71,6 +77,12 @@ Majors runs **after** meme entries each tick when open slots ≤ `meme_reserve_s
 A candidate must pass **every hard gate**. Soft criteria feed the opportunity score, which drives sizing (§5) and queue priority.
 
 ### 2.1 Pool gates (hard)
+
+The table below describes the core lane defaults. When Eys is explicitly active,
+its strategy-owned intake replaces the economic/fit rows (TVL ceiling, fee/volume,
+base-fee, trend, bin-step, and price-divergence discovery filters). Shared quote,
+blacklist, finite-TVL, vetting, range/depth, rent, sizing, quote-drift, and executor
+checks still apply later and fail closed.
 
 | Gate | Default | Why |
 |---|---|---|
