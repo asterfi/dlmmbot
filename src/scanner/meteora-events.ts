@@ -200,8 +200,37 @@ export function parseMeteoraPoolEvents(
   return out;
 }
 
+type RawRpcBatchResponse = {
+  result?: ParsedTransactionWithMeta | null;
+  error?: { message?: string; code?: number };
+};
+
+type RawRpcBatchConnection = {
+  _rpcBatchRequest: (batch: Array<{ methodName: string; args: unknown[] }>) => Promise<RawRpcBatchResponse[]>;
+};
+
 function connectionClient(): DiscoveryRpcClient {
-  return makeConnection({ commitment: "confirmed" });
+  const connection = makeConnection({ commitment: "confirmed" });
+  const raw = connection as unknown as RawRpcBatchConnection;
+  return {
+    getSignaturesForAddress: connection.getSignaturesForAddress.bind(connection),
+    getParsedTransactions: async (signatures, rpcConfig) => {
+      const responses = await raw._rpcBatchRequest(signatures.map((signature) => ({
+        methodName: "getTransaction",
+        args: [signature, {
+          commitment: rpcConfig.commitment,
+          encoding: "jsonParsed",
+          maxSupportedTransactionVersion: 1,
+        }],
+      })));
+      return responses.map((response) => {
+        if (response.error) {
+          throw new Error(response.error.message ?? `RPC error ${response.error.code ?? "unknown"}`);
+        }
+        return response.result ?? null;
+      });
+    },
+  };
 }
 
 function stateValue(db: ReturnType<typeof getDb>, key: string): string | null {
