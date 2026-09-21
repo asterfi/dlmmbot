@@ -29,7 +29,9 @@ step is evaluated by the Eys entry range/depth and bin-rent checks. Core mode ke
 the original listing gates unchanged.
 
 In active Eys mode, fresh GMGN `1m` rows that meet the configured flow floor are
-also used as a bounded exact-pool lookup source. The scanner resolves those token
+also used as a bounded exact-pool lookup source. The Eys `1m` request includes
+bounded market-cap slices, including the `$1M–$2M` band, so a hot mint outside
+the global top-100 can enter the lookup universe. The scanner resolves those token
 mints through Meteora Datapi and merges matching pools before symbol dedupe and Eys
 proposal evaluation, so a hot mint cannot disappear merely because it fell outside
 the ranked pool sweep. The lookup count is capped by

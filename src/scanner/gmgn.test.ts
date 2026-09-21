@@ -15,6 +15,7 @@ import {
   gmgnPaceState,
   gmgnSpendBudget,
   gmgnIntervalsForStrategy,
+  gmgnMarketCapRangesForStrategy,
 } from "./gmgn.js";
 import type { GmgnPresence, GmgnTrendingToken } from "./gmgn.js";
 
@@ -70,6 +71,15 @@ describe("Eys GMGN interval requirement", () => {
     expect(gmgnIntervalsForStrategy(["5m", "1h"], true)).toEqual(["1m", "5m", "1h"]);
     expect(gmgnIntervalsForStrategy(["1m", "5m"], true)).toEqual(["1m", "5m"]);
     expect(gmgnIntervalsForStrategy(["5m", "1h"], false)).toEqual(["5m", "1h"]);
+  });
+});
+
+describe("Eys GMGN market-cap intake", () => {
+  it("widens only Eys 1m while leaving core and other intervals unchanged", () => {
+    expect(gmgnMarketCapRangesForStrategy("1m", true)).toHaveLength(8);
+    expect(gmgnMarketCapRangesForStrategy("1m", true)).toContainEqual({ min: 1_000_000, max: 2_000_000 });
+    expect(gmgnMarketCapRangesForStrategy("5m", true)).toEqual([{}]);
+    expect(gmgnMarketCapRangesForStrategy("1m", false)).toEqual([{}]);
   });
 });
 

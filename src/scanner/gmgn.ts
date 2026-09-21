@@ -485,8 +485,35 @@ async function cli(args: string[]): Promise<string> {
   return gmgnCli(args);
 }
 
-async function fetchInterval(interval: string, minLiquidity: number): Promise<GmgnTrendingToken[]> {
-  const raw = await cli([
+export interface GmgnMarketCapRange {
+  min?: number;
+  max?: number;
+}
+
+const EYS_1M_MARKET_CAP_RANGES: readonly GmgnMarketCapRange[] = [
+  {},
+  { min: 100_000, max: 250_000 },
+  { min: 250_000, max: 500_000 },
+  { min: 500_000, max: 1_000_000 },
+  { min: 1_000_000, max: 2_000_000 },
+  { min: 2_000_000, max: 5_000_000 },
+  { min: 5_000_000, max: 20_000_000 },
+  { min: 20_000_000 },
+];
+
+/** Eys widens only the genuine 1m intake; core keeps its single request/window. */
+export function gmgnMarketCapRangesForStrategy(interval: string, eysActive: boolean): GmgnMarketCapRange[] {
+  return eysActive && interval === "1m"
+    ? EYS_1M_MARKET_CAP_RANGES.map((range) => ({ ...range }))
+    : [{}];
+}
+
+async function fetchInterval(
+  interval: string,
+  minLiquidity: number,
+  marketCap: GmgnMarketCapRange = {},
+): Promise<GmgnTrendingToken[]> {
+  const args = [
     "market", "trending",
     "--chain", "sol",
     "--interval", interval,
@@ -494,8 +521,11 @@ async function fetchInterval(interval: string, minLiquidity: number): Promise<Gm
     "--order-by", "volume",
     "--direction", "desc",
     "--min-liquidity", String(minLiquidity),
-    "--raw",
-  ]);
+  ];
+  if (marketCap.min != null) args.push("--min-marketcap", String(marketCap.min));
+  if (marketCap.max != null) args.push("--max-marketcap", String(marketCap.max));
+  args.push("--raw");
+  const raw = await cli(args);
   const parsed = JSON.parse(raw) as { code: number; data?: { rank?: Array<Record<string, unknown>> } };
   const out: GmgnTrendingToken[] = [];
   for (const r of parsed.data?.rank ?? []) {
@@ -543,41 +573,48 @@ export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
   );
   // Sequential — never stampede; stop all windows on first 429/cooldown.
   for (const iv of intervals) {
-    try {
-      const tokens = await fetchInterval(iv, g.min_liquidity_usd);
-      const fetchedAtMs = Date.now();
-      for (const t of tokens) {
-        const cur = byMint.get(t.address);
-        if (cur) {
-          cur.intervals.add(iv);
-          cur.tokenByInterval.set(iv, t);
-          cur.fetchedAtMsByInterval.set(iv, fetchedAtMs);
-          // The 1m row is the authoritative short-window Eys flow row. Keep
-          // the existing first-seen `token` fallback for legacy score readers.
-          if (iv === "1m") cur.token = t;
-        } else {
-          byMint.set(t.address, {
-            token: t,
-            intervals: new Set([iv]),
-            tokenByInterval: new Map([[iv, t]]),
-            fetchedAtMsByInterval: new Map([[iv, fetchedAtMs]]),
+    let stopIntervals = false;
+    for (const marketCap of gmgnMarketCapRangesForStrategy(iv, eysActive)) {
+      try {
+        const tokens = await fetchInterval(iv, g.min_liquidity_usd, marketCap);
+        const fetchedAtMs = Date.now();
+        for (const t of tokens) {
+          const cur = byMint.get(t.address);
+          if (cur) {
+            cur.intervals.add(iv);
+            cur.tokenByInterval.set(iv, t);
+            cur.fetchedAtMsByInterval.set(iv, fetchedAtMs);
+            // The 1m row is the authoritative short-window Eys flow row. Keep
+            // the existing first-seen `token` fallback for legacy score readers.
+            if (iv === "1m") cur.token = t;
+          } else {
+            byMint.set(t.address, {
+              token: t,
+              intervals: new Set([iv]),
+              tokenByInterval: new Map([[iv, t]]),
+              fetchedAtMsByInterval: new Map([[iv, fetchedAtMs]]),
+            });
+          }
+        }
+      } catch (e) {
+        const msg = (e as Error).message;
+        if (!/429|cooling down|RATE_LIMIT/i.test(msg)) {
+          logError({
+            source: "gmgn",
+            code: "trending_fetch",
+            level: "warn",
+            message: `trending ${iv}: ${msg}`.slice(0, 800),
+            dedupeSec: 300,
+            detail: { interval: iv, marketCap },
           });
         }
+        if (/429|cooling down|RATE_LIMIT/i.test(msg)) {
+          stopIntervals = true;
+          break;
+        }
       }
-    } catch (e) {
-      const msg = (e as Error).message;
-      if (!/429|cooling down|RATE_LIMIT/i.test(msg)) {
-        logError({
-          source: "gmgn",
-          code: "trending_fetch",
-          level: "warn",
-          message: `trending ${iv}: ${msg}`.slice(0, 800),
-          dedupeSec: 300,
-          detail: { interval: iv },
-        });
-      }
-      if (/429|cooling down|RATE_LIMIT/i.test(msg)) break;
     }
+    if (stopIntervals) break;
   }
 
   cache = { at: Date.now(), eysActive, byMint };

@@ -38,13 +38,16 @@ accumulate the required persistence evidence across scans. It supplements the no
 sweep and, when Eys is active, joins the broad Eys intake; it never bypasses shared
 vetting, quote, sizing, rent, or executor gates. `[discovery].event_intake_enabled = false` is the tracked default. Its bounded queue gives most parse capacity to the newest pending signatures while retaining a small oldest-first slice for historical backfill.
 
-When Eys is active, fresh GMGN `1m` rows at or above the configured flow floor also
-trigger a bounded Datapi lookup by token mint (`[eys].gmgn_pool_resolution_max_mints`).
-Matching Meteora pools are merged into the Eys candidate universe even when they are
-absent from the ranked top-pool sweep. This is exact-pool discovery, not admission:
-market-cap, persistence, authoritative token vetting, quote, depth, rent, sizing,
-executor, and reconciliation gates remain unchanged. Core mode does not use this
-supplemental path.
+When Eys is active, fresh GMGN `1m` rows at or above the configured flow floor
+also trigger bounded market-cap slices (including the $1M–$2M band) in addition
+to the base trending request. This widens recall without changing core mode or
+removing any downstream gate. Each qualifying mint then triggers a bounded
+Datapi lookup by token mint (`[eys].gmgn_pool_resolution_max_mints`). Matching
+Meteora pools are merged into the Eys candidate universe even when they are
+absent from the ranked top-pool sweep. This is exact-pool discovery, not
+admission: market-cap, persistence, authoritative token vetting, quote, depth,
+rent, sizing, executor, and reconciliation gates remain unchanged. Core mode
+does not use this supplemental path.
 
 ### Optional local Laya gate
 

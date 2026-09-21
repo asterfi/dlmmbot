@@ -37,7 +37,7 @@ Datapi sweep; it does not alter core mode or bypass any safety/execution gate.
 | `enabled` | `false` | Enable the hosted Eys strategy when `strategy.mode = "eys"` |
 | `market_cap_floor_usd` | `100000` | Eys market-cap floor |
 | `flow_floor_usd` | `100000` | Genuine GMGN `1m` flow floor used for Eys evidence and supplemental exact-pool lookup |
-| `gmgn_pool_resolution_max_mints` | `12` | Maximum fresh flow-qualified GMGN mints resolved through Datapi per scan; failed/malformed lookups are omitted |
+| `gmgn_pool_resolution_max_mints` | `12` | Maximum fresh flow-qualified GMGN mints resolved through Datapi per scan; Eys `1m` intake also uses bounded market-cap slices including `$1M–$2M`; failed/malformed lookups are omitted |
 
 ## `[discovery]` — optional exact-pool event intake
 

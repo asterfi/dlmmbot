@@ -623,6 +623,9 @@ rpc_blind_after_min = 5          # alert-only: freeze entries, never liquidate b
 enabled = true             # auto-off when GMGN_API_KEY is empty
 intervals = ["1m", "5m", "1h"]   # Eys requires the genuine 1m GMGN flow row; longer windows are context
 min_liquidity_usd = 10000
+# Eys 1m adds bounded market-cap slices around the base request; core and longer
+# intervals remain single-request. The slices include the $1M-$2M band so a hot
+# token outside the global top-100 can still reach exact-pool resolution.
 # Tiered score bonus by which windows the token trends in (clamped at 100):
 bonus_sustained = 8        # 5m AND 1h — momentum confirmed and holding
 bonus_emerging = 4         # 5m only — catching fire now, not yet proven
