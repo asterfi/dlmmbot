@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { fetchPool, sweepPools, DEFAULT_DATAPI_CONCURRENCY } from "./meteora.js";
+import { fetchPool, fetchPoolsByTokenMints, sweepPools, DEFAULT_DATAPI_CONCURRENCY } from "./meteora.js";
 import { installConfig, restoreConfig } from "../test/config.js";
 
 /** Minimal shape of what /pools returns; only the fields normalize() reads. */
@@ -146,5 +146,75 @@ describe("datapi transient retry", () => {
 
   it("defaults the concurrency cap for configs that predate the key", () => {
     expect(DEFAULT_DATAPI_CONCURRENCY).toBe(4);
+  });
+
+  it("resolves exact pools for bounded GMGN mint lookups and ignores mismatched rows", async () => {
+    const mint = "9DTThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2";
+    const wrongMint = "11111111111111111111111111111111";
+    const good = rawPool("Direct");
+    good.token_x.address = mint;
+    const wrong = rawPool("Wrong");
+    wrong.token_x.address = wrongMint;
+    const nonSol = rawPool("NonSol");
+    nonSol.token_x.address = mint;
+    nonSol.token_y.address = "USDC111111111111111111111111111111111111111";
+    const state = trackingFetch((url) => {
+      expect(new URL(url).searchParams.get("filter_by")).toContain(`token_x=${mint}`);
+      return ok({ data: [good, nonSol, wrong] });
+    });
+
+    const result = await fetchPoolsByTokenMints([mint, mint, "not-a-mint"]);
+
+    expect(state.urls).toHaveLength(1);
+    expect(result.attemptedMints).toBe(1);
+    expect(result.providerSuccessMints).toBe(1);
+    expect(result.emptyMints).toBe(0);
+    expect(result.failedMints).toBe(0);
+    expect(result.pools.map((pool) => [pool.address, pool.mintX, pool.mintY])).toEqual([["Direct", mint, "So11111111111111111111111111111111111111112"]]);
+  });
+
+  it("isolates one failed mint and reports the sibling result", async () => {
+    const goodMint = "9DTThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2";
+    const failedMint = "8DTThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2";
+    const good = rawPool("Good");
+    good.token_x.address = goodMint;
+    const state = trackingFetch((url) => url.includes(failedMint) ? fail(500) : ok({ data: [good], pages: 1 }));
+
+    const result = await fetchPoolsByTokenMints([goodMint, failedMint]);
+
+    expect(state.urls.length).toBeGreaterThanOrEqual(2);
+    expect(result.attemptedMints).toBe(2);
+    expect(result.providerSuccessMints).toBe(1);
+    expect(result.failedMints).toBe(1);
+    expect(result.pools.map((pool) => pool.address)).toEqual(["Good"]);
+  });
+
+  it("keeps partial first-page results visible when a later page fails", async () => {
+    const mint = "7DTThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2";
+    const first = rawPool("First");
+    first.token_x.address = mint;
+    const state = trackingFetch((url) => pageOf(url) === 1
+      ? ok({ data: [first], pages: 2 })
+      : fail(503));
+
+    const result = await fetchPoolsByTokenMints([mint]);
+
+    expect(state.urls.filter((url) => pageOf(url) === 1)).toHaveLength(1);
+    expect(state.urls.filter((url) => pageOf(url) === 2).length).toBe(2);
+    expect(result.partialMints).toBe(1);
+    expect(result.failedMints).toBe(0);
+    expect(result.pools.map((pool) => pool.address)).toEqual(["First"]);
+  });
+
+  it("caps direct lookup concurrency independently of an oversized config", async () => {
+    installConfig((c) => { c.scanner.datapi_concurrency = 50; });
+    const mints = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "A"].map((last) => `9${"A".repeat(30)}${last}`);
+    const state = trackingFetch(() => ok({ data: [], pages: 1 }), 20);
+
+    const result = await fetchPoolsByTokenMints(mints);
+
+    expect(state.max).toBeLessThanOrEqual(8);
+    expect(result.attemptedMints).toBe(10);
+    expect(result.emptyMints).toBe(10);
   });
 });

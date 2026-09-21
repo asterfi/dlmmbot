@@ -26,7 +26,15 @@ import { parse } from "smol-toml";
   }
 })();
 
-// Typed mirror of config.toml. Sections/keys must match STRATEGY.md defaults.
+export const EYS_MIN_FLOW_FLOOR_USD = 100_000;
+export const EYS_MAX_POOL_RESOLUTION_MINTS = 25;
+
+/** Eys cannot be configured below the source-defined one-minute flow floor. */
+export function effectiveEysFlowFloorUsd(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(EYS_MIN_FLOW_FLOOR_USD, n) : EYS_MIN_FLOW_FLOOR_USD;
+}
+
 export interface EysConfig {
   enabled: boolean;
   market_cap_floor_usd: number;
@@ -40,6 +48,8 @@ export interface EysConfig {
   token_breakout_pct: number;
   dump_bonus_price_change_pct: number;
   flow_refresh_s: number;
+  /** Maximum fresh GMGN 1m mints to resolve into exact Meteora pools per scan. */
+  gmgn_pool_resolution_max_mints: number;
 }
 
 export interface LayaConfig {

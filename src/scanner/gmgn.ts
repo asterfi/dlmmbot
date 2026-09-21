@@ -53,7 +53,7 @@ export interface GmgnPresence {
   fetchedAtMsByInterval: Map<string, number>;
 }
 
-let cache: { at: number; byMint: Map<string, GmgnPresence> } | null = null;
+let cache: { at: number; eysActive: boolean; byMint: Map<string, GmgnPresence> } | null = null;
 // Eys admission consumes a 1m row. A ten-minute cache would let a stale row
 // satisfy a three-minute evidence TTL, so the cache cannot outlive that cadence.
 const CACHE_MS = 60_000;
@@ -519,6 +519,11 @@ async function fetchInterval(interval: string, minLiquidity: number): Promise<Gm
   return out;
 }
 
+/** Eys always requires a genuine 1m source, even if a legacy config omitted it. */
+export function gmgnIntervalsForStrategy(intervals: readonly string[], eysActive: boolean): string[] {
+  return eysActive ? ["1m", ...intervals.filter((interval) => interval !== "1m")] : [...intervals];
+}
+
 /**
  * Trending SOL tokens across all configured windows, keyed by mint, with the
  * set of windows each mint appears in. Cached per scan cycle. Windows are
@@ -526,13 +531,18 @@ async function fetchInterval(interval: string, minLiquidity: number): Promise<Gm
  */
 export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
   const g = config().gmgn;
+  const eysActive = config().strategy.mode === "eys" && config().eys.enabled === true;
   if (!g.enabled || !env().gmgnApiKey) return new Map();
-  if (cache && Date.now() - cache.at < CACHE_MS) return cache.byMint;
-  if (gmgnIsBanned()) return cache?.byMint ?? new Map();
+  if (cache && Date.now() - cache.at < CACHE_MS && cache.eysActive === eysActive) return cache.byMint;
+  if (gmgnIsBanned()) return cache && cache.eysActive === eysActive ? cache.byMint : new Map();
 
   const byMint = new Map<string, GmgnPresence>();
+  const intervals = gmgnIntervalsForStrategy(
+    g.intervals,
+    eysActive,
+  );
   // Sequential — never stampede; stop all windows on first 429/cooldown.
-  for (const iv of g.intervals) {
+  for (const iv of intervals) {
     try {
       const tokens = await fetchInterval(iv, g.min_liquidity_usd);
       const fetchedAtMs = Date.now();
@@ -570,7 +580,7 @@ export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
     }
   }
 
-  cache = { at: Date.now(), byMint };
+  cache = { at: Date.now(), eysActive, byMint };
   return byMint;
 }
 

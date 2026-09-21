@@ -1636,7 +1636,13 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     for (const proposal of proposals) strategyProposals.set(proposal.candidate.pool.address, proposal);
     candidates = scanned.candidates.filter((candidate) => strategyProposals.has(candidate.pool.address));
     if (strategy.id === "eys") {
-      console.log(`[strategy] eys: ${proposals.length}/${scanned.candidates.length} core candidate(s) have qualifying proposals`);
+      const intake = scanned.eysIntake;
+      console.log(
+        `[strategy] eys: ${proposals.length}/${scanned.candidates.length} candidate(s) have qualifying proposals` +
+        (intake
+          ? `; GMGN flow-qualified mints ${intake.gmgnMintsAtFlowFloor}, lookups ${intake.gmgnMintLookups}, provider successes ${intake.gmgnProviderSuccesses}, empty ${intake.gmgnEmptyResults}, failed ${intake.gmgnFailedLookups}, partial ${intake.gmgnPartialLookups}, SOL pools returned ${intake.gmgnPoolsReturned}`
+          : ""),
+      );
     }
   } catch (e) {
     logError({

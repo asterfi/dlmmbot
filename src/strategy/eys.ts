@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { config } from "../config.js";
+import { config, effectiveEysFlowFloorUsd, EYS_MAX_POOL_RESOLUTION_MINTS, EYS_MIN_FLOW_FLOOR_USD } from "../config.js";
+import { recordDecision } from "../db/db.js";
 import { mapLimit } from "../concurrent.js";
 import { gmgnOneMinuteFlow, mergeGmgnPresenceMaps, tokenInfoByMint, trendingByMint } from "../scanner/gmgn.js";
 import type { Candidate } from "../types.js";
@@ -32,7 +33,7 @@ export interface FlowObservation {
 const DEFAULT_EYS = {
   enabled: false,
   market_cap_floor_usd: 100_000,
-  flow_floor_usd: 100_000,
+  flow_floor_usd: EYS_MIN_FLOW_FLOOR_USD,
   flow_persistence: 3,
   observation_ttl_s: 180,
   exit_persistence: 3,
@@ -42,6 +43,7 @@ const DEFAULT_EYS = {
   token_breakout_pct: 25,
   dump_bonus_price_change_pct: 20,
   flow_refresh_s: 60,
+  gmgn_pool_resolution_max_mints: 12,
 };
 
 function finiteAtLeast(value: unknown, fallback: number, minimum: number): number {
@@ -53,12 +55,37 @@ function integerAtLeast(value: unknown, fallback: number, minimum: number): numb
   return Number.isInteger(number) ? number : fallback;
 }
 
+const EYS_REJECTION_DEDUPE_MS = 5 * 60_000;
+const eysRejectionLoggedAt = new Map<string, number>();
+
+function recordHighFlowEysRejection(candidate: Candidate, reason: string | undefined, evidence: unknown): void {
+  const gate = `eys_${reason ?? "rejected"}`;
+  const key = `${candidate.tokenMint}:${candidate.pool.address}:${gate}`;
+  const nowMs = Date.now();
+  const previous = eysRejectionLoggedAt.get(key);
+  if (previous !== undefined && nowMs - previous < EYS_REJECTION_DEDUPE_MS) return;
+  eysRejectionLoggedAt.set(key, nowMs);
+  if (eysRejectionLoggedAt.size > 4096) {
+    for (const [entryKey, tsMs] of eysRejectionLoggedAt) {
+      if (nowMs - tsMs >= EYS_REJECTION_DEDUPE_MS) eysRejectionLoggedAt.delete(entryKey);
+    }
+  }
+  recordDecision(
+    candidate.tokenMint,
+    candidate.pool.address,
+    "skipped",
+    gate,
+    candidate.score,
+    { strategy: "eys", symbol: candidate.symbol, evidence },
+  );
+}
+
 function settings() {
   const raw = config().eys ?? {};
   return {
     enabled: raw.enabled === true,
     market_cap_floor_usd: finiteAtLeast(raw.market_cap_floor_usd, DEFAULT_EYS.market_cap_floor_usd, 1),
-    flow_floor_usd: finiteAtLeast(raw.flow_floor_usd, DEFAULT_EYS.flow_floor_usd, 1),
+    flow_floor_usd: effectiveEysFlowFloorUsd(raw.flow_floor_usd),
     flow_persistence: integerAtLeast(raw.flow_persistence, DEFAULT_EYS.flow_persistence, 1),
     observation_ttl_s: finiteAtLeast(raw.observation_ttl_s, DEFAULT_EYS.observation_ttl_s, 1),
     exit_persistence: integerAtLeast(raw.exit_persistence, DEFAULT_EYS.exit_persistence, 1),
@@ -68,6 +95,10 @@ function settings() {
     token_breakout_pct: finiteAtLeast(raw.token_breakout_pct, DEFAULT_EYS.token_breakout_pct, 0),
     dump_bonus_price_change_pct: finiteAtLeast(raw.dump_bonus_price_change_pct, DEFAULT_EYS.dump_bonus_price_change_pct, 0),
     flow_refresh_s: finiteAtLeast(raw.flow_refresh_s, DEFAULT_EYS.flow_refresh_s, 1),
+    gmgn_pool_resolution_max_mints: Math.min(
+      integerAtLeast(raw.gmgn_pool_resolution_max_mints, DEFAULT_EYS.gmgn_pool_resolution_max_mints, 1),
+      EYS_MAX_POOL_RESOLUTION_MINTS,
+    ),
   };
 }
 
@@ -359,7 +390,15 @@ export const eysPlugin: StrategyPlugin = {
         priceChangePct1h: priceChange,
       };
       const decision = evaluateEys(candidate, evidence, stage);
-      if (!decision.accepted) return null;
+      if (!decision.accepted) {
+        // Persist only official-flow crossings: recording every below-floor
+        // candidate every minute would drown the decision ledger while still
+        // leaving the important Eys bottleneck invisible.
+        if (flow.volumeUsd >= cfg.flow_floor_usd) {
+          recordHighFlowEysRejection(candidate, decision.reason, evidence);
+        }
+        return null;
+      }
       return {
         strategyId: "eys",
         candidate,

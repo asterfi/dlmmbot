@@ -26,6 +26,19 @@ Every knob the bot obeys lives in one TOML file. Key facts before the tables:
 | `retain_skipped_days` | `30` | Prune `skipped` decision rows older than this (hourly). `entered`/`exited` rows — the audit trail — are **never** pruned. Nothing pruned these before; a Railway volume hit 83% inside a day |
 | `retain_snapshots_days` | `3` | Prune `pool_snapshots` older than this. Only the latest row per pool is read; the rest was an offline replay dataset. Every ~300-row sweep lands here |
 
+## `[eys]` — hosted hot-mint intake
+
+When Eys is explicitly active, fresh GMGN `1m` rows at or above `flow_floor_usd` are
+resolved into exact Meteora pools before Eys evaluation. This supplements the ranked
+Datapi sweep; it does not alter core mode or bypass any safety/execution gate.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Enable the hosted Eys strategy when `strategy.mode = "eys"` |
+| `market_cap_floor_usd` | `100000` | Eys market-cap floor |
+| `flow_floor_usd` | `100000` | Genuine GMGN `1m` flow floor used for Eys evidence and supplemental exact-pool lookup |
+| `gmgn_pool_resolution_max_mints` | `12` | Maximum fresh flow-qualified GMGN mints resolved through Datapi per scan; failed/malformed lookups are omitted |
+
 ## `[discovery]` — optional exact-pool event intake
 
 This source is **off by default** and supplements, rather than replaces, the ranked Meteora Datapi sweep. When enabled it polls the configured Solana RPC (Helius recommended), paginates a bounded signature window for the Meteora DLMM program, persists a restart-safe signature queue, decodes published pool-initialization instructions, resolves exact `lbPair` addresses through Datapi, and enriches event mints through GMGN direct `token info` for a genuine `1m` flow row. Window truncation, backlog caps, and unavailable parsed transactions are surfaced in telemetry; they do not authorize entries.

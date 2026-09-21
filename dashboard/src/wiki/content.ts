@@ -185,8 +185,9 @@ export const WIKI_SECTIONS: WikiSection[] = [
         title: "Candidate pipeline",
         steps: [
           { label: "Sweep pools", detail: "Meteora DLMM list", icon: "radar" },
+          { label: "Resolve hot mints", detail: "Eys: fresh GMGN 1m → exact Meteora SOL pools, bounded per scan", icon: "zap" },
           { label: "Event intake (optional)", detail: "Exact Meteora pool creations — newest pending work first; off by default", icon: "radar" },
-          { label: "Dedupe", detail: "One mint wins per ticker", icon: "check" },
+          { label: "Dedupe", detail: "Core: one mint wins per ticker · Eys: retains the broad mint universe", icon: "check" },
           { label: "Lane intake", detail: "Eys: structural only · core: pool gates", icon: "chart" },
           { label: "Pick the pool", detail: "Deepest active-lane pool per token — not the highest fee/TVL, which picks the thinnest one", icon: "chart" },
           { label: "Eys evidence", detail: "Fresh 1m flow, market cap, persistence; recently observed pools get bounded refresh priority", icon: "zap" },

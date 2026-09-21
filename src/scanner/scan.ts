@@ -1,11 +1,11 @@
-import { config, SOL_MINT } from "../config.js";
+import { config, effectiveEysFlowFloorUsd, EYS_MAX_POOL_RESOLUTION_MINTS, SOL_MINT } from "../config.js";
 import { getDb, isBlacklisted, now, recordDecision } from "../db/db.js";
 import type { Candidate, GateFailure, PoolInfo } from "../types.js";
 import { poolGates } from "./gates.js";
 import { priceDivergenceGate } from "./priceGate.js";
-import { trendingByMint, tokenInfoByMint, mergeGmgnPresenceMaps } from "./gmgn.js";
+import { gmgnOneMinuteFlow, trendingByMint, tokenInfoByMint, mergeGmgnPresenceMaps } from "./gmgn.js";
 import { discoverRecentMeteoraPools } from "./meteora-events.js";
-import { sweepPools } from "./meteora.js";
+import { fetchPoolsByTokenMints, sweepPools } from "./meteora.js";
 import { fetchCandlesDeep } from "./candles.js";
 import { feeMomentumPart, opportunityScore, structurePart, timingPart, turnoverPart } from "./score.js";
 
@@ -131,10 +131,44 @@ export interface ScanResult {
     windowTruncated: boolean;
     exactPoolsResolved: number;
   };
+  /** Bounded supplemental Eys intake resolved from fresh GMGN 1m rows. */
+  eysIntake?: {
+    gmgnMintsAtFlowFloor: number;
+    gmgnMintLookups: number;
+    gmgnProviderSuccesses: number;
+    gmgnEmptyResults: number;
+    gmgnFailedLookups: number;
+    gmgnPartialLookups: number;
+    gmgnPoolsReturned: number;
+  };
 }
 
 export function eysModeActive(): boolean {
   return config().strategy?.mode === "eys" && config().eys?.enabled === true;
+}
+
+/** Select only fresh, official-flow-qualified GMGN mints for exact-pool lookup. */
+export function selectEysPoolResolutionMints(
+  gmgnByMint: ReadonlyMap<string, import("./gmgn.js").GmgnPresence>,
+  nowMs = Date.now(),
+): string[] {
+  const cfg = config().eys;
+  const floor = effectiveEysFlowFloorUsd(cfg?.flow_floor_usd);
+  const ttlMs = (Number.isFinite(cfg?.observation_ttl_s) ? cfg.observation_ttl_s : 180) * 1000;
+  const maxMints = Math.min(
+    Number.isInteger(cfg?.gmgn_pool_resolution_max_mints) && cfg.gmgn_pool_resolution_max_mints > 0
+      ? cfg.gmgn_pool_resolution_max_mints
+      : 12,
+    EYS_MAX_POOL_RESOLUTION_MINTS,
+  );
+  return [...gmgnByMint.entries()]
+    .map(([mint, presence]) => ({ mint, flow: gmgnOneMinuteFlow(presence, nowMs, ttlMs) }))
+    .filter((row): row is { mint: string; flow: NonNullable<ReturnType<typeof gmgnOneMinuteFlow>> } =>
+      row.flow !== null && row.flow.volumeUsd >= floor,
+    )
+    .sort((a, b) => b.flow.volumeUsd - a.flow.volumeUsd)
+    .slice(0, maxMints)
+    .map((row) => row.mint);
 }
 
 export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanResult> {
@@ -146,8 +180,19 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
   ]);
   const eventGmgn = await tokenInfoByMint(eventDiscovery.tokenMints);
   const gmgnByMint = mergeGmgnPresenceMaps(gmgnTrending, eventGmgn);
+  const gmgnMintsAtFlowFloor = eysMode
+    ? [...gmgnTrending.values()].filter((presence) => {
+      const flow = gmgnOneMinuteFlow(presence, Date.now(), (config().eys.observation_ttl_s ?? 180) * 1000);
+      return flow !== null && flow.volumeUsd >= effectiveEysFlowFloorUsd(config().eys.flow_floor_usd);
+    }).length
+    : 0;
+  const gmgnPoolMints = eysMode ? selectEysPoolResolutionMints(gmgnTrending) : [];
+  const gmgnResolution = eysMode && gmgnPoolMints.length > 0
+    ? await fetchPoolsByTokenMints(gmgnPoolMints)
+    : { pools: [], attemptedMints: 0, providerSuccessMints: 0, emptyMints: 0, failedMints: 0, partialMints: 0 };
+  const gmgnPools = gmgnResolution.pools;
   const pools = [...new Map(
-    [...sweptPools, ...eventDiscovery.pools].map((pool) => [pool.address, pool]),
+    [...sweptPools, ...eventDiscovery.pools, ...gmgnPools].map((pool) => [pool.address, pool]),
   ).values()];
   const db = getDb();
 
@@ -175,15 +220,21 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
     bySymbol.set(sym, list);
   }
   const canonical = new Set<string>();
-  const ignoreS = (config().scanner.copycat_ignore_h ?? 24) * 3600;
-  for (const [mint, until] of copycatIgnoredUntil) {
-    if (until <= ts) copycatIgnoredUntil.delete(mint); // prune expired cooldowns
-  }
-  for (const list of bySymbol.values()) {
-    const byMint = new Map<string, number>();
-    for (const p of list) byMint.set(p.mintX, (byMint.get(p.mintX) ?? 0) + p.vol24hUsd);
-    const winner = pickCopycatWinner(byMint, copycatIgnoredUntil, ts, ignoreS);
-    if (winner) canonical.add(winner);
+  if (eysMode) {
+    // Eys owns its discovery universe. Do not let the core symbol/copycat
+    // heuristic discard a hot mint before its exact-pool evidence is evaluated.
+    for (const p of memePools) canonical.add(p.mintX);
+  } else {
+    const ignoreS = (config().scanner.copycat_ignore_h ?? 24) * 3600;
+    for (const [mint, until] of copycatIgnoredUntil) {
+      if (until <= ts) copycatIgnoredUntil.delete(mint); // prune expired cooldowns
+    }
+    for (const list of bySymbol.values()) {
+      const byMint = new Map<string, number>();
+      for (const p of list) byMint.set(p.mintX, (byMint.get(p.mintX) ?? 0) + p.vol24hUsd);
+      const winner = pickCopycatWinner(byMint, copycatIgnoredUntil, ts, ignoreS);
+      if (winner) canonical.add(winner);
+    }
   }
 
   // Best pool per canonical token: deepest gate-passing sibling in the same
@@ -297,5 +348,16 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
       windowTruncated: eventDiscovery.windowTruncated,
       exactPoolsResolved: eventDiscovery.pools.length,
     },
+    eysIntake: eysMode
+      ? {
+        gmgnMintsAtFlowFloor,
+        gmgnMintLookups: gmgnResolution.attemptedMints,
+        gmgnProviderSuccesses: gmgnResolution.providerSuccessMints,
+        gmgnEmptyResults: gmgnResolution.emptyMints,
+        gmgnFailedLookups: gmgnResolution.failedMints,
+        gmgnPartialLookups: gmgnResolution.partialMints,
+        gmgnPoolsReturned: gmgnPools.length,
+      }
+      : undefined,
   };
 }

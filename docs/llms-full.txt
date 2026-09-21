@@ -12,6 +12,8 @@ An automated Solana bot for Meteora DLMM liquidity. It scans hot SOL-quoted meme
 
 The scanner includes an optional **off-by-default** Meteora DLMM event-intake lane. It paginates bounded RPC signatures, persists/retries the queue, resolves exact pool addresses through Datapi, and uses direct GMGN token info for event-only `1m` flow evidence. It supplements the ranked sweep and never bypasses hard safety or execution gates.
 
+When Eys is explicitly active, fresh GMGN `1m` mints at or above the immutable `$100,000/min` floor also receive bounded exact Meteora SOL-pool lookups, even when absent from the ranked pool sweep. Core mode and shared safety/execution gates are unchanged.
+
 ## Who it is for
 
 Operators who want paper trading first, then a burner wallet for live. Not custody, not a hosted trading service that holds user keys on our servers as a product — keys live on the user’s Railway volume / host.

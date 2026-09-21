@@ -1,5 +1,6 @@
-import { config } from "../config.js";
+import { config, SOL_MINT } from "../config.js";
 import { mapLimit } from "../concurrent.js";
+import { logError } from "../db/db.js";
 import type { PoolInfo } from "../types.js";
 
 // Client for the Meteora DLMM data API (verified live 2026-08-07):
@@ -181,6 +182,110 @@ export async function fetchPool(address: string): Promise<(PoolInfo & { extras: 
     if ((e as Error).message.includes("HTTP 404")) return null; // pool truly gone
     throw e; // transient failure — caller must NOT treat as pool death
   }
+}
+
+/** Result metadata keeps provider failures and partial page coverage visible. */
+export interface TokenMintPoolResolution {
+  pools: Array<PoolInfo & { extras: RawPoolExtras }>;
+  attemptedMints: number;
+  providerSuccessMints: number;
+  emptyMints: number;
+  failedMints: number;
+  partialMints: number;
+}
+
+const MAX_DIRECT_POOL_PAGES = 3;
+const MAX_DIRECT_POOLS_PER_MINT = 8;
+const MAX_DIRECT_DATAPI_CONCURRENCY = 8;
+
+function directDatapiConcurrency(): number {
+  const configured = Number(config().scanner.datapi_concurrency ?? DEFAULT_DATAPI_CONCURRENCY);
+  return Number.isInteger(configured) && configured > 0
+    ? Math.min(configured, MAX_DIRECT_DATAPI_CONCURRENCY)
+    : DEFAULT_DATAPI_CONCURRENCY;
+}
+
+/**
+ * Resolve a bounded set of GMGN-hot token mints into exact Meteora SOL pools.
+ *
+ * This is supplemental Eys intake only. The result is still passed through
+ * eysDiscoveryGates, exact-pool selection, vetting, quote, rent, sizing, and
+ * executor checks before any mutation. Invalid, non-SOL, blacklisted, or failed
+ * provider rows are omitted so one malformed response cannot widen admission.
+ */
+export async function fetchPoolsByTokenMints(
+  mints: readonly string[],
+): Promise<TokenMintPoolResolution> {
+  const unique = [...new Set(mints)].filter((mint) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint));
+  if (unique.length === 0) {
+    return { pools: [], attemptedMints: 0, providerSuccessMints: 0, emptyMints: 0, failedMints: 0, partialMints: 0 };
+  }
+  const resolved = await mapLimit(
+    unique,
+    async (mint) => {
+      try {
+        const filter = encodeURIComponent(`is_blacklisted=false&&token_x=${mint}&&token_y=${SOL_MINT}`);
+        const first = await getJson<{ data?: RawPool[]; pages?: number }>(
+          `/pools?page=1&page_size=100&sort_by=fee_tvl_ratio_30m:desc&filter_by=${filter}`,
+        );
+        if (!Array.isArray(first.data)) throw new Error("datapi exact-pool response has no data array");
+        const reportedPages = Number(first.pages ?? 1);
+        if (!Number.isInteger(reportedPages) || reportedPages < 1) throw new Error("datapi exact-pool response has invalid pages");
+        const pageCount = Math.min(reportedPages, MAX_DIRECT_POOL_PAGES);
+        const rows = [...first.data];
+        let partial = reportedPages > pageCount;
+        for (let page = 2; page <= pageCount; page++) {
+          try {
+            const body = await getJson<{ data?: RawPool[] }>(
+              `/pools?page=${page}&page_size=100&sort_by=fee_tvl_ratio_30m:desc&filter_by=${filter}`,
+            );
+            if (!Array.isArray(body.data)) throw new Error(`datapi exact-pool page ${page} has no data array`);
+            rows.push(...body.data);
+          } catch (error) {
+            partial = true;
+            logError({
+              source: "scanner",
+              code: "eys_pool_resolution_partial",
+              level: "warn",
+              message: `Eys exact-pool pagination stopped for a GMGN mint: ${(error as Error).message}`.slice(0, 800),
+              detail: { mint, page },
+              dedupeSec: 300,
+            });
+            break;
+          }
+        }
+        const pools = rows
+          .filter((pool) =>
+            pool?.token_x?.address === mint &&
+            pool?.token_y?.address === SOL_MINT &&
+            pool?.is_blacklisted === false,
+          )
+          .slice(0, MAX_DIRECT_POOLS_PER_MINT)
+          .map(normalize);
+        const capped = rows.filter((pool) => pool?.token_x?.address === mint && pool?.token_y?.address === SOL_MINT).length > MAX_DIRECT_POOLS_PER_MINT;
+        return { status: partial || capped ? "partial" as const : "ok" as const, pools };
+      } catch (error) {
+        logError({
+          source: "scanner",
+          code: "eys_pool_resolution",
+          level: "warn",
+          message: `Eys exact-pool resolution failed for a GMGN mint: ${(error as Error).message}`.slice(0, 800),
+          detail: { mint },
+          dedupeSec: 300,
+        });
+        return { status: "failed" as const, pools: [] };
+      }
+    },
+    directDatapiConcurrency(),
+  );
+  return {
+    pools: resolved.flatMap((result) => result.pools),
+    attemptedMints: unique.length,
+    providerSuccessMints: resolved.filter((result) => result.status !== "failed").length,
+    emptyMints: resolved.filter((result) => result.status !== "failed" && result.pools.length === 0).length,
+    failedMints: resolved.filter((result) => result.status === "failed").length,
+    partialMints: resolved.filter((result) => result.status === "partial").length,
+  };
 }
 
 export async function fetchCandles(

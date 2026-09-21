@@ -1,7 +1,9 @@
-import { describe, it, expect } from "vitest";
-import { eysDiscoveryGates, pickBestPool, pickCopycatWinner } from "./scan.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { eysDiscoveryGates, pickBestPool, pickCopycatWinner, selectEysPoolResolutionMints } from "./scan.js";
 import { poolGates } from "./gates.js";
 import { makePool } from "../test/pool.js";
+import { effectiveEysFlowFloorUsd, EYS_MIN_FLOW_FLOOR_USD } from "../config.js";
+import { installConfig, restoreConfig } from "../test/config.js";
 
 describe("pickCopycatWinner (copycat cooldown, §1.2)", () => {
   const NOW = 1_000_000;
@@ -147,5 +149,64 @@ describe("Eys-first discovery boundary", () => {
     const pool = makePool({ tvlUsd: 100 });
     expect(eysDiscoveryGates(pool).map((failure) => failure.gate)).toContain("tvl_min");
     expect(eysDiscoveryGates(makePool({ isBlacklisted: true })).map((failure) => failure.gate)).toContain("pool_blacklisted");
+  });
+});
+
+describe("Eys flow floor", () => {
+  it("cannot be lowered by malformed, string, or sub-floor configuration", () => {
+    expect(EYS_MIN_FLOW_FLOOR_USD).toBe(100_000);
+    expect(effectiveEysFlowFloorUsd(1)).toBe(100_000);
+    expect(effectiveEysFlowFloorUsd("50000")).toBe(100_000);
+    expect(effectiveEysFlowFloorUsd(Number.NaN)).toBe(100_000);
+    expect(effectiveEysFlowFloorUsd(Number.POSITIVE_INFINITY)).toBe(100_000);
+    expect(effectiveEysFlowFloorUsd(150_000)).toBe(150_000);
+  });
+});
+
+describe("Eys GMGN exact-pool resolution selection", () => {
+  const nowMs = 1_000_000;
+  const presence = (mint: string, volumeUsd: number, fetchedAtMs: number) => {
+    const token = {
+      address: mint,
+      symbol: mint.slice(0, 4),
+      priceChangePct1h: 5,
+      volumeUsd,
+      liquidityUsd: 25_000,
+      marketCapUsd: 250_000,
+      holderCount: 100,
+      top10HolderRate: 0.1,
+      renouncedMint: true,
+      renouncedFreeze: true,
+      launchpad: "",
+      creator: "",
+      openTimestamp: 0,
+    };
+    return {
+      token,
+      intervals: new Set(["1m"]),
+      tokenByInterval: new Map([["1m", token]]),
+      fetchedAtMsByInterval: new Map([["1m", fetchedAtMs]]),
+    };
+  };
+
+  beforeEach(() => installConfig((c) => {
+    c.strategy.mode = "eys";
+    c.eys.enabled = true;
+    c.eys.flow_floor_usd = 1;
+    c.eys.observation_ttl_s = 180;
+    c.eys.gmgn_pool_resolution_max_mints = 2;
+  }));
+  afterEach(() => restoreConfig());
+
+  it("selects fresh highest-flow mints, excludes stale/future/sub-floor rows, and respects the cap", () => {
+    const gmgn = new Map([
+      ["mint-high", presence("mint-high", 220_000, nowMs - 10_000)],
+      ["mint-mid", presence("mint-mid", 150_000, nowMs - 20_000)],
+      ["mint-low", presence("mint-low", 99_999, nowMs - 10_000)],
+      ["mint-stale", presence("mint-stale", 500_000, nowMs - 181_000)],
+      ["mint-future", presence("mint-future", 500_000, nowMs + 1)],
+    ]);
+
+    expect(selectEysPoolResolutionMints(gmgn, nowMs)).toEqual(["mint-high", "mint-mid"]);
   });
 });

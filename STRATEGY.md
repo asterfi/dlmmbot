@@ -28,6 +28,16 @@ Freeze authority is rechecked from fresh on-chain mint facts during vetting; bin
 step is evaluated by the Eys entry range/depth and bin-rent checks. Core mode keeps
 the original listing gates unchanged.
 
+In active Eys mode, fresh GMGN `1m` rows that meet the configured flow floor are
+also used as a bounded exact-pool lookup source. The scanner resolves those token
+mints through Meteora Datapi and merges matching pools before symbol dedupe and Eys
+proposal evaluation, so a hot mint cannot disappear merely because it fell outside
+the ranked pool sweep. The lookup count is capped by
+`eys.gmgn_pool_resolution_max_mints`; failed or malformed lookups are omitted. This
+supplemental discovery path is not a safety bypass: Eys persistence and flow freshness,
+authoritative mint/freeze/holder/security vetting, quote/depth/rent/sizing checks, and
+executor controls remain mandatory. Core mode is unchanged.
+
 The current live-capable Eys slice is the SOL-side Spot anchor. Token-side breakout
 proposals are retained as strategy evidence but fail closed until a core-owned
 funding and accounting service is implemented; the plugin never performs token

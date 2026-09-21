@@ -14,6 +14,7 @@ import {
   _gmgnAgeThrottleForTests,
   gmgnPaceState,
   gmgnSpendBudget,
+  gmgnIntervalsForStrategy,
 } from "./gmgn.js";
 import type { GmgnPresence, GmgnTrendingToken } from "./gmgn.js";
 
@@ -61,6 +62,14 @@ describe("parseTokenSecurity", () => {
   it("returns null (not honeypot=false) when no security field is recognizable", () => {
     expect(parseTokenSecurity(JSON.stringify({ code: 0, data: { msg: "ok" } }))).toBeNull();
     expect(parseTokenSecurity(JSON.stringify({ code: 0, data: {} }))).toBeNull();
+  });
+});
+
+describe("Eys GMGN interval requirement", () => {
+  it("forces a genuine 1m window for Eys without changing core intervals", () => {
+    expect(gmgnIntervalsForStrategy(["5m", "1h"], true)).toEqual(["1m", "5m", "1h"]);
+    expect(gmgnIntervalsForStrategy(["1m", "5m"], true)).toEqual(["1m", "5m"]);
+    expect(gmgnIntervalsForStrategy(["5m", "1h"], false)).toEqual(["5m", "1h"]);
   });
 });
 
