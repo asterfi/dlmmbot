@@ -98,6 +98,8 @@ export interface ExitIntent {
  */
 export interface StrategyPlugin {
   readonly id: string;
+  /** Core uses score/alpha admission; hosted strategies own their source admission. */
+  readonly admissionClass: "core" | "strategy";
   discover(context: StrategyDiscoveryContext): Promise<StrategyProposal[]>;
   evaluate(input: StrategyInput): StrategyDecision;
   plan(input: StrategyPlanInput): StrategyPlan | null;

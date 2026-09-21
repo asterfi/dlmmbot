@@ -1601,6 +1601,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
   const rot = config().rotation;
   const normalCap = Math.max(0, bankroll.effectiveSlots - rot.alpha_slots);
   const strategy = activeStrategyPlugin();
+  const strategyOwnsAdmission = strategy.admissionClass === "strategy";
   let candidates: Candidate[] = [];
   let discoverySummary: Record<string, unknown> = {};
   let gmgnByMint: ReadonlyMap<string, import("../scanner/gmgn.js").GmgnPresence> = new Map();
@@ -1666,7 +1667,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // book is full, only candidates that could plausibly reach alpha (pre-vet
     // score + max vetting uplift) are worth vetting.
     const maxVetUplift = 0.5 * config().score.w_vetting_soft;
-    if (opened >= normalCap && cand.score + maxVetUplift < rot.alpha_score_min) {
+    if (opened >= normalCap && !strategyOwnsAdmission && cand.score + maxVetUplift < rot.alpha_score_min) {
       recordDecision(cand.tokenMint, cand.pool.address, "skipped", "slots_full", cand.score, { symbol: cand.symbol });
       continue;
     }
@@ -1745,9 +1746,9 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       continue;
     }
 
-    // Slot admission (§5): normal slots for everyone, alpha slots only for
-    // exceptional FUNDAMENTALS; full book -> displacement attempt for alpha only.
-    const isAlpha = baseScore >= rot.alpha_score_min;
+    // Core uses the alpha threshold for slot admission. Hosted strategies such
+    // as Eys have already performed their own source-specific admission.
+    const isAlpha = strategyOwnsAdmission || baseScore >= rot.alpha_score_min;
     const admitted = opened < normalCap || (isAlpha && opened < bankroll.effectiveSlots);
     // Displacement is only PLANNED here — the victim is closed immediately
     // before the open, after every remaining gate has passed. We used to

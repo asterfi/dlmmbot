@@ -29,6 +29,7 @@ import { parse } from "smol-toml";
 // Typed mirror of config.toml. Sections/keys must match STRATEGY.md defaults.
 export interface EysConfig {
   enabled: boolean;
+  market_cap_floor_usd: number;
   flow_floor_usd: number;
   flow_persistence: number;
   observation_ttl_s: number;

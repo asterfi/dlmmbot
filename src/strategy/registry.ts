@@ -4,6 +4,7 @@ import { eysPlugin } from "./eys.js";
 
 const corePlugin: StrategyPlugin = {
   id: "core",
+  admissionClass: "core",
 
   async discover({ candidates }): Promise<StrategyProposal[]> {
     return candidates.map((candidate) => ({

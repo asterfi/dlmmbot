@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { pickBestPool, pickCopycatWinner } from "./scan.js";
+import { eysDiscoveryGates, pickBestPool, pickCopycatWinner } from "./scan.js";
+import { makePool } from "../test/pool.js";
 
 describe("pickCopycatWinner (copycat cooldown, §1.2)", () => {
   const NOW = 1_000_000;
@@ -94,5 +95,38 @@ describe("pickBestPool (deepest gate-passing sibling)", () => {
     const a = pool(20_000, 5, 100, false), b = pool(10_000, 50, 100, false);
     expect(pickBestPool([a, b], passes, 25)).toBe(b);
     expect(pickBestPool([], passes, 25)).toBeNull();
+  });
+});
+
+describe("Eys-first discovery boundary", () => {
+  it("does not apply generic fee, volume, base-fee, or price gates before Eys", () => {
+    const pool = makePool({
+      feeTvl24hPct: 1,
+      feeTvl30mPct: 0.1,
+      vol30mUsd: 1_000,
+      baseFeePct: 10,
+    });
+    expect(eysDiscoveryGates(pool)).toEqual([]);
+  });
+
+  it("rejects malformed TVL instead of allowing NaN into sizing", () => {
+    const pool = makePool({ tvlUsd: Number.NaN });
+    expect(eysDiscoveryGates(pool).map((failure) => failure.gate)).toContain("tvl_invalid");
+  });
+
+  it("retains structural bin-step and freeze-authority safety checks", () => {
+    const base = makePool();
+    const failures = eysDiscoveryGates({
+      ...base,
+      binStep: 10,
+      extras: { ...base.extras, freezeAuthorityDisabled: false },
+    });
+    expect(failures.map((failure) => failure.gate)).toEqual(expect.arrayContaining(["bin_step_new", "freeze_authority_listing"]));
+  });
+
+  it("keeps the structural liquidity and blacklist boundary", () => {
+    const pool = makePool({ tvlUsd: 100 });
+    expect(eysDiscoveryGates(pool).map((failure) => failure.gate)).toContain("tvl_min");
+    expect(eysDiscoveryGates(makePool({ isBlacklisted: true })).map((failure) => failure.gate)).toContain("pool_blacklisted");
   });
 });

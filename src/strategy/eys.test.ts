@@ -78,6 +78,36 @@ describe("hosted Eys strategy boundary", () => {
     });
   });
 
+  it("rejects a flow observation that expires before final evaluation", () => {
+    const pool = makePool();
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now() - 181_000,
+      flowSource: "gmgn-market-trending" as const,
+      persistentObservations: 3,
+      gmgnIntervals: ["1m", "5m", "1h"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "flow_stale" });
+  });
+
+  it("applies the Eys market-cap floor after broad intake", () => {
+    const pool = makePool({ marketCapUsd: 99_999 });
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      persistentObservations: 3,
+      gmgnIntervals: ["1m", "5m", "1h"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "market_cap_floor" });
+  });
+
   it("proposes a core-clamped Spot plan and refuses token-side mutation", () => {
     const pool = makePool();
     const candidate: Candidate = {
@@ -123,6 +153,10 @@ describe("hosted Eys strategy boundary", () => {
       candles: [],
       requestedSizeSol: 0.1,
     })).toBeNull();
+  });
+
+  it("marks Eys proposals as strategy-admitted rather than core-score admitted", () => {
+    expect(eysPlugin.admissionClass).toBe("strategy");
   });
 
   it("keeps core as the default and as the disabled-Eys fallback", () => {

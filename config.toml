@@ -8,6 +8,7 @@ mode = "core"
 
 [eys]
 enabled = false
+market_cap_floor_usd = 100000
 flow_floor_usd = 100000
 flow_persistence = 3
 observation_ttl_s = 180

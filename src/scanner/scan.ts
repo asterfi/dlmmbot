@@ -1,6 +1,6 @@
 import { config, SOL_MINT } from "../config.js";
 import { getDb, isBlacklisted, now, recordDecision } from "../db/db.js";
-import type { Candidate } from "../types.js";
+import type { Candidate, GateFailure, PoolInfo } from "../types.js";
 import { poolGates } from "./gates.js";
 import { priceDivergenceGate } from "./priceGate.js";
 import { trendingByMint, tokenInfoByMint, mergeGmgnPresenceMaps } from "./gmgn.js";
@@ -59,6 +59,45 @@ export function pickBestPool<P extends { tvlUsd: number; feeTvl24hPct: number }>
   return nearDepth.sort(byFee)[0]!;
 }
 
+/**
+ * Eys gets a broad discovery universe before the core economic gates. Keep only
+ * structural facts that are required to identify an executable SOL DLMM pool;
+ * fee/volume/base-fee/price-divergence selection belongs to the Eys evidence
+ * stage or the final execution checks, not this intake boundary.
+ */
+export function eysDiscoveryGates(
+  p: PoolInfo & { extras: import("./meteora.js").RawPoolExtras },
+): GateFailure[] {
+  const g = config().gates;
+  const fails: GateFailure[] = [];
+  const fail = (gate: string, value: unknown, limit: unknown) =>
+    fails.push({ gate, value: String(value), limit: String(limit) });
+  if (p.isBlacklisted === true) fail("pool_blacklisted", "true", "false");
+  if (!Number.isFinite(p.tvlUsd) || p.tvlUsd <= 0) {
+    fail("tvl_invalid", p.tvlUsd, "finite > 0");
+  } else {
+    if (p.tvlUsd < g.tvl_min_usd) fail("tvl_min", p.tvlUsd.toFixed(0), g.tvl_min_usd);
+    if (p.tvlUsd > g.tvl_max_usd) fail("tvl_max", p.tvlUsd.toFixed(0), g.tvl_max_usd);
+  }
+  const ageMs = p.createdAt ? Date.now() - Date.parse(p.createdAt) : null;
+  const isNewToken = ageMs !== null && Number.isFinite(ageMs) && ageMs > 0 && ageMs < 7 * 86_400_000;
+  if (isNewToken && p.binStep < g.bin_step_min_new) {
+    fail("bin_step_new", p.binStep, g.bin_step_min_new);
+  }
+  if (g.fee_collection === "both_only" && !p.feesBothTokens) {
+    fail("fee_collection", `collect_fee_mode=${p.extras.collectFeeMode}`, "0 (both tokens)");
+  }
+  if (g.fee_collection === "quote_only" && p.feesBothTokens) {
+    fail("fee_collection", `collect_fee_mode=${p.extras.collectFeeMode}`, "1 (quote/SOL only)");
+  }
+  if (!p.extras.freezeAuthorityDisabled) {
+    fail("freeze_authority_listing", "enabled", "disabled");
+  }
+  if (p.mintY !== SOL_MINT) fail("quote_mint", p.mintY, SOL_MINT);
+  if (p.mintX === SOL_MINT) fail("base_mint", p.mintX, "non-SOL token");
+  return fails;
+}
+
 /** Pure winner selection for one symbol group: mint -> 24h vol. Exported for tests. */
 export function pickCopycatWinner(
   volByMint: Map<string, number>,
@@ -103,7 +142,12 @@ export interface ScanResult {
   };
 }
 
+export function eysModeActive(): boolean {
+  return config().strategy?.mode === "eys" && config().eys?.enabled === true;
+}
+
 export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanResult> {
+  const eysMode = eysModeActive();
   const [sweptPools, gmgnTrending, eventDiscovery] = await Promise.all([
     sweepPools(),
     trendingByMint(),
@@ -164,7 +208,11 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
   const bestPool = new Map<string, (typeof memePools)[number]>();
   const tiePct = config().scanner.sibling_tvl_tie_pct ?? 25;
   for (const [mint, list] of poolsByMint) {
-    const pick = pickBestPool(list, (p) => poolGates(p).length === 0, tiePct);
+    const pick = pickBestPool(
+      list,
+      (p) => (eysMode ? eysDiscoveryGates(p) : poolGates(p)).length === 0,
+      tiePct,
+    );
     if (pick) bestPool.set(mint, pick);
   }
 
@@ -172,12 +220,12 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
   const rejected: Candidate[] = [];
 
   for (const p of bestPool.values()) {
-    const gateFailures = poolGates(p);
+    const gateFailures = eysMode ? eysDiscoveryGates(p) : poolGates(p);
     const symbol = p.name.split("-")[0] ?? p.name;
 
-    // §2.1 price-divergence gate needs a Jupiter call per pool — only for
-    // gate-passers. Fails closed when the quote is unavailable.
-    if (gateFailures.length === 0) {
+    // Eys evaluates price/flow economics after broad intake. Core retains the
+    // generic Jupiter divergence gate at scanner admission.
+    if (!eysMode && gateFailures.length === 0) {
       const divergence = await priceDivergenceGate(p.mintX, p.price);
       if (divergence) gateFailures.push(divergence);
     }
@@ -210,7 +258,7 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
     const coreGm = gm && (gm.intervals.has("5m") || gm.intervals.has("1h")) ? gm : undefined;
     if (coreGm) {
       const t = coreGm.tokenByInterval.get("5m") ?? coreGm.tokenByInterval.get("1h") ?? coreGm.token;
-      if (g.require_renounced && (!t.renouncedMint || !t.renouncedFreeze)) {
+      if (!eysMode && g.require_renounced && (!t.renouncedMint || !t.renouncedFreeze)) {
         gateFailures.push({ gate: "gmgn_renounced", value: `mint=${t.renouncedMint} freeze=${t.renouncedFreeze}`, limit: "both renounced" });
       } else {
         const in5m = coreGm.intervals.has("5m");

@@ -31,6 +31,7 @@ export interface FlowObservation {
 
 const DEFAULT_EYS = {
   enabled: false,
+  market_cap_floor_usd: 100_000,
   flow_floor_usd: 100_000,
   flow_persistence: 3,
   observation_ttl_s: 180,
@@ -56,6 +57,7 @@ function settings() {
   const raw = config().eys ?? {};
   return {
     enabled: raw.enabled === true,
+    market_cap_floor_usd: finiteAtLeast(raw.market_cap_floor_usd, DEFAULT_EYS.market_cap_floor_usd, 1),
     flow_floor_usd: finiteAtLeast(raw.flow_floor_usd, DEFAULT_EYS.flow_floor_usd, 1),
     flow_persistence: integerAtLeast(raw.flow_persistence, DEFAULT_EYS.flow_persistence, 1),
     observation_ttl_s: finiteAtLeast(raw.observation_ttl_s, DEFAULT_EYS.observation_ttl_s, 1),
@@ -192,6 +194,18 @@ export function evaluateEys(
   const cfg = settings();
   if (!cfg.enabled) return { accepted: false, reason: "eys_disabled" };
   if (evidence.exactPool !== candidate.pool.address) return { accepted: false, reason: "exact_pool_mismatch" };
+  const nowMs = Date.now();
+  if (
+    evidence.flowObservedAtMs == null ||
+    !Number.isFinite(evidence.flowObservedAtMs) ||
+    evidence.flowObservedAtMs > nowMs ||
+    nowMs - evidence.flowObservedAtMs > cfg.observation_ttl_s * 1000
+  ) {
+    return { accepted: false, reason: "flow_stale" };
+  }
+  if (!(Number.isFinite(candidate.pool.marketCapUsd) && candidate.pool.marketCapUsd >= cfg.market_cap_floor_usd)) {
+    return { accepted: false, reason: "market_cap_floor" };
+  }
   if (!(evidence.flowUsdPerMin != null && evidence.flowUsdPerMin >= cfg.flow_floor_usd)) {
     return { accepted: false, reason: "flow_floor" };
   }
@@ -279,13 +293,32 @@ async function refreshPositionFlow(poolAddress: string, tokenMint: string): Prom
 
 export const eysPlugin: StrategyPlugin = {
   id: "eys",
+  admissionClass: "strategy",
 
   async discover(context: StrategyDiscoveryContext): Promise<StrategyProposal[]> {
     const cfg = settings();
     if (!cfg.enabled) return [];
-    const intake = context.candidates.filter((candidate) => context.gmgnByMint.has(candidate.tokenMint));
+
+    // Event intake can discover an exact pool before the mint appears in the
+    // broad trending response. Enrich only the highest-ranked missing mints and
+    // keep the direct-call budget bounded inside gmgn.ts.
+    const missingMints = context.candidates
+      .filter((candidate) => !context.gmgnByMint.has(candidate.tokenMint))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5)
+      .map((candidate) => candidate.tokenMint);
+    let direct = new Map<string, import("../scanner/gmgn.js").GmgnPresence>();
+    if (missingMints.length > 0) {
+      try {
+        direct = await tokenInfoByMint(missingMints);
+      } catch {
+        // Missing enrichment is not trusted; candidates without a 1m mark stay out.
+      }
+    }
+    const gmgnByMint = mergeGmgnPresenceMaps(context.gmgnByMint, direct);
+    const intake = context.candidates.filter((candidate) => gmgnByMint.has(candidate.tokenMint));
     const evaluated = await mapLimit(intake, async (candidate): Promise<StrategyProposal | null> => {
-      const presence = context.gmgnByMint.get(candidate.tokenMint);
+      const presence = gmgnByMint.get(candidate.tokenMint);
       if (!presence) return null;
       const flow = gmgnOneMinuteFlow(presence, Date.now(), cfg.observation_ttl_s * 1000);
       if (!flow) return null;
