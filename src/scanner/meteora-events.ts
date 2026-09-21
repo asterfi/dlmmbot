@@ -17,7 +17,7 @@ export const METEORA_DLMM_PROGRAM_ID = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaP
 
 const CONFIRMED_CONFIG = {
   commitment: "confirmed" as const,
-  maxSupportedTransactionVersion: 0 as const,
+  maxSupportedTransactionVersion: 1 as const,
 };
 
 interface InitializationLayout {
