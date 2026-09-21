@@ -32,7 +32,9 @@ The scanner also has an opt-in, bounded Meteora DLMM event-intake path. It polls
 configured Solana RPC (Helius recommended), decodes published pool-initialization
 instructions, persists signatures, resolves the exact pool through Datapi, and can
 fetch direct GMGN `token info` for the event mint so Eys can see a fresh 1m row even
-when the mint is outside the capped trending snapshot. It supplements the normal
+when the mint is outside the capped trending snapshot. Recent exact-pool observations
+also receive priority within the bounded direct-enrichment slots, so a hot pool can
+accumulate the required persistence evidence across scans. It supplements the normal
 sweep and, when Eys is active, joins the broad Eys intake; it never bypasses shared
 vetting, quote, sizing, rent, or executor gates. `[discovery].event_intake_enabled = false` is the tracked default. Its bounded queue gives most parse capacity to the newest pending signatures while retaining a small oldest-first slice for historical backfill.
 

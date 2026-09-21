@@ -302,9 +302,23 @@ export const eysPlugin: StrategyPlugin = {
     // Event intake can discover an exact pool before the mint appears in the
     // broad trending response. Enrich only the highest-ranked missing mints and
     // keep the direct-call budget bounded inside gmgn.ts.
+    const nowMs = Date.now();
+    const recentObservedAtByPool = new Map<string, number>();
+    const observationCutoff = nowMs - cfg.observation_ttl_s * 1000;
+    for (const row of loadRows()) {
+      if (row.tsMs < observationCutoff || row.tsMs > nowMs) continue;
+      const previous = recentObservedAtByPool.get(row.poolAddress) ?? 0;
+      if (row.tsMs > previous) recentObservedAtByPool.set(row.poolAddress, row.tsMs);
+    }
     const missingMints = context.candidates
       .filter((candidate) => !context.gmgnByMint.has(candidate.tokenMint))
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => {
+        const aObservedAt = recentObservedAtByPool.get(a.pool.address) ?? 0;
+        const bObservedAt = recentObservedAtByPool.get(b.pool.address) ?? 0;
+        if ((aObservedAt > 0) !== (bObservedAt > 0)) return aObservedAt > 0 ? -1 : 1;
+        if (aObservedAt !== bObservedAt) return bObservedAt - aObservedAt;
+        return b.score - a.score;
+      })
       .slice(0, 5)
       .map((candidate) => candidate.tokenMint);
     let direct = new Map<string, import("../scanner/gmgn.js").GmgnPresence>();

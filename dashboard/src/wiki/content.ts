@@ -189,7 +189,7 @@ export const WIKI_SECTIONS: WikiSection[] = [
           { label: "Dedupe", detail: "One mint wins per ticker", icon: "check" },
           { label: "Lane intake", detail: "Eys: structural only · core: pool gates", icon: "chart" },
           { label: "Pick the pool", detail: "Deepest active-lane pool per token — not the highest fee/TVL, which picks the thinnest one", icon: "chart" },
-          { label: "Eys evidence", detail: "Fresh 1m flow, market cap, persistence", icon: "zap" },
+          { label: "Eys evidence", detail: "Fresh 1m flow, market cap, persistence; recently observed pools get bounded refresh priority", icon: "zap" },
           { label: "Token vet", detail: "Authorities, holders, rugs", icon: "shield" },
           { label: "Score", detail: "0–100 opportunity", icon: "zap" },
           { label: "Queue", detail: "Best first", icon: "entry" },
