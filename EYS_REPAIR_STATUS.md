@@ -32,3 +32,17 @@ Do not label this complete Eys or enable live execution merely because the bound
 
 Production DB/config/log backup: /opt/hermes-projects/dlmmbot-backups/eys-integration-20260922T073554Z (SQLite quick_check passed).
 Working branch: fix/eys-integration-20260922; base c22a1b0.
+
+## Live deployment (2026-09-22 10:29 UTC)
+
+Authorized by the operator after both remaining gaps were closed (commit e301953).
+
+- Independent pre-live review: VERDICT APPROVE, no findings (deleg_2b68d011).
+- Pre-live backup: /opt/hermes-projects/dlmmbot-backups/prelive-20260922T101730Z (integrity_check ok).
+- State before start: 0 open positions, 0 pending acquisition intents, no farmer.lock, no competing process.
+- Launch: `cd /opt/hermes-projects/dlmmbot && npm run run >> data/live-canary.log 2>&1`.
+- Readback: leaf pid 3343065, build e301953, cwd production worktree, fd/1 and fd/2 both point at data/live-canary.log, `[live] executor armed`, reconcile 0/0/0/0, `starting in live mode`, strategy=eys, eys.enabled=true, entry_sol=0.1, flow_floor_usd=100000, exec.mode=live + FARMER_MODE=live, max_positions=1, sizing.mode=fixed. Wallet 0.5901 SOL.
+- Liveness: pool_snapshots and decisions both advanced across consecutive cycles; 138 fresh `eys_flow_unavailable` rows in 3 minutes, 0 proposals, 0 positions.
+
+Still NOT complete Eys: single anchor stage only, no child stages, no restart-safe staged ownership, no full source selection (fee denomination/10 SOL, lore, developer-fee mapping), one-position cap, zero same-token reentry. Real-provider evidence shows the lane currently qualifies 0 of ~137 candidates per cycle — running live proves health and evidence flow, not opportunity capture or profitability.
+
