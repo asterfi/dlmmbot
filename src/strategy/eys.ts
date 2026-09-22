@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { config, effectiveEysFlowFloorUsd, EYS_MAX_POOL_RESOLUTION_MINTS, EYS_MIN_FLOW_FLOOR_USD } from "../config.js";
 import { recordDecision } from "../db/db.js";
 import { mapLimit } from "../concurrent.js";
-import { gmgnOneMinuteFlow, mergeGmgnPresenceMaps, tokenInfoByMint } from "../scanner/gmgn.js";
+import { GMGN_ONE_MINUTE_FRESHNESS_MS, gmgnOneMinuteFlow, mergeGmgnPresenceMaps, tokenInfoByMint } from "../scanner/gmgn.js";
 import type { Candidate } from "../types.js";
 import { binArraysSpanned, binIdToPrice, priceToBinId } from "../ranges/planner.js";
 import type {
@@ -33,7 +33,6 @@ const DEFAULT_EYS = {
   enabled: false,
   market_cap_floor_usd: 100_000,
   flow_floor_usd: EYS_MIN_FLOW_FLOOR_USD,
-  observation_ttl_s: 180,
   entry_sol: 0.1,
   anchor_range_below_pct: 40,
   tight_price_change_pct: 10,
@@ -82,7 +81,6 @@ function settings() {
     enabled: raw.enabled === true,
     market_cap_floor_usd: finiteAtLeast(raw.market_cap_floor_usd, DEFAULT_EYS.market_cap_floor_usd, 1),
     flow_floor_usd: effectiveEysFlowFloorUsd(raw.flow_floor_usd),
-    observation_ttl_s: finiteAtLeast(raw.observation_ttl_s, DEFAULT_EYS.observation_ttl_s, 1),
     entry_sol: finiteAtLeast(raw.entry_sol, DEFAULT_EYS.entry_sol, 0.000001),
     anchor_range_below_pct: finiteAtLeast(raw.anchor_range_below_pct, DEFAULT_EYS.anchor_range_below_pct, 0),
     tight_price_change_pct: finiteAtLeast(raw.tight_price_change_pct, DEFAULT_EYS.tight_price_change_pct, 0),
@@ -218,7 +216,7 @@ export function evaluateEys(
     evidence.flowObservedAtMs == null ||
     !Number.isFinite(evidence.flowObservedAtMs) ||
     evidence.flowObservedAtMs > nowMs ||
-    nowMs - evidence.flowObservedAtMs > cfg.observation_ttl_s * 1000
+    nowMs - evidence.flowObservedAtMs > GMGN_ONE_MINUTE_FRESHNESS_MS
   ) {
     return { accepted: false, reason: "flow_stale" };
   }
@@ -286,7 +284,7 @@ export const eysPlugin: StrategyPlugin = {
     // keep the direct-call budget bounded inside gmgn.ts.
     const nowMs = Date.now();
     const recentObservedAtByPool = new Map<string, number>();
-    const observationCutoff = nowMs - cfg.observation_ttl_s * 1000;
+    const observationCutoff = nowMs - GMGN_ONE_MINUTE_FRESHNESS_MS;
     for (const row of loadRows()) {
       if (row.tsMs < observationCutoff || row.tsMs > nowMs) continue;
       const previous = recentObservedAtByPool.get(row.poolAddress) ?? 0;
@@ -316,7 +314,7 @@ export const eysPlugin: StrategyPlugin = {
     const evaluated = await mapLimit(intake, async (candidate): Promise<StrategyProposal | null> => {
       const presence = gmgnByMint.get(candidate.tokenMint);
       if (!presence) return null;
-      const flow = gmgnOneMinuteFlow(presence, Date.now(), cfg.observation_ttl_s * 1000);
+      const flow = gmgnOneMinuteFlow(presence, Date.now(), GMGN_ONE_MINUTE_FRESHNESS_MS);
       if (!flow) return null;
       recordFlowObservation({
         poolAddress: candidate.pool.address,

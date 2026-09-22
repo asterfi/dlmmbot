@@ -3,7 +3,7 @@ import { getDb, isBlacklisted, now, recordDecision } from "../db/db.js";
 import type { Candidate, GateFailure, PoolInfo } from "../types.js";
 import { poolGates } from "./gates.js";
 import { priceDivergenceGate } from "./priceGate.js";
-import { gmgnOneMinuteFlow, trendingByMint, tokenInfoByMint, mergeGmgnPresenceMaps } from "./gmgn.js";
+import { GMGN_ONE_MINUTE_FRESHNESS_MS, gmgnOneMinuteFlow, trendingByMint, tokenInfoByMint, mergeGmgnPresenceMaps } from "./gmgn.js";
 import { discoverRecentMeteoraPools } from "./meteora-events.js";
 import { fetchPoolsByTokenMints, sweepPools } from "./meteora.js";
 import { fetchCandlesDeep } from "./candles.js";
@@ -154,7 +154,6 @@ export function selectEysPoolResolutionMints(
 ): string[] {
   const cfg = config().eys;
   const floor = effectiveEysFlowFloorUsd(cfg?.flow_floor_usd);
-  const ttlMs = (Number.isFinite(cfg?.observation_ttl_s) ? cfg.observation_ttl_s : 180) * 1000;
   const maxMints = Math.min(
     Number.isInteger(cfg?.gmgn_pool_resolution_max_mints) && cfg.gmgn_pool_resolution_max_mints > 0
       ? cfg.gmgn_pool_resolution_max_mints
@@ -162,7 +161,7 @@ export function selectEysPoolResolutionMints(
     EYS_MAX_POOL_RESOLUTION_MINTS,
   );
   return [...gmgnByMint.entries()]
-    .map(([mint, presence]) => ({ mint, flow: gmgnOneMinuteFlow(presence, nowMs, ttlMs) }))
+    .map(([mint, presence]) => ({ mint, flow: gmgnOneMinuteFlow(presence, nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS) }))
     .filter((row): row is { mint: string; flow: NonNullable<ReturnType<typeof gmgnOneMinuteFlow>> } =>
       row.flow !== null && row.flow.volumeUsd >= floor,
     )
@@ -182,7 +181,7 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
   const gmgnByMint = mergeGmgnPresenceMaps(gmgnTrending, eventGmgn);
   const gmgnMintsAtFlowFloor = eysMode
     ? [...gmgnTrending.values()].filter((presence) => {
-      const flow = gmgnOneMinuteFlow(presence, Date.now(), (config().eys.observation_ttl_s ?? 180) * 1000);
+      const flow = gmgnOneMinuteFlow(presence, Date.now(), GMGN_ONE_MINUTE_FRESHNESS_MS);
       return flow !== null && flow.volumeUsd >= effectiveEysFlowFloorUsd(config().eys.flow_floor_usd);
     }).length
     : 0;

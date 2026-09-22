@@ -8,6 +8,7 @@ import type { Candidate } from "../types.js";
 import type { GmgnPresence, GmgnTrendingToken } from "../scanner/gmgn.js";
 
 const gmgnMocks = vi.hoisted(() => ({
+  GMGN_ONE_MINUTE_FRESHNESS_MS: 60_000,
   gmgnOneMinuteFlow: vi.fn(),
   mergeGmgnPresenceMaps: vi.fn(),
   tokenInfoByMint: vi.fn(),
@@ -99,7 +100,7 @@ describe("hosted Eys strategy boundary", () => {
     const recentCandidate = makeCandidate(0, 1);
     const competitors = Array.from({ length: 5 }, (_, index) => makeCandidate(index + 1, 100 + index));
     const observedAtMs = Date.now();
-    for (const offsetMs of [120_000, 60_000]) {
+    for (const offsetMs of [30_000, 45_000]) {
       recordFlowObservation({
         poolAddress: recentCandidate.pool.address,
         tokenMint: recentCandidate.tokenMint,
@@ -165,7 +166,7 @@ describe("hosted Eys strategy boundary", () => {
     const evidence = {
       exactPool: pool.address,
       flowUsdPerMin: 110_000,
-      flowObservedAtMs: Date.now() - 181_000,
+      flowObservedAtMs: Date.now() - 61_000,
       flowSource: "gmgn-market-trending" as const,
       gmgnIntervals: ["1m", "5m", "1h"],
       priceChangePct1h: 2,

@@ -65,10 +65,13 @@ export interface GmgnOneMinuteFlow {
   observedAtMs: number;
 }
 
+/** Eys consumes the current GMGN 1m fetch cadence, not a persistence window. */
+export const GMGN_ONE_MINUTE_FRESHNESS_MS = 60_000;
+
 export function gmgnOneMinuteFlow(
   presence: GmgnPresence | undefined,
   nowMs = Date.now(),
-  freshnessMs = 180_000,
+  freshnessMs = GMGN_ONE_MINUTE_FRESHNESS_MS,
 ): GmgnOneMinuteFlow | null {
   const token = presence?.tokenByInterval.get("1m");
   const observedAtMs = presence?.fetchedAtMsByInterval.get("1m");

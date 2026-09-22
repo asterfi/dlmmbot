@@ -164,13 +164,18 @@ describe("Eys one-minute GMGN provenance", () => {
       tokenByInterval: new Map([["1m", token(125_000)], ["5m", token(500_000)]]),
       fetchedAtMsByInterval: new Map([["1m", now - 30_000], ["5m", now - 30_000]]),
     };
-    expect(gmgnOneMinuteFlow(presence, now, 180_000)).toEqual({
+    expect(gmgnOneMinuteFlow(presence, now)).toEqual({
       source: "gmgn-market-trending",
       cadence: "1m",
       volumeUsd: 125_000,
       observedAtMs: now - 30_000,
     });
     expect(gmgnOneMinuteFlow(presence, now, 10_000)).toBeNull();
+    const stale = {
+      ...presence,
+      fetchedAtMsByInterval: new Map([["1m", now - 61_000], ["5m", now - 30_000]]),
+    };
+    expect(gmgnOneMinuteFlow(stale, now)).toBeNull();
   });
 });
 

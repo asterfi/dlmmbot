@@ -193,7 +193,6 @@ describe("Eys GMGN exact-pool resolution selection", () => {
     c.strategy.mode = "eys";
     c.eys.enabled = true;
     c.eys.flow_floor_usd = 1;
-    c.eys.observation_ttl_s = 180;
     c.eys.gmgn_pool_resolution_max_mints = 2;
   }));
   afterEach(() => restoreConfig());
@@ -203,7 +202,7 @@ describe("Eys GMGN exact-pool resolution selection", () => {
       ["mint-high", presence("mint-high", 220_000, nowMs - 10_000)],
       ["mint-mid", presence("mint-mid", 150_000, nowMs - 20_000)],
       ["mint-low", presence("mint-low", 99_999, nowMs - 10_000)],
-      ["mint-stale", presence("mint-stale", 500_000, nowMs - 181_000)],
+      ["mint-stale", presence("mint-stale", 500_000, nowMs - 61_000)],
       ["mint-future", presence("mint-future", 500_000, nowMs + 1)],
     ]);
 

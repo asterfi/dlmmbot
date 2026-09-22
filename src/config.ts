@@ -39,7 +39,6 @@ export interface EysConfig {
   enabled: boolean;
   market_cap_floor_usd: number;
   flow_floor_usd: number;
-  observation_ttl_s: number;
   entry_sol: number;
   anchor_range_below_pct: number;
   tight_price_change_pct: number;
