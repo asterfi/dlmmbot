@@ -233,6 +233,35 @@ describe("managePositions contracts", () => {
     expect(row.exit_reason).toBe("P1_stop");
   });
 
+  it("Eys green take-profit: closes a +2.5% print instead of riding it back", async () => {
+    // Eys' exit rule (post 2099817371372560521): "Whether it's 1%, 2%, or 3%,
+    // I'm happy with it — profit is profit." Friction on a 0.1 SOL anchor
+    // measured 1.1% (PAID pos#2), so the floor sits at +2.5%.
+    installConfig((c) => { c.strategy.mode = "eys"; c.eys.green_take_profit_pct = 2.5; });
+    const id = insertOpenPosition({ entrySol: 0.4 });
+    exec.setMark(id, { valueSol: 0.411, price: 1, activeBinId: 150, inRange: true }); // +2.75%
+    await managePositions(exec);
+    expect(exec.closed).toEqual([{ id, reason: "Eys_green" }]);
+    const row = getDb().prepare("SELECT exit_reason FROM positions WHERE id = ?").get(id) as { exit_reason: string };
+    expect(row.exit_reason).toBe("Eys_green");
+  });
+
+  it("green take-profit stays armed below its floor", async () => {
+    installConfig((c) => { c.strategy.mode = "eys"; c.eys.green_take_profit_pct = 2.5; });
+    const id = insertOpenPosition({ entrySol: 0.4 });
+    exec.setMark(id, { valueSol: 0.405, price: 1, activeBinId: 150, inRange: true }); // +1.25% — real, but sub-friction
+    await managePositions(exec);
+    expect(exec.closed).toEqual([]);
+  });
+
+  it("green take-profit never fires on the core book", async () => {
+    installConfig((c) => { c.eys.green_take_profit_pct = 2.5; }); // strategy stays core
+    const id = insertOpenPosition({ entrySol: 0.4 });
+    exec.setMark(id, { valueSol: 0.411, price: 1, activeBinId: 150, inRange: true });
+    await managePositions(exec);
+    expect(exec.closed).toEqual([]);
+  });
+
   /**
    * The executor fetches pool health for P0/P2 on every mark; before v0.19.1 the
    * insert dropped it, which left tvl_drain and rotation decay — 39% of closed

@@ -40,6 +40,10 @@ const DEFAULT_EYS = {
   token_breakout_pct: 25,
   dump_bonus_price_change_pct: 20,
   gmgn_pool_resolution_max_mints: 12,
+  // Eys' "at least 10 SOL in fees" rule (post 2099817371372560521) ≈ $1,700.
+  min_pool_fees_usd: 1_700,
+  // Entry floor == meme rotation exit floor: feeTvl30m × 48 ≥ 5%/d.
+  min_fee_yield_daily_pct: 5,
 };
 
 function finiteAtLeast(value: unknown, fallback: number, minimum: number): number {
@@ -82,6 +86,8 @@ function settings() {
     enabled: raw.enabled === true,
     market_cap_floor_usd: finiteAtLeast(raw.market_cap_floor_usd, DEFAULT_EYS.market_cap_floor_usd, 1),
     flow_floor_usd: effectiveEysFlowFloorUsd(raw.flow_floor_usd),
+    min_pool_fees_usd: finiteAtLeast(raw.min_pool_fees_usd, DEFAULT_EYS.min_pool_fees_usd, 0),
+    min_fee_yield_daily_pct: finiteAtLeast(raw.min_fee_yield_daily_pct, DEFAULT_EYS.min_fee_yield_daily_pct, 0),
     entry_sol: finiteAtLeast(raw.entry_sol, DEFAULT_EYS.entry_sol, 0.000001),
     anchor_range_below_pct: finiteAtLeast(raw.anchor_range_below_pct, DEFAULT_EYS.anchor_range_below_pct, 0),
     tight_price_change_pct: finiteAtLeast(raw.tight_price_change_pct, DEFAULT_EYS.tight_price_change_pct, 0),
@@ -227,6 +233,15 @@ export function evaluateEys(
   if (!(evidence.flowUsdPerMin != null && evidence.flowUsdPerMin >= cfg.flow_floor_usd)) {
     return { accepted: false, reason: "flow_floor" };
   }
+  // Eys' selection rules (post 2099817371372560521): "at least 10 SOL in
+  // fees" — thin fees on busy volume is bought volume — plus self-consistency
+  // with our own exit ladder: never enter a pool whose 30m fee yield is
+  // already under the rotation floor (PAID pos#2: entered at ~2%/d, rotated
+  // out in 47s for −1.1% because fees could never cover the round trip).
+  const feesUsd24h = (candidate.pool.tvlUsd * candidate.pool.feeTvl24hPct) / 100;
+  if (!(feesUsd24h >= cfg.min_pool_fees_usd)) return { accepted: false, reason: "pool_fees_below_min" };
+  const feeYieldDailyPct = candidate.pool.feeTvl30mPct * 48;
+  if (!(feeYieldDailyPct >= cfg.min_fee_yield_daily_pct)) return { accepted: false, reason: "fee_yield_below_floor" };
   if (stage !== "anchor") return { accepted: false, reason: "child_stage_unsupported" };
   return { accepted: true };
 }

@@ -16,6 +16,13 @@ tight_price_change_pct = 10
 token_breakout_pct = 25
 dump_bonus_price_change_pct = 20
 gmgn_pool_resolution_max_mints = 12
+# Eys selection rules (post 2099817371372560521): >=10 SOL fees/day (~$1700)
+# and never enter below the meme rotation exit floor (feeTvl30m*48 >= 5%/d).
+min_pool_fees_usd = 1700
+min_fee_yield_daily_pct = 5
+# "Profit is profit": close an Eys position at +2.5% MTM (covers ~1.1% measured
+# round-trip friction). 0 disables.
+green_take_profit_pct = 2.5
 
 # Optional local Laya model gate. Keep off until the model is Eys-calibrated
 # and the isolated replay/validation gates pass.

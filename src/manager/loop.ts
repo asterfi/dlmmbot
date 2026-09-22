@@ -1162,6 +1162,24 @@ export async function managePositions(exec: Executor): Promise<void> {
         clearTimer(stopStreak, pos.id);
       }
 
+      // --- GREEN TAKE-PROFIT: "profit is profit" -------------------------
+      // Eys exits as soon as the print is green (post 2099817371372560521:
+      // "Whether it's 1%, 2%, or 3%, I'm happy with it"). Measured round-trip
+      // friction on a 0.1 SOL anchor was 1.1% (PAID pos#2), so the floor
+      // sits above it. Strategy-scoped: the core book never cuts winners.
+      const greenTpPct =
+        config().strategy.mode === "eys" ? config().eys.green_take_profit_pct ?? 0 : 0;
+      if (greenTpPct > 0 && stopFrac >= 1 + greenTpPct / 100) {
+        const { exitSol } = await closeAndReport(
+          exec, pos, "Eys_green", config().exec.exit_slippage_bps, "close",
+          `green take-profit: +${((stopFrac - 1) * 100).toFixed(2)}% at or above +${greenTpPct}% floor`,
+        );
+        clearRangeTimers(pos.id);
+        bankProfit(pos, exitSol, "Eys green take-profit");
+        recordDecision(pos.tokenMint, pos.poolAddress, "exited", "eys_green_tp", null, { stopFrac, greenTpPct, mark, sleeve });
+        continue;
+      }
+
       // --- P2 ROTATION: age limit + consecutive fee/volume decay ---
       if (ageH > pm.max_age_h) {
         await closeAndReport(exec, pos, "P2_rotation", config().exec.exit_slippage_bps, "close", `rotation: max age ${pm.max_age_h}h reached`);

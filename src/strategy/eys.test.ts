@@ -195,6 +195,41 @@ describe("hosted Eys strategy boundary", () => {
     expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "market_cap_floor" });
   });
 
+  it("rejects a pool under Eys' fee floor — thin fees on busy volume are bought volume", () => {
+    // Eys' selection rule (post 2099817371372560521): "at least 10 SOL in
+    // fees". $1,700 ≈ 10 SOL; a $50k pool earning 2%/d is only $1,000/24h.
+    const pool = makePool({ tvlUsd: 50_000, feeTvl24hPct: 2 });
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
+      gmgnIntervals: ["1m"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "pool_fees_below_min" });
+  });
+
+  it("never enters a pool whose 30m fee yield is already under the rotation exit floor", () => {
+    // Self-consistency: the meme rotation gate exits below 5%/d, so entering
+    // there guarantees an exit before fees can cover round-trip friction —
+    // the exact failure of PAID pos#2 (47s, −1.1%).
+    const pool = makePool({ feeTvl30mPct: 0.04 }); // 0.04 × 48 = 1.92%/d < 5%/d
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
+      gmgnIntervals: ["1m"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "fee_yield_below_floor" });
+  });
+
   it("proposes core-clamped SOL Spot and token-side Spot plans", () => {
     const pool = makePool();
     const candidate: Candidate = {

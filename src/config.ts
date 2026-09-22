@@ -61,6 +61,23 @@ export interface EysConfig {
   dump_bonus_price_change_pct: number;
   /** Maximum fresh GMGN 1m mints to resolve into exact Meteora pools per scan. */
   gmgn_pool_resolution_max_mints: number;
+  /**
+   * Eys' "at least 10 SOL in fees" selection rule (post 2099817371372560521),
+   * pinned in USD so the gate stays synchronous (~10 SOL at $170). Thin fees
+   * on busy volume are bought volume — his stated fake-volume check.
+   */
+  min_pool_fees_usd?: number;
+  /**
+   * Never enter a pool whose 30m fee yield is already under the rotation
+   * exit floor — entering what you would immediately exit is how PAID pos#2
+   * lost 1.1% in 47s. Keep equal to [manage] meme rotation floor (5).
+   */
+  min_fee_yield_daily_pct?: number;
+  /**
+   * "Profit is profit": close once MTM (incl. unclaimed fees) reaches
+   * entry × (1 + pct/100). 0 disables; applies only to strategy mode "eys".
+   */
+  green_take_profit_pct?: number;
 }
 
 export interface LayaConfig {
