@@ -150,6 +150,7 @@ describe("hosted Eys strategy boundary", () => {
       flowUsdPerMin: 110_000,
       flowObservedAtMs: now,
       flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
       gmgnIntervals: ["5m", "1h"],
       priceChangePct1h: 2,
     };
@@ -168,6 +169,7 @@ describe("hosted Eys strategy boundary", () => {
       flowUsdPerMin: 110_000,
       flowObservedAtMs: Date.now() - 61_000,
       flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
       gmgnIntervals: ["1m", "5m", "1h"],
       priceChangePct1h: 2,
     };
@@ -182,6 +184,7 @@ describe("hosted Eys strategy boundary", () => {
       flowUsdPerMin: 110_000,
       flowObservedAtMs: Date.now(),
       flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
       gmgnIntervals: ["1m", "5m", "1h"],
       priceChangePct1h: 2,
     };
@@ -210,6 +213,7 @@ describe("hosted Eys strategy boundary", () => {
         flowUsdPerMin: 120_000,
         flowObservedAtMs: Date.now(),
         flowSource: "gmgn-market-trending" as const,
+        flowCadence: "1m" as const,
         gmgnIntervals: ["5m"],
         priceChangePct1h: 1,
       },
@@ -232,10 +236,18 @@ describe("hosted Eys strategy boundary", () => {
       candles: [],
       requestedSizeSol: 0.1,
     });
-    expect(tokenPlan?.fundingSide).toBe("token");
-    expect(tokenPlan?.shape).toBe("spot");
-    expect(tokenPlan?.range.minBinId).toBeLessThan(tokenPlan!.range.maxBinId);
-    expect(tokenPlan?.range.bottomPricePct).toBe(0);
+    expect(tokenPlan).toBeNull();
+    expect(evaluateEys(candidate, base.evidence, "token")).toEqual({ accepted: false, reason: "child_stage_unsupported" });
+  });
+
+  it.each([-90, -20, 0, 10, 25, 1000])("starts with a SOL anchor at hourly return %s", async (change) => {
+    const pool = makePool();
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const presence = makeGmgnPresence(pool.mintX, 400_000, Date.now());
+    presence.token.priceChangePct1h = change;
+    const proposals = await eysPlugin.discover({ candidates: [candidate], gmgnByMint: new Map([[pool.mintX, presence]]) });
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toMatchObject({ stage: "anchor", fundingSide: "sol", shape: "spot" });
   });
 
   it("marks Eys proposals as strategy-admitted rather than core-score admitted", () => {

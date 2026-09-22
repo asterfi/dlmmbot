@@ -53,7 +53,7 @@ function integerAtLeast(value: unknown, fallback: number, minimum: number): numb
 const EYS_REJECTION_DEDUPE_MS = 5 * 60_000;
 const eysRejectionLoggedAt = new Map<string, number>();
 
-function recordHighFlowEysRejection(candidate: Candidate, reason: string | undefined, evidence: unknown): void {
+function recordEysRejection(candidate: Candidate, reason: string | undefined, evidence: unknown): void {
   const gate = `eys_${reason ?? "rejected"}`;
   const key = `${candidate.tokenMint}:${candidate.pool.address}:${gate}`;
   const nowMs = Date.now();
@@ -226,7 +226,7 @@ export function evaluateEys(
   if (!(evidence.flowUsdPerMin != null && evidence.flowUsdPerMin >= cfg.flow_floor_usd)) {
     return { accepted: false, reason: "flow_floor" };
   }
-  if (stage === "token") return { accepted: true };
+  if (stage !== "anchor") return { accepted: false, reason: "child_stage_unsupported" };
   return { accepted: true };
 }
 
@@ -307,9 +307,9 @@ export const eysPlugin: StrategyPlugin = {
     const cfg = settings();
     if (!cfg.enabled) return [];
 
-    // Event intake can discover an exact pool before the mint appears in the
-    // broad trending response. Enrich only the highest-ranked missing mints and
-    // keep the direct-call budget bounded inside gmgn.ts.
+    // Exact candidates may be absent from trending, or their 1m evidence may
+    // have expired during scanner enrichment. Refresh at most five unique mints
+    // through the existing budgeted provider path; never re-stamp an old row.
     const nowMs = Date.now();
     const recentObservedAtByPool = new Map<string, number>();
     const observationCutoff = nowMs - GMGN_ONE_MINUTE_FRESHNESS_MS;
@@ -318,8 +318,10 @@ export const eysPlugin: StrategyPlugin = {
       const previous = recentObservedAtByPool.get(row.poolAddress) ?? 0;
       if (row.tsMs > previous) recentObservedAtByPool.set(row.poolAddress, row.tsMs);
     }
-    const missingMints = context.candidates
-      .filter((candidate) => !context.gmgnByMint.has(candidate.tokenMint))
+    const refreshMints = context.candidates
+      .filter((candidate) => !gmgnOneMinuteFlow(
+        context.gmgnByMint.get(candidate.tokenMint), nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS,
+      ))
       .sort((a, b) => {
         const aObservedAt = recentObservedAtByPool.get(a.pool.address) ?? 0;
         const bObservedAt = recentObservedAtByPool.get(b.pool.address) ?? 0;
@@ -327,23 +329,35 @@ export const eysPlugin: StrategyPlugin = {
         if (aObservedAt !== bObservedAt) return bObservedAt - aObservedAt;
         return b.score - a.score;
       })
-      .slice(0, 5)
-      .map((candidate) => candidate.tokenMint);
+      .map((candidate) => candidate.tokenMint)
+      .filter((mint, index, mints) => mints.indexOf(mint) === index)
+      .slice(0, 5);
     let direct = new Map<string, import("../scanner/gmgn.js").GmgnPresence>();
-    if (missingMints.length > 0) {
+    if (refreshMints.length > 0) {
       try {
-        direct = await tokenInfoByMint(missingMints);
+        direct = await tokenInfoByMint(refreshMints);
       } catch {
         // Missing enrichment is not trusted; candidates without a 1m mark stay out.
       }
     }
     const gmgnByMint = mergeGmgnPresenceMaps(context.gmgnByMint, direct);
-    const intake = context.candidates.filter((candidate) => gmgnByMint.has(candidate.tokenMint));
-    const evaluated = await mapLimit(intake, async (candidate): Promise<StrategyProposal | null> => {
+    const evaluated = await mapLimit(context.candidates, async (candidate): Promise<StrategyProposal | null> => {
       const presence = gmgnByMint.get(candidate.tokenMint);
-      if (!presence) return null;
       const flow = gmgnOneMinuteFlow(presence, Date.now(), GMGN_ONE_MINUTE_FRESHNESS_MS);
-      if (!flow) return null;
+      if (!flow || !presence) {
+        const observedAtMs = presence?.fetchedAtMsByInterval.get("1m");
+        const row = presence?.tokenByInterval.get("1m");
+        const stale = row != null && Number.isFinite(row.volumeUsd) && row.volumeUsd > 0 &&
+          observedAtMs != null && Number.isFinite(observedAtMs) &&
+          (observedAtMs > Date.now() || Date.now() - observedAtMs > GMGN_ONE_MINUTE_FRESHNESS_MS);
+        recordEysRejection(candidate, stale ? "flow_stale" : "flow_unavailable", {
+          exactPool: candidate.pool.address,
+          flowObservedAtMs: observedAtMs ?? null,
+          gmgnIntervals: [...(presence?.intervals ?? [])],
+          refreshRequested: refreshMints.includes(candidate.tokenMint),
+        });
+        return null;
+      }
       recordFlowObservation({
         poolAddress: candidate.pool.address,
         tokenMint: candidate.tokenMint,
@@ -354,12 +368,15 @@ export const eysPlugin: StrategyPlugin = {
       });
       const priceRow = presence.tokenByInterval.get("1h") ?? presence.token;
       const priceChange = Number.isFinite(priceRow.priceChangePct1h) ? priceRow.priceChangePct1h : 0;
-      const stage = stageFor(priceChange, cfg);
+      // Single-position canary supports the first SOL anchor only. Hourly
+      // return is evidence, never proof of an owned-anchor breakout.
+      const stage: EysStage = "anchor";
       const evidence: StrategyEvidence = {
         exactPool: candidate.pool.address,
         flowUsdPerMin: flow.volumeUsd,
         flowObservedAtMs: flow.observedAtMs,
         flowSource: flow.source,
+        flowCadence: flow.cadence,
         gmgnIntervals: [...presence.intervals],
         priceChangePct1h: priceChange,
       };
@@ -369,7 +386,7 @@ export const eysPlugin: StrategyPlugin = {
         // candidate every minute would drown the decision ledger while still
         // leaving the important Eys bottleneck invisible.
         if (flow.volumeUsd >= cfg.flow_floor_usd) {
-          recordHighFlowEysRejection(candidate, decision.reason, evidence);
+          recordEysRejection(candidate, decision.reason, evidence);
         }
         return null;
       }
@@ -377,7 +394,7 @@ export const eysPlugin: StrategyPlugin = {
         strategyId: "eys",
         candidate,
         stage,
-        fundingSide: stage === "token" ? "token" : "sol",
+        fundingSide: "sol",
         shape: "spot",
         requestedSizeSol: cfg.entry_sol,
         evidence,
@@ -421,9 +438,9 @@ export const eysPlugin: StrategyPlugin = {
   },
 
   plan(input): StrategyPlan | null {
-    return input.proposal.fundingSide === "token"
-      ? buildTokenRange(input)
-      : buildSpotRange(input);
+    if (input.proposal.strategyId !== "eys" || input.proposal.stage !== "anchor" ||
+        input.proposal.fundingSide !== "sol" || input.proposal.shape !== "spot") return null;
+    return buildSpotRange(input);
   },
 
   manage(_input: StrategyMarkInput): null {

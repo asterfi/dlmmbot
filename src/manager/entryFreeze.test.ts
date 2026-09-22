@@ -61,6 +61,7 @@ function proposal(cand: Candidate): StrategyProposal {
       flowUsdPerMin: 105_000,
       flowObservedAtMs: Date.now(),
       flowSource: "gmgn-market-trending",
+      flowCadence: "1m",
       gmgnIntervals: ["1m"],
       priceChangePct1h: 12,
     },

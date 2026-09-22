@@ -19,6 +19,7 @@ const corePlugin: StrategyPlugin = {
         flowUsdPerMin: null,
         flowObservedAtMs: null,
         flowSource: null,
+        flowCadence: null,
         gmgnIntervals: [],
         priceChangePct1h: null,
       },

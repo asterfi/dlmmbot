@@ -1,0 +1,11 @@
+import { config, isLive } from '../src/config.js';
+import { scan } from '../src/scanner/scan.js';
+import { eysPlugin } from '../src/strategy/eys.js';
+import { getDb } from '../src/db/db.js';
+if (isLive() || config().exec.mode !== 'paper') throw new Error('paper lock required');
+const start=Date.now();
+const result=await scan();
+const proposals=await eysPlugin.discover({candidates:result.candidates,gmgnByMint:result.gmgnByMint??new Map()});
+console.log('SMOKE_RESULT',JSON.stringify({mode:'paper',elapsedMs:Date.now()-start,swept:result.sweptPools,candidates:result.candidates.length,proposals:proposals.map(p=>({pool:p.candidate.pool.address,stage:p.stage,side:p.fundingSide,shape:p.shape,evidence:p.evidence})),decisions:getDb().prepare('select failed_gate,count(*) n from decisions group by failed_gate').all()}));
+getDb().close();
+process.exit(0);

@@ -11,6 +11,8 @@ export interface StrategyEvidence {
   flowUsdPerMin: number | null;
   flowObservedAtMs: number | null;
   flowSource: "gmgn-market-trending" | "helius-exact-pool" | null;
+  /** Provider cadence the flow value was observed at; only "1m" satisfies Eys. */
+  flowCadence: "1m" | null;
   gmgnIntervals: string[];
   priceChangePct1h: number | null;
 }
