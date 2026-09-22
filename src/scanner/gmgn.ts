@@ -54,8 +54,8 @@ export interface GmgnPresence {
 }
 
 let cache: { at: number; eysActive: boolean; byMint: Map<string, GmgnPresence> } | null = null;
-// Eys admission consumes a 1m row. A ten-minute cache would let a stale row
-// satisfy a three-minute evidence TTL, so the cache cannot outlive that cadence.
+// Eys admission consumes a fresh 1m row. A ten-minute cache would let a stale
+// row pass the freshness guard, so the cache cannot outlive that cadence.
 const CACHE_MS = 60_000;
 
 export interface GmgnOneMinuteFlow {

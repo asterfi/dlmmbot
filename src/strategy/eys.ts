@@ -3,12 +3,11 @@ import { dirname, join, resolve } from "node:path";
 import { config, effectiveEysFlowFloorUsd, EYS_MAX_POOL_RESOLUTION_MINTS, EYS_MIN_FLOW_FLOOR_USD } from "../config.js";
 import { recordDecision } from "../db/db.js";
 import { mapLimit } from "../concurrent.js";
-import { gmgnOneMinuteFlow, mergeGmgnPresenceMaps, tokenInfoByMint, trendingByMint } from "../scanner/gmgn.js";
+import { gmgnOneMinuteFlow, mergeGmgnPresenceMaps, tokenInfoByMint } from "../scanner/gmgn.js";
 import type { Candidate } from "../types.js";
 import { binArraysSpanned, binIdToPrice, priceToBinId } from "../ranges/planner.js";
 import type {
   EysStage,
-  ExitIntent,
   StrategyDecision,
   StrategyDiscoveryContext,
   StrategyModelInput,
@@ -34,15 +33,12 @@ const DEFAULT_EYS = {
   enabled: false,
   market_cap_floor_usd: 100_000,
   flow_floor_usd: EYS_MIN_FLOW_FLOOR_USD,
-  flow_persistence: 3,
   observation_ttl_s: 180,
-  exit_persistence: 3,
   entry_sol: 0.1,
   anchor_range_below_pct: 40,
   tight_price_change_pct: 10,
   token_breakout_pct: 25,
   dump_bonus_price_change_pct: 20,
-  flow_refresh_s: 60,
   gmgn_pool_resolution_max_mints: 12,
 };
 
@@ -86,15 +82,12 @@ function settings() {
     enabled: raw.enabled === true,
     market_cap_floor_usd: finiteAtLeast(raw.market_cap_floor_usd, DEFAULT_EYS.market_cap_floor_usd, 1),
     flow_floor_usd: effectiveEysFlowFloorUsd(raw.flow_floor_usd),
-    flow_persistence: integerAtLeast(raw.flow_persistence, DEFAULT_EYS.flow_persistence, 1),
     observation_ttl_s: finiteAtLeast(raw.observation_ttl_s, DEFAULT_EYS.observation_ttl_s, 1),
-    exit_persistence: integerAtLeast(raw.exit_persistence, DEFAULT_EYS.exit_persistence, 1),
     entry_sol: finiteAtLeast(raw.entry_sol, DEFAULT_EYS.entry_sol, 0.000001),
     anchor_range_below_pct: finiteAtLeast(raw.anchor_range_below_pct, DEFAULT_EYS.anchor_range_below_pct, 0),
     tight_price_change_pct: finiteAtLeast(raw.tight_price_change_pct, DEFAULT_EYS.tight_price_change_pct, 0),
     token_breakout_pct: finiteAtLeast(raw.token_breakout_pct, DEFAULT_EYS.token_breakout_pct, 0),
     dump_bonus_price_change_pct: finiteAtLeast(raw.dump_bonus_price_change_pct, DEFAULT_EYS.dump_bonus_price_change_pct, 0),
-    flow_refresh_s: finiteAtLeast(raw.flow_refresh_s, DEFAULT_EYS.flow_refresh_s, 1),
     gmgn_pool_resolution_max_mints: Math.min(
       integerAtLeast(raw.gmgn_pool_resolution_max_mints, DEFAULT_EYS.gmgn_pool_resolution_max_mints, 1),
       EYS_MAX_POOL_RESOLUTION_MINTS,
@@ -201,11 +194,6 @@ export function recordFlowObservation(observation: FlowObservation): void {
   persistRows(rows);
 }
 
-export function recentFlowObservations(poolAddress: string, maxAgeS: number, nowMs = Date.now()): FlowObservation[] {
-  const cutoff = nowMs - finiteAtLeast(maxAgeS, DEFAULT_EYS.observation_ttl_s, 1) * 1000;
-  return loadRows().filter((r) => r.poolAddress === poolAddress && r.tsMs >= cutoff && r.tsMs <= nowMs);
-}
-
 export function resetEysObservationStoreForTests(): void {
   loaded = null;
 }
@@ -239,9 +227,6 @@ export function evaluateEys(
   }
   if (!(evidence.flowUsdPerMin != null && evidence.flowUsdPerMin >= cfg.flow_floor_usd)) {
     return { accepted: false, reason: "flow_floor" };
-  }
-  if (evidence.persistentObservations < cfg.flow_persistence) {
-    return { accepted: false, reason: "flow_not_persistent" };
   }
   if (stage === "token") {
     // The proposal is retained for observability, but the host refuses token-side
@@ -286,40 +271,6 @@ function buildSpotRange(input: StrategyPlanInput): StrategyPlan {
       estBinRentSol: binArraysSpanned(minBinId, maxBinId) * 0.075,
     },
   };
-}
-
-const lastRefresh = new Map<string, number>();
-
-async function refreshPositionFlow(poolAddress: string, tokenMint: string): Promise<void> {
-  const cfg = settings();
-  const nowMs = Date.now();
-  const previous = lastRefresh.get(poolAddress) ?? 0;
-  if (nowMs - previous < cfg.flow_refresh_s * 1000) return;
-  lastRefresh.set(poolAddress, nowMs);
-  try {
-    const primary = await trendingByMint();
-    const presence = primary.get(tokenMint)?.tokenByInterval.has("1m")
-      ? primary.get(tokenMint)
-      : mergeGmgnPresenceMaps(primary, await tokenInfoByMint([tokenMint])).get(tokenMint);
-    const flow = gmgnOneMinuteFlow(
-      presence,
-      nowMs,
-      cfg.observation_ttl_s * 1000,
-    );
-    if (flow) {
-      recordFlowObservation({
-        poolAddress,
-        tokenMint,
-        tsMs: flow.observedAtMs,
-        flowUsdPerMin: flow.volumeUsd,
-        source: flow.source,
-        cadence: flow.cadence,
-      });
-    }
-  } catch {
-    // Strategy advice never overrides core safety; a missing flow mark simply
-    // leaves the core P0-P5 manager in charge.
-  }
 }
 
 export const eysPlugin: StrategyPlugin = {
@@ -375,8 +326,6 @@ export const eysPlugin: StrategyPlugin = {
         source: flow.source,
         cadence: flow.cadence,
       });
-      const recent = recentFlowObservations(candidate.pool.address, cfg.observation_ttl_s);
-      const persistent = recent.filter((row) => row.flowUsdPerMin >= cfg.flow_floor_usd).length;
       const priceRow = presence.tokenByInterval.get("1h") ?? presence.token;
       const priceChange = Number.isFinite(priceRow.priceChangePct1h) ? priceRow.priceChangePct1h : 0;
       const stage = stageFor(priceChange, cfg);
@@ -385,7 +334,6 @@ export const eysPlugin: StrategyPlugin = {
         flowUsdPerMin: flow.volumeUsd,
         flowObservedAtMs: flow.observedAtMs,
         flowSource: flow.source,
-        persistentObservations: persistent,
         gmgnIntervals: [...presence.intervals],
         priceChangePct1h: priceChange,
       };
@@ -451,24 +399,11 @@ export const eysPlugin: StrategyPlugin = {
     return buildSpotRange(input);
   },
 
-  async manage(input: StrategyMarkInput): Promise<ExitIntent | null> {
-    const cfg = settings();
-    await refreshPositionFlow(input.position.poolAddress, input.position.tokenMint);
-    const recent = recentFlowObservations(input.position.poolAddress, cfg.observation_ttl_s);
-    if (recent.length < cfg.exit_persistence) return null;
-    const tail = recent.slice(-cfg.exit_persistence);
-    if (tail.every((row) => row.flowUsdPerMin < cfg.flow_floor_usd)) {
-      return {
-        reason: "P2_rotation",
-        code: "eys_flow_decay",
-        detail: `Eys exact-pool flow decayed below $${cfg.flow_floor_usd.toFixed(0)}/min for ${tail.length} observations`,
-      };
-    }
+  manage(_input: StrategyMarkInput): null {
     return null;
   },
 };
 
 export function _resetEysRuntimeForTests(): void {
-  lastRefresh.clear();
   resetEysObservationStoreForTests();
 }

@@ -39,15 +39,12 @@ export interface EysConfig {
   enabled: boolean;
   market_cap_floor_usd: number;
   flow_floor_usd: number;
-  flow_persistence: number;
   observation_ttl_s: number;
-  exit_persistence: number;
   entry_sol: number;
   anchor_range_below_pct: number;
   tight_price_change_pct: number;
   token_breakout_pct: number;
   dump_bonus_price_change_pct: number;
-  flow_refresh_s: number;
   /** Maximum fresh GMGN 1m mints to resolve into exact Meteora pools per scan. */
   gmgn_pool_resolution_max_mints: number;
 }

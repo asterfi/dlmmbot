@@ -19,7 +19,7 @@ The request contains a bounded normalized snapshot:
 
 - discovery counts and rejection summary;
 - exact candidate/pool identity and score components;
-- exact pool identity plus fresh GMGN mint-level one-minute flow, age, persistence, and Eys stage evidence;
+- exact pool identity plus fresh GMGN mint-level one-minute flow, age, and Eys stage evidence;
 - token/pool vetting facts and hard-gate result;
 - executable size, bankroll, and range context;
 - the two typed questions: trade approval and Eys stage.

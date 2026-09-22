@@ -10,15 +10,12 @@ mode = "core"
 enabled = false
 market_cap_floor_usd = 100000
 flow_floor_usd = 100000
-flow_persistence = 3
 observation_ttl_s = 180
-exit_persistence = 3
 entry_sol = 0.1
 anchor_range_below_pct = 40
 tight_price_change_pct = 10
 token_breakout_pct = 25
 dump_bonus_price_change_pct = 20
-flow_refresh_s = 60
 gmgn_pool_resolution_max_mints = 12
 
 # Optional local Laya model gate. Keep off until the model is Eys-calibrated

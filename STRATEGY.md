@@ -14,8 +14,7 @@ The core strategy remains the tracked default. Hosted strategies are selected on
 when `strategy.mode` and the strategy-specific enable flag are both explicit.
 Eys plugin owns hot-pool proposal intake, exact Meteora pool identity, broad
 GMGN mint-level one-minute flow evidence associated with that candidate pool,
-persistence, Eys stage/range intent, and flow-decay exit recommendations. DLMbot
-core remains authoritative for exact pool identity, token vetting, sizing, reserves,
+and Eys stage/range intent. DLMbot core remains authoritative for exits, exact pool identity, token vetting, sizing, reserves,
 bin rent, fresh quote/range checks, wallet and asset acquisition, execution,
 management, reconciliation, and accounting. Eys-specific admission replaces the
 core economic discovery filters and alpha-score reservation only when Eys is
@@ -36,7 +35,7 @@ mints through Meteora Datapi and merges matching pools before symbol dedupe and 
 proposal evaluation, so a hot mint cannot disappear merely because it fell outside
 the ranked pool sweep. The lookup count is capped by
 `eys.gmgn_pool_resolution_max_mints`; failed or malformed lookups are omitted. This
-supplemental discovery path is not a safety bypass: Eys persistence and flow freshness,
+supplemental discovery path is not a safety bypass: Eys fresh-flow evidence,
 authoritative mint/freeze/holder/security vetting, quote/depth/rent/sizing checks, and
 executor controls remain mandatory. Core mode is unchanged.
 
@@ -50,7 +49,7 @@ acquisition or transactions itself.
 When explicitly configured, Eys sends Laya one normalized snapshot after the
 core has completed deterministic vetting, quote, sizing, range, reserve, and
 bin-rent checks. The snapshot includes discovery summary, exact pool identity,
-GMGN one-minute mint-flow/persistence evidence, vetting facts, bankroll context,
+GMGN one-minute mint-flow/freshness evidence, vetting facts, bankroll context,
 quote/rent status, and the planned range. Laya can recommend a stage and veto the
 setup; it cannot waive a
 hard gate, discover missing pools, choose size, sign/broadcast, manage exits,
@@ -70,7 +69,7 @@ Runs every `[60s]`. The scan fires from inside the manage tick, so it can only s
 3. **Per-token: pick the best pool** — the **deepest** (highest TVL) among that token's pools that pass the active lane's structural discovery gates; `fee_tvl_ratio_24h` breaks ties only within `[25%]` of the deepest pool's TVL. One pool per token. *Was* "highest fee/TVL" — and since fee/TVL is inversely proportional to TVL, that structurally picked the *thinnest* sibling (measured 2026-08-15: 11 of 18 multi-pool mints on the board, and in 9 of those the deeper pool also had more absolute volume). Thin pools cost twice: less fee income, because volume happens where it does, and TVL that swings 40–50% on ordinary LP moves, which is exactly what P0 `tvl_drain` reads as a rug — same token, same 4 min: $8k pool swung 51%, $67k pool 9%). In core mode the bin-step gate remains a family boundary; active Eys instead lets its own range/depth and rent checks decide whether a fine-step pool is executable.
 4. Output: strategy-qualified candidates → shared vetting (§3) → entry queue.
 
-Optional secondary source `[off by default]`: GMGN trending list as a *discovery* input (requires API key), plus direct `token info` enrichment for exact event-discovered mints when the event intake is enabled. Recent Eys observations are prioritized within the bounded direct-enrichment budget so a hot exact pool can accumulate genuine `1m` persistence evidence even when it falls out of the current ranked snapshot. The direct row supplies the genuine `1m` volume evidence for Eys; it does not add a core score bonus by itself. Never a substitute for our own vetting.
+Optional secondary source `[off by default]`: GMGN trending list as a *discovery* input (requires API key), plus direct `token info` enrichment for exact event-discovered mints when the event intake is enabled. Recent Eys observations are prioritized within the bounded direct-enrichment budget so a hot exact pool can retain genuine `1m` flow context even when it falls out of the current ranked snapshot. The direct row supplies the genuine `1m` volume evidence for Eys; it does not add a core score bonus by itself. Never a substitute for our own vetting.
 
 ### 1.1 Three-tier sleeves (shipped 2026-08-13)
 

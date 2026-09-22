@@ -11,7 +11,6 @@ export interface StrategyEvidence {
   flowUsdPerMin: number | null;
   flowObservedAtMs: number | null;
   flowSource: "gmgn-market-trending" | "helius-exact-pool" | null;
-  persistentObservations: number;
   gmgnIntervals: string[];
   priceChangePct1h: number | null;
 }

@@ -26,7 +26,7 @@ Automated [Meteora DLMM](https://meteora.ag) liquidity bot for Solana. Scans, ve
 
 ## Hosted strategy plugins
 
-The Eys plugin owns exact-pool identity, broad pre-filter intake, fresh GMGN mint-level one-minute flow evidence associated with that pool, persistence, stage/range intent, and flow-decay exit recommendations. DLMbot core remains authoritative for exact-pool verification, token vetting, sizing, reserves, rent, fresh quote/range checks, execution, management, reconciliation, and accounting. When explicitly active, Eys replaces the core economic discovery filters and alpha-score reservation. Its intake also avoids the core TVL ceiling, new-token bin-step fit, and listing-level freeze flag; freeze is rechecked from fresh on-chain mint facts, while bin-step/depth/rent remains a later executable check. Core mode is unchanged. Token-side Eys proposals are recorded but fail closed until a core-owned funding/accounting service is available.
+The Eys plugin owns exact-pool identity, broad pre-filter intake, fresh GMGN mint-level one-minute flow evidence associated with that pool, and stage/range intent. DLMbot core remains authoritative for exits, exact-pool verification, token vetting, sizing, reserves, rent, fresh quote/range checks, execution, management, reconciliation, and accounting. When explicitly active, Eys replaces the core economic discovery filters and alpha-score reservation. Its intake also avoids the core TVL ceiling, new-token bin-step fit, and listing-level freeze flag; freeze is rechecked from fresh on-chain mint facts, while bin-step/depth/rent remains a later executable check. Core mode is unchanged. Token-side Eys proposals are recorded but fail closed until a core-owned funding/accounting service is available.
 
 The scanner also has an opt-in, bounded Meteora DLMM event-intake path. It polls the
 configured Solana RPC (Helius recommended), decodes published pool-initialization
@@ -34,7 +34,7 @@ instructions, persists signatures, resolves the exact pool through Datapi, and c
 fetch direct GMGN `token info` for the event mint so Eys can see a fresh 1m row even
 when the mint is outside the capped trending snapshot. Recent exact-pool observations
 also receive priority within the bounded direct-enrichment slots, so a hot pool can
-accumulate the required persistence evidence across scans. It supplements the normal
+retain recent exact-pool evidence across scans. It supplements the normal
 sweep and, when Eys is active, joins the broad Eys intake; it never bypasses shared
 vetting, quote, sizing, rent, or executor gates. `[discovery].event_intake_enabled = false` is the tracked default. Its bounded queue gives most parse capacity to the newest pending signatures while retaining a small oldest-first slice for historical backfill.
 
@@ -45,7 +45,7 @@ removing any downstream gate. Each qualifying mint then triggers a bounded
 Datapi lookup by token mint (`[eys].gmgn_pool_resolution_max_mints`). Matching
 Meteora pools are merged into the Eys candidate universe even when they are
 absent from the ranked top-pool sweep. This is exact-pool discovery, not
-admission: market-cap, persistence, authoritative token vetting, quote, depth,
+admission: market-cap, fresh-flow, authoritative token vetting, quote, depth,
 rent, sizing, executor, and reconciliation gates remain unchanged. Core mode
 does not use this supplemental path.
 

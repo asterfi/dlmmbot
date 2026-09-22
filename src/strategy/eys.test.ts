@@ -19,7 +19,6 @@ import {
   _resetEysRuntimeForTests,
   eysPlugin,
   evaluateEys,
-  recentFlowObservations,
   recordFlowObservation,
 } from "./eys.js";
 import { activeStrategyPlugin, resetStrategyRegistryForTests } from "./registry.js";
@@ -62,8 +61,6 @@ describe("hosted Eys strategy boundary", () => {
       c.strategy.mode = "eys";
       c.eys.enabled = true;
       c.eys.flow_floor_usd = 100_000;
-      c.eys.flow_persistence = 3;
-      c.eys.exit_persistence = 3;
     });
     gmgnMocks.mergeGmgnPresenceMaps.mockImplementation((primary: ReadonlyMap<string, GmgnPresence>, supplemental: ReadonlyMap<string, GmgnPresence>) => new Map([...primary, ...supplemental]));
     gmgnMocks.gmgnOneMinuteFlow.mockImplementation((presence: GmgnPresence | undefined) => {
@@ -124,11 +121,11 @@ describe("hosted Eys strategy boundary", () => {
 
     expect(requestedMints).toHaveLength(5);
     expect(requestedMints[0]).toBe(recentCandidate.tokenMint);
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0]?.candidate.pool.address).toBe(recentCandidate.pool.address);
+    expect(proposals).toHaveLength(5);
+    expect(proposals.some((proposal) => proposal.candidate.pool.address === recentCandidate.pool.address)).toBe(true);
   });
 
-  it("requires persistent exact-pool observations before accepting", () => {
+  it("accepts one fresh exact-pool flow observation without invented persistence", () => {
     const pool = makePool();
     const candidate: Candidate = {
       pool,
@@ -139,22 +136,19 @@ describe("hosted Eys strategy boundary", () => {
       gateFailures: [],
     };
     const now = Date.now();
-    for (let i = 0; i < 3; i++) {
-      recordFlowObservation({
-        poolAddress: pool.address,
-        tokenMint: pool.mintX,
-        tsMs: now - (2 - i) * 60_000,
-        flowUsdPerMin: 110_000,
-        source: "gmgn-market-trending",
-        cadence: "1m",
-      });
-    }
+    recordFlowObservation({
+      poolAddress: pool.address,
+      tokenMint: pool.mintX,
+      tsMs: now,
+      flowUsdPerMin: 110_000,
+      source: "gmgn-market-trending",
+      cadence: "1m",
+    });
     const evidence = {
       exactPool: pool.address,
       flowUsdPerMin: 110_000,
       flowObservedAtMs: now,
       flowSource: "gmgn-market-trending" as const,
-      persistentObservations: recentFlowObservations(pool.address, 180, now).length,
       gmgnIntervals: ["5m", "1h"],
       priceChangePct1h: 2,
     };
@@ -173,7 +167,6 @@ describe("hosted Eys strategy boundary", () => {
       flowUsdPerMin: 110_000,
       flowObservedAtMs: Date.now() - 181_000,
       flowSource: "gmgn-market-trending" as const,
-      persistentObservations: 3,
       gmgnIntervals: ["1m", "5m", "1h"],
       priceChangePct1h: 2,
     };
@@ -188,7 +181,6 @@ describe("hosted Eys strategy boundary", () => {
       flowUsdPerMin: 110_000,
       flowObservedAtMs: Date.now(),
       flowSource: "gmgn-market-trending" as const,
-      persistentObservations: 3,
       gmgnIntervals: ["1m", "5m", "1h"],
       priceChangePct1h: 2,
     };
@@ -217,7 +209,6 @@ describe("hosted Eys strategy boundary", () => {
         flowUsdPerMin: 120_000,
         flowObservedAtMs: Date.now(),
         flowSource: "gmgn-market-trending" as const,
-        persistentObservations: 3,
         gmgnIntervals: ["5m"],
         priceChangePct1h: 1,
       },
