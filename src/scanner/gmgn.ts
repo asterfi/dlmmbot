@@ -749,7 +749,7 @@ function strictBoolean(value: unknown): boolean | undefined | null {
 function strictNumber(value: unknown): number | undefined | null {
   if (value === undefined) return undefined;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "string" && /^[+-]?(?:\\d+\\.?\\d*|\\.\\d+)$/.test(value.trim())) {
+  if (typeof value === "string" && /^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(value.trim())) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   }

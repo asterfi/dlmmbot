@@ -51,6 +51,24 @@ describe("parseTokenSecurity", () => {
     });
   });
 
+  it("parses GMGN security numeric strings from the live CLI shape", () => {
+    const raw = JSON.stringify({
+      honeypot: 0,
+      can_not_sell: 0,
+      buy_tax: "0.03",
+      sell_tax: "0.03",
+      renounced_mint: false,
+      renounced_freeze_account: true,
+    });
+    expect(parseTokenSecurity(raw)).toEqual({
+      honeypot: false,
+      sellTaxPct: 3,
+      buyTaxPct: 3,
+      renouncedMint: false,
+      renouncedFreeze: true,
+    });
+  });
+
   it("rejects malformed boolean, numeric, and JSON security values", () => {
     expect(parseTokenSecurity(JSON.stringify({ honeypot: "maybe", sell_tax: 0 }))).toBeNull();
     expect(parseTokenSecurity(JSON.stringify({ honeypot: 0, sell_tax: "bad", buy_tax: 0 }))).toBeNull();

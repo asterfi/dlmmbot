@@ -229,8 +229,14 @@ export async function fetchPoolsByTokenMints(
           `/pools?page=1&page_size=100&sort_by=fee_tvl_ratio_30m:desc&filter_by=${filter}`,
         );
         if (!Array.isArray(first.data)) throw new Error("datapi exact-pool response has no data array");
-        const reportedPages = Number(first.pages ?? 1);
-        if (!Number.isInteger(reportedPages) || reportedPages < 1) throw new Error("datapi exact-pool response has invalid pages");
+        const reportedPages: unknown = first.pages === undefined ? 1 : first.pages;
+        if (typeof reportedPages !== "number" || !Number.isInteger(reportedPages) || reportedPages < 0) {
+          throw new Error("datapi exact-pool response has invalid pages");
+        }
+        if (reportedPages === 0) {
+          if (first.data.length !== 0) throw new Error("datapi exact-pool response has rows with zero pages");
+          return { status: "ok" as const, pools: [] };
+        }
         const pageCount = Math.min(reportedPages, MAX_DIRECT_POOL_PAGES);
         const rows = [...first.data];
         let partial = reportedPages > pageCount;

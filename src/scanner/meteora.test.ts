@@ -173,6 +173,35 @@ describe("datapi transient retry", () => {
     expect(result.pools.map((pool) => [pool.address, pool.mintX, pool.mintY])).toEqual([["Direct", mint, "So11111111111111111111111111111111111111112"]]);
   });
 
+  it("treats Datapi pages=0 as an empty successful exact-pool response", async () => {
+    const mint = "9ETThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2";
+    const state = trackingFetch(() => ok({ data: [], pages: 0 }));
+
+    const result = await fetchPoolsByTokenMints([mint]);
+
+    expect(state.urls).toHaveLength(1);
+    expect(result).toMatchObject({
+      pools: [],
+      attemptedMints: 1,
+      providerSuccessMints: 1,
+      emptyMints: 1,
+      failedMints: 0,
+      partialMints: 0,
+    });
+  });
+
+  it("fails closed on coercible but non-numeric page metadata", async () => {
+    for (const pages of [false, "", [], "0"]) {
+      const state = trackingFetch(() => ok({ data: [], pages }));
+      const result = await fetchPoolsByTokenMints(["9FTThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2"]);
+
+      expect(state.urls).toHaveLength(1);
+      expect(result.providerSuccessMints).toBe(0);
+      expect(result.emptyMints).toBe(0);
+      expect(result.failedMints).toBe(1);
+    }
+  });
+
   it("isolates one failed mint and reports the sibling result", async () => {
     const goodMint = "9DTThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2";
     const failedMint = "8DTThTbggnp2P2ZGLFRfN1A3j5JUsXez1dRJak3TixB2";
