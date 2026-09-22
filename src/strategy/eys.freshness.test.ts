@@ -13,7 +13,7 @@ vi.mock("../scanner/gmgn.js", async (original) => ({
   tokenInfoByMint: mocks.tokenInfoByMint,
 }));
 vi.mock("../db/db.js", () => ({ recordDecision: mocks.recordDecision }));
-import { eysPlugin, _resetEysRuntimeForTests } from "./eys.js";
+import { eysPlugin, _resetEysRuntimeForTests, selectEysRefreshMints } from "./eys.js";
 
 function candidate(mint = "FreshnessMint", score = 90, poolAddress = mint + "Pool"): Candidate {
   const pool = makePool({ address: poolAddress, mintX: mint, marketCapUsd: 250_000 });
@@ -66,16 +66,20 @@ it.each(["missing", "stale", "wrong-cadence"])("records explicit flow diagnostic
     expect.objectContaining({ strategy: "eys", evidence: expect.objectContaining({ exactPool: c.pool.address }) }));
 });
 
-it("uses the five-mint refresh budget for distinct exact candidates, not sibling pools", async () => {
+it("uses the refresh budget for distinct exact candidates, not sibling pools", async () => {
   const siblings = Array.from({ length: 5 }, (_, i) => candidate("Sibling", 100, `SiblingPool${i}`));
-  const others = Array.from({ length: 6 }, (_, i) => candidate(`Other${i}`, 90 - i));
+  const others = Array.from({ length: 10 }, (_, i) => candidate(`Other${i}`, 90 - i));
   const candidates = [...siblings, ...others];
   const gmgnByMint = new Map(candidates.map((c) => [c.tokenMint, presence(c.tokenMint, Date.now() - 61_000)]));
   mocks.tokenInfoByMint.mockImplementation(async (mints: string[]) => new Map(mints.map((mint) => [mint, presence(mint, Date.now())])));
   const proposals = await eysPlugin.discover({ candidates, gmgnByMint });
-  expect(mocks.tokenInfoByMint).toHaveBeenCalledExactlyOnceWith(["Sibling", "Other0", "Other1", "Other2", "Other3"]);
-  expect(proposals).toHaveLength(9);
-  expect(mocks.recordDecision).toHaveBeenCalledWith("Other4", "Other4Pool", "skipped", "eys_flow_stale", 86,
+  // 11 distinct mints compete for 8 slots; dedupe collapses the 5 sibling
+  // pools to one mint so no slot is spent twice.
+  expect(mocks.tokenInfoByMint).toHaveBeenCalledExactlyOnceWith([
+    "Sibling", "Other0", "Other1", "Other2", "Other3", "Other4", "Other5", "Other6",
+  ]);
+  expect(proposals).toHaveLength(12);
+  expect(mocks.recordDecision).toHaveBeenCalledWith("Other7", "Other7Pool", "skipped", "eys_flow_stale", 83,
     expect.objectContaining({ evidence: expect.objectContaining({ refreshRequested: false }) }));
 });
 
@@ -93,6 +97,40 @@ it.each([24_999, 25_000])("honours the configured flow floor with refreshed volu
   mocks.tokenInfoByMint.mockResolvedValue(new Map([[c.tokenMint, presence(c.tokenMint, Date.now(), volume)]]));
   const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map() });
   expect(proposals).toHaveLength(volume >= 25_000 ? 1 : 0);
+});
+
+it("ranks a stale proven qualifier ahead of a higher-scored never-seen candidate", () => {
+  // The money case: one slot, and the stale mint already read 40k/min last
+  // cycle — refreshing it can produce a proposal; refreshing the unseen
+  // high-score mint cannot prove anything about flow this cycle.
+  const qualifier = candidate("StaleQualifier", 10);
+  const unseen = candidate("NeverSeen", 99);
+  const gmgnByMint = new Map([[qualifier.tokenMint, presence(qualifier.tokenMint, Date.now() - 61_000, 40_000)]]);
+
+  const mints = selectEysRefreshMints({
+    candidates: [unseen, qualifier],
+    gmgnByMint,
+    observedAtByPool: new Map(),
+    floorUsd: 25_000,
+    budget: 1,
+  });
+
+  expect(mints).toEqual(["StaleQualifier"]);
+});
+
+it("never returns more mints than the budget allows", () => {
+  const candidates = Array.from({ length: 20 }, (_, i) => candidate(`Budget${i}`, 90 - i));
+  const mints = selectEysRefreshMints({
+    candidates,
+    gmgnByMint: new Map(),
+    observedAtByPool: new Map(),
+    floorUsd: 100_000,
+    budget: 8,
+  });
+  expect(mints).toHaveLength(8);
+  expect(new Set(mints).size).toBe(8);
+  // Coverage tier: with no evidence at all, score decides the order.
+  expect(mints[0]).toBe("Budget0");
 });
 
 it("does not refresh a genuine fresh 1m row", async () => {

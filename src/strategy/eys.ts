@@ -4,6 +4,7 @@ import { config, effectiveEysFlowFloorUsd, EYS_MAX_POOL_RESOLUTION_MINTS, EYS_MI
 import { recordDecision } from "../db/db.js";
 import { mapLimit } from "../concurrent.js";
 import { GMGN_ONE_MINUTE_FRESHNESS_MS, gmgnOneMinuteFlow, mergeGmgnPresenceMaps, tokenInfoByMint } from "../scanner/gmgn.js";
+import type { GmgnPresence } from "../scanner/gmgn.js";
 import type { Candidate } from "../types.js";
 import { binArraysSpanned, binIdToPrice, priceToBinId } from "../ranges/planner.js";
 import type {
@@ -299,6 +300,85 @@ function buildTokenRange(input: StrategyPlanInput): StrategyPlan {
   };
 }
 
+/**
+ * Budget for the bounded direct-enrichment path, in distinct mints per cycle.
+ *
+ * Measured 2026-09-22: the scan cycle runs ~65s against the 60s 1m freshness
+ * window, so most of a ~140-candidate board reaches evaluation with an
+ * expired row, and a 5-mint budget covered about 3% of it. Eight mints fit
+ * the GMGN spend window once the 1m trending intake is down to four bands
+ * (18 weight/min against a 36 weight/min window).
+ */
+export const EYS_REFRESH_MAX_MINTS = 8;
+
+/** Last known 1m volume at any age; 0 when the mint carries no 1m row. */
+function lastKnownOneMinuteVolume(presence?: GmgnPresence): number {
+  const volumeUsd = Number(presence?.tokenByInterval.get("1m")?.volumeUsd);
+  return Number.isFinite(volumeUsd) && volumeUsd > 0 ? volumeUsd : 0;
+}
+
+interface EysRefreshRow {
+  candidate: Candidate;
+  mint: string;
+  lastFlowUsd: number;
+  observedAtMs: number;
+}
+
+/**
+ * Which distinct mints receive the refresh budget this cycle, highest priority
+ * first:
+ *   1. qualifier — a stale 1m row whose last reading already cleared the flow
+ *      floor: one refresh turns it into a proposal this cycle;
+ *   2. observed — no presence this cycle but a session observation inside the
+ *      freshness window: recent proof the token was trading;
+ *   3. coverage — never seen at all: without a slot it stays
+ *      `flow_unavailable` forever;
+ *   4. known-low — present but sub-floor: refreshed last, only if slots remain.
+ *
+ * Sibling pools collapse to one mint so no slot is spent twice.
+ */
+export function selectEysRefreshMints(input: {
+  candidates: readonly Candidate[];
+  gmgnByMint: ReadonlyMap<string, GmgnPresence>;
+  observedAtByPool: ReadonlyMap<string, number>;
+  floorUsd: number;
+  nowMs?: number;
+  budget?: number;
+}): string[] {
+  const nowMs = input.nowMs ?? Date.now();
+  const budget = input.budget ?? EYS_REFRESH_MAX_MINTS;
+  const byMint = new Map<string, EysRefreshRow>();
+  for (const candidate of input.candidates) {
+    if (gmgnOneMinuteFlow(input.gmgnByMint.get(candidate.tokenMint), nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS)) continue;
+    const row: EysRefreshRow = {
+      candidate,
+      mint: candidate.tokenMint,
+      lastFlowUsd: lastKnownOneMinuteVolume(input.gmgnByMint.get(candidate.tokenMint)),
+      observedAtMs: input.observedAtByPool.get(candidate.pool.address) ?? 0,
+    };
+    const previous = byMint.get(row.mint);
+    if (
+      !previous
+      || row.lastFlowUsd > previous.lastFlowUsd
+      || (row.lastFlowUsd === previous.lastFlowUsd && row.observedAtMs > previous.observedAtMs)
+    ) {
+      byMint.set(row.mint, row);
+    }
+  }
+  const distinct = [...byMint.values()];
+  const qualifier = distinct.filter((row) => row.lastFlowUsd >= input.floorUsd)
+    .sort((a, b) => b.lastFlowUsd - a.lastFlowUsd || b.observedAtMs - a.observedAtMs);
+  const observed = distinct.filter((row) => row.lastFlowUsd === 0 && row.observedAtMs > 0)
+    .sort((a, b) => b.observedAtMs - a.observedAtMs);
+  const coverage = distinct.filter((row) => row.lastFlowUsd === 0 && row.observedAtMs === 0)
+    .sort((a, b) => b.candidate.score - a.candidate.score);
+  const knownLow = distinct.filter((row) => row.lastFlowUsd > 0 && row.lastFlowUsd < input.floorUsd)
+    .sort((a, b) => b.observedAtMs - a.observedAtMs || b.candidate.score - a.candidate.score);
+  return [...qualifier, ...observed, ...coverage, ...knownLow]
+    .slice(0, budget)
+    .map((row) => row.mint);
+}
+
 export const eysPlugin: StrategyPlugin = {
   id: "eys",
   admissionClass: "strategy",
@@ -308,8 +388,9 @@ export const eysPlugin: StrategyPlugin = {
     if (!cfg.enabled) return [];
 
     // Exact candidates may be absent from trending, or their 1m evidence may
-    // have expired during scanner enrichment. Refresh at most five unique mints
-    // through the existing budgeted provider path; never re-stamp an old row.
+    // have expired during scanner enrichment (a ~65s cycle outruns the 60s
+    // freshness window). Refresh a budgeted, prioritised set of unique mints
+    // through the existing provider path; never re-stamp an old row.
     const nowMs = Date.now();
     const recentObservedAtByPool = new Map<string, number>();
     const observationCutoff = nowMs - GMGN_ONE_MINUTE_FRESHNESS_MS;
@@ -318,20 +399,13 @@ export const eysPlugin: StrategyPlugin = {
       const previous = recentObservedAtByPool.get(row.poolAddress) ?? 0;
       if (row.tsMs > previous) recentObservedAtByPool.set(row.poolAddress, row.tsMs);
     }
-    const refreshMints = context.candidates
-      .filter((candidate) => !gmgnOneMinuteFlow(
-        context.gmgnByMint.get(candidate.tokenMint), nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS,
-      ))
-      .sort((a, b) => {
-        const aObservedAt = recentObservedAtByPool.get(a.pool.address) ?? 0;
-        const bObservedAt = recentObservedAtByPool.get(b.pool.address) ?? 0;
-        if ((aObservedAt > 0) !== (bObservedAt > 0)) return aObservedAt > 0 ? -1 : 1;
-        if (aObservedAt !== bObservedAt) return bObservedAt - aObservedAt;
-        return b.score - a.score;
-      })
-      .map((candidate) => candidate.tokenMint)
-      .filter((mint, index, mints) => mints.indexOf(mint) === index)
-      .slice(0, 5);
+    const refreshMints = selectEysRefreshMints({
+      candidates: context.candidates,
+      gmgnByMint: context.gmgnByMint,
+      observedAtByPool: recentObservedAtByPool,
+      floorUsd: effectiveEysFlowFloorUsd(cfg.flow_floor_usd),
+      nowMs,
+    });
     let direct = new Map<string, import("../scanner/gmgn.js").GmgnPresence>();
     if (refreshMints.length > 0) {
       try {

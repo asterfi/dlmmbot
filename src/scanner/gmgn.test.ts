@@ -93,9 +93,15 @@ describe("Eys GMGN interval requirement", () => {
 });
 
 describe("Eys GMGN market-cap intake", () => {
-  it("widens only Eys 1m while leaving core and other intervals unchanged", () => {
-    expect(gmgnMarketCapRangesForStrategy("1m", true)).toHaveLength(8);
-    expect(gmgnMarketCapRangesForStrategy("1m", true)).toContainEqual({ min: 1_000_000, max: 2_000_000 });
+  it("keeps the widened 1m intake inside the trending spend budget", () => {
+    const ranges = gmgnMarketCapRangesForStrategy("1m", true);
+    // Measured 2026-09-22: 8 bands x weight 3 = 30/min, which crowded out the
+    // per-candidate refresh — the only source of a genuinely fresh 1m row at
+    // evaluation time. 4 bands + 5m + 1h = 6 calls = 18/min, leaving room.
+    expect(ranges).toHaveLength(4);
+    expect(ranges.length + 2).toBeLessThanOrEqual(6);
+    expect(ranges).toContainEqual({ min: 500_000, max: 2_000_000 });
+    expect(ranges).toContainEqual({ min: 2_000_000 });
     expect(gmgnMarketCapRangesForStrategy("5m", true)).toEqual([{}]);
     expect(gmgnMarketCapRangesForStrategy("1m", false)).toEqual([{}]);
   });

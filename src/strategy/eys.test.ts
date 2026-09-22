@@ -82,7 +82,7 @@ describe("hosted Eys strategy boundary", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("prioritizes recently observed pools for bounded direct enrichment", async () => {
+  it("reserves coverage slots for never-seen candidates and still refreshes proven in-session qualifiers", async () => {
     const makeCandidate = (index: number, score: number): Candidate => {
       const pool = makePool({
         address: `Pool${index}`,
@@ -120,9 +120,13 @@ describe("hosted Eys strategy boundary", () => {
     });
     const requestedMints = gmgnMocks.tokenInfoByMint.mock.calls[0]?.[0] as string[];
 
-    expect(requestedMints).toHaveLength(5);
-    expect(requestedMints[0]).toBe(recentCandidate.tokenMint);
-    expect(proposals).toHaveLength(5);
+    // 6 candidates fit the 8-mint budget, so neither tier is starved: the
+    // never-seen competitors get coverage slots and the proven in-session
+    // qualifier still gets refreshed instead of ageing out.
+    expect(requestedMints).toHaveLength(6);
+    expect(requestedMints).toContain(recentCandidate.tokenMint);
+    for (const competitor of competitors) expect(requestedMints).toContain(competitor.tokenMint);
+    expect(proposals).toHaveLength(6);
     expect(proposals.some((proposal) => proposal.candidate.pool.address === recentCandidate.pool.address)).toBe(true);
   });
 
