@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeConnection } from "./rpc.js";
+import { isTransientRpcError, makeConnection, withRpcRetry } from "./rpc.js";
 
 const PRIMARY = "http://primary.test";
 const BACKUP = "http://backup.test";
@@ -94,5 +94,62 @@ describe("makeConnection RPC failover", () => {
     }));
 
     await expect(makeConnection().getSlot()).rejects.toThrow(/primary is down/);
+  });
+});
+
+function rateLimit(message = "429 Too Many Requests: Too Many Requests"): Error & { status?: number } {
+  const err = new Error(message) as Error & { status?: number };
+  err.status = 429;
+  return err;
+}
+
+describe("transient RPC error classification", () => {
+  it("treats HTTP 429 / 5xx / timeout shapes as transient", () => {
+    expect(isTransientRpcError(rateLimit())).toBe(true);
+    expect(isTransientRpcError(rateLimit("Server responded with 429 Too Many Requests"))).toBe(true);
+    expect(isTransientRpcError(new Error("503 Service Unavailable"))).toBe(true);
+    expect(isTransientRpcError(new Error("connect ETIMEDOUT"))).toBe(true);
+    expect(isTransientRpcError(Object.assign(new Error("boom"), { status: 500 }))).toBe(true);
+  });
+
+  it("does not retry a client or domain error", () => {
+    expect(isTransientRpcError(new Error("invalid account data"))).toBe(false);
+    expect(isTransientRpcError(Object.assign(new Error("bad request"), { status: 400 }))).toBe(false);
+    expect(isTransientRpcError("not an error")).toBe(false);
+  });
+});
+
+describe("withRpcRetry", () => {
+  it("retries a rate-limited read until it succeeds", async () => {
+    const fn = vi.fn()
+      .mockRejectedValueOnce(rateLimit())
+      .mockRejectedValueOnce(rateLimit())
+      .mockResolvedValueOnce(0.5801);
+
+    const value = await withRpcRetry(fn, { attempts: 3, delaysMs: [1, 1] });
+
+    expect(value).toBe(0.5801);
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up after the bounded number of attempts", async () => {
+    const fn = vi.fn().mockRejectedValue(rateLimit());
+
+    await expect(withRpcRetry(fn, { attempts: 3, delaysMs: [1, 1] })).rejects.toThrow("429");
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("never retries a non-transient error", async () => {
+    const fn = vi.fn().mockRejectedValue(new Error("invalid account data"));
+
+    await expect(withRpcRetry(fn, { attempts: 3, delaysMs: [1, 1] })).rejects.toThrow("invalid account data");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the value on the first attempt without sleeping", async () => {
+    const fn = vi.fn().mockResolvedValue(42);
+
+    await expect(withRpcRetry(fn, { attempts: 3, delaysMs: [10_000] })).resolves.toBe(42);
+    expect(fn).toHaveBeenCalledTimes(1);
   });
 });

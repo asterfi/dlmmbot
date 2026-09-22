@@ -12,6 +12,58 @@ const RPC_TIMEOUT_MS = 20_000;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 /**
+ * Is this failure worth a bounded second attempt, or a real error to surface?
+ *
+ * The live tick proves the stakes: `enterNewPositions` reads the wallet before
+ * it sizes anything, and one transient Helius 429 there aborts the whole
+ * manager tick — the proposal goes stale and the entry is lost (logged
+ * 2026-09-22: `Main loop interrupted: failed to get balance ... 429` sitting
+ * directly under a `1/131 ... qualifying proposals` line).
+ */
+const TRANSIENT_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const TRANSIENT_CODES = new Set(["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
+const TRANSIENT_MESSAGE = /\b(408|429|500|502|503|504)\b|too many requests|service unavailable|socket hang up|fetch failed|ETIMEDOUT|ESOCKETTIMEDOUT/i;
+
+export function isTransientRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const e = error as { status?: unknown; statusCode?: unknown; code?: unknown; message?: unknown };
+  const status = typeof e.status === "number" ? e.status : typeof e.statusCode === "number" ? e.statusCode : null;
+  if (status !== null && TRANSIENT_STATUS.has(status)) return true;
+  if (typeof e.code === "string" && TRANSIENT_CODES.has(e.code)) return true;
+  return typeof e.message === "string" && TRANSIENT_MESSAGE.test(e.message);
+}
+
+export interface RpcRetryOptions {
+  /** Total attempts including the first. Default 3. */
+  attempts?: number;
+  /** Backoff before attempt 2, 3, ... The last entry repeats. Default [400, 1500]. */
+  delaysMs?: number[];
+}
+
+/**
+ * Bounded retry for read-only RPC calls on the hot path.
+ *
+ * Deliberately narrow: it retries only when `isTransientRpcError` says the
+ * failure was a rate-limit/connect blip, it never retries a domain error, and
+ * it never retries past `attempts` — a stuck provider must fail the tick, not
+ * hang it. Writes are not wrapped here; Solana dedupes by signature and the
+ * acquisition-quarantine path owns ambiguous-send handling.
+ */
+export async function withRpcRetry<T>(fn: () => Promise<T>, opts: RpcRetryOptions = {}): Promise<T> {
+  const attempts = Math.max(1, opts.attempts ?? 3);
+  const delays = opts.delaysMs?.length ? opts.delaysMs : [400, 1_500];
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt >= attempts || !isTransientRpcError(error)) throw error;
+      const delay = delays[Math.min(attempt - 1, delays.length - 1)];
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/**
  * A Connection that actually honours RPC_URL_FALLBACK.
  *
  * The setting has been offered in the dashboard as "used if the primary RPC

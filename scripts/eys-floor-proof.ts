@@ -38,6 +38,21 @@ for (const c of scanned.candidates) {
 }
 flows.sort((a, b) => b - a);
 
+// Intake-qualified = same rule the scanner uses to pick exact-pool lookups.
+const intakeMints = [...(scanned.gmgnByMint ?? new Map()).entries()]
+  .filter(([mint, presence]) => {
+    const flow = gmgnOneMinuteFlow(presence, nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS);
+    const mcap = presence.tokenByInterval.get("1m")?.marketCapUsd ?? 0;
+    return flow !== null && flow.volumeUsd >= floor && mcap >= config().eys.market_cap_floor_usd
+      ? true : false;
+  })
+  .map(([mint]) => mint);
+const intakeSet = new Set(intakeMints);
+const candidatesInIntake = scanned.candidates.filter((c) => intakeSet.has(c.tokenMint)).length;
+const rejectedInIntake = scanned.rejected
+  .filter((c) => intakeSet.has(c.tokenMint))
+  .slice(0, 6);
+
 const db = getDb();
 const gates = db.prepare(
   "select failed_gate, count(*) n from decisions where failed_gate is not null group by 1 order by 2 desc",
@@ -50,6 +65,15 @@ console.log("FLOOR_PROOF " + JSON.stringify({
   sweptPools: scanned.sweptPools,
   candidates: scanned.candidates.length,
   eysIntake: scanned.eysIntake ?? null,
+  // Which of the cycle's intake-qualified mints actually reached candidacy:
+  // the lane is only useful if their exact pools survive the core pool gates.
+  intakeMints: intakeMints.slice(0, 12),
+  intakeInCandidates: candidatesInIntake,
+  intakeInRejected: rejectedInIntake.map((r) => ({
+    mint: r.tokenMint,
+    symbol: r.symbol,
+    gates: r.gateFailures.slice(0, 6),
+  })),
   candidatesWithFresh1m: withFlow,
   candidatesAtFloor: atFloor,
   topFlows: flows.slice(0, 8),

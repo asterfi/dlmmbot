@@ -10,7 +10,7 @@ import { createRequire } from "node:module";
 import type * as DLMMTypes from "@meteora-ag/dlmm";
 import type { LbPosition } from "@meteora-ag/dlmm";
 import { config, env, isLive, SOL_MINT } from "../config.js";
-import { makeConnection } from "../rpc.js";
+import { makeConnection, withRpcRetry } from "../rpc.js";
 import { getDb, logError, now, upsertTokenMeta, beginTokenAcquisition, finishTokenAcquisitionSwap, completeTokenAcquisition, failTokenAcquisition } from "../db/db.js";
 import { alert } from "../alerts.js";
 import { fetchPool } from "../scanner/meteora.js";
@@ -1442,7 +1442,10 @@ export class LiveExecutor implements Executor {
   }
 
   async walletSol(): Promise<number> {
-    return (await this.connection.getBalance(this.wallet.publicKey)) / 1e9;
+    // The entry pipeline reads the bankroll before it sizes anything; a
+    // transient 429 here aborts the manager tick and burns the proposal, so
+    // give the rate-limit window a bounded chance to clear (src/rpc.ts).
+    return (await withRpcRetry(() => this.connection.getBalance(this.wallet.publicKey))) / 1e9;
   }
 
   async healthProbe(): Promise<number> {
