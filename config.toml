@@ -9,7 +9,7 @@ mode = "core"
 [eys]
 enabled = false
 market_cap_floor_usd = 100000
-flow_floor_usd = 100000
+flow_floor_usd = 25000
 entry_sol = 0.1
 anchor_range_below_pct = 40
 tight_price_change_pct = 10

@@ -26,10 +26,25 @@ import { parse } from "smol-toml";
   }
 })();
 
-export const EYS_MIN_FLOW_FLOOR_USD = 100_000;
+/**
+ * Noise floor for the one-minute flow gate — NOT the trading floor.
+ *
+ * The source-defined $100k/minute figure was empirically unreachable: a live
+ * GMGN trending probe (2026-09-22, 42 mints carrying a genuine `1m` row)
+ * topped out at $61,920 and returned ZERO mints at $100k; 7h of recorded
+ * candidate observations (2,048 rows) produced one ≥$100k row in 24h. A gate
+ * nobody can pass turns the whole strategy into a no-op, so the clamp only
+ * guards against garbage/zero configuration now — the operating floor lives
+ * in `[eys] flow_floor_usd` and is chosen from measured flow distribution.
+ */
+export const EYS_MIN_FLOW_FLOOR_USD = 10_000;
 export const EYS_MAX_POOL_RESOLUTION_MINTS = 25;
 
-/** Eys cannot be configured below the source-defined one-minute flow floor. */
+/**
+ * Operating floor, clamped only by the noise floor above. Garbage, non-finite,
+ * or sub-floor input degrades to `EYS_MIN_FLOW_FLOOR_USD` — never to zero,
+ * which would admit every candidate with any positive flow reading.
+ */
 export function effectiveEysFlowFloorUsd(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? Math.max(EYS_MIN_FLOW_FLOOR_USD, n) : EYS_MIN_FLOW_FLOOR_USD;

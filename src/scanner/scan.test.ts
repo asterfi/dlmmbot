@@ -153,26 +153,29 @@ describe("Eys-first discovery boundary", () => {
 });
 
 describe("Eys flow floor", () => {
-  it("cannot be lowered by malformed, string, or sub-floor configuration", () => {
-    expect(EYS_MIN_FLOW_FLOOR_USD).toBe(100_000);
-    expect(effectiveEysFlowFloorUsd(1)).toBe(100_000);
-    expect(effectiveEysFlowFloorUsd("50000")).toBe(100_000);
-    expect(effectiveEysFlowFloorUsd(Number.NaN)).toBe(100_000);
-    expect(effectiveEysFlowFloorUsd(Number.POSITIVE_INFINITY)).toBe(100_000);
+  it("clamps to the $10k noise floor and honours any higher configured floor", () => {
+    expect(EYS_MIN_FLOW_FLOOR_USD).toBe(10_000);
+    expect(effectiveEysFlowFloorUsd(1)).toBe(10_000);
+    expect(effectiveEysFlowFloorUsd(5_000)).toBe(10_000);
+    expect(effectiveEysFlowFloorUsd("5000")).toBe(10_000);
+    expect(effectiveEysFlowFloorUsd("50000")).toBe(50_000);
+    expect(effectiveEysFlowFloorUsd(Number.NaN)).toBe(10_000);
+    expect(effectiveEysFlowFloorUsd(Number.POSITIVE_INFINITY)).toBe(10_000);
+    expect(effectiveEysFlowFloorUsd(25_000)).toBe(25_000);
     expect(effectiveEysFlowFloorUsd(150_000)).toBe(150_000);
   });
 });
 
 describe("Eys GMGN exact-pool resolution selection", () => {
   const nowMs = 1_000_000;
-  const presence = (mint: string, volumeUsd: number, fetchedAtMs: number) => {
+  const presence = (mint: string, volumeUsd: number, fetchedAtMs: number, marketCapUsd = 250_000) => {
     const token = {
       address: mint,
       symbol: mint.slice(0, 4),
       priceChangePct1h: 5,
       volumeUsd,
       liquidityUsd: 25_000,
-      marketCapUsd: 250_000,
+      marketCapUsd,
       holderCount: 100,
       top10HolderRate: 0.1,
       renouncedMint: true,
@@ -201,9 +204,12 @@ describe("Eys GMGN exact-pool resolution selection", () => {
     const gmgn = new Map([
       ["mint-high", presence("mint-high", 220_000, nowMs - 10_000)],
       ["mint-mid", presence("mint-mid", 150_000, nowMs - 20_000)],
-      ["mint-low", presence("mint-low", 99_999, nowMs - 10_000)],
+      ["mint-low", presence("mint-low", 9_999, nowMs - 10_000)],
       ["mint-stale", presence("mint-stale", 500_000, nowMs - 61_000)],
       ["mint-future", presence("mint-future", 500_000, nowMs + 1)],
+      // Huge flow, but the Eys market-cap floor rejects it downstream anyway —
+      // resolving its pools would spend provider budget on a doomed candidate.
+      ["mint-tiny-mcap", presence("mint-tiny-mcap", 400_000, nowMs - 10_000, 40_000)],
     ]);
 
     expect(selectEysPoolResolutionMints(gmgn, nowMs)).toEqual(["mint-high", "mint-mid"]);

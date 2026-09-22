@@ -79,12 +79,20 @@ it("uses the five-mint refresh budget for distinct exact candidates, not sibling
     expect.objectContaining({ evidence: expect.objectContaining({ refreshRequested: false }) }));
 });
 
-it.each([99_999, 100_000])("preserves the official $100k floor with refreshed volume %s", async (volume) => {
+it.each([9_999, 10_000])("clamps a sub-floor config to the $10k noise floor with volume %s", async (volume) => {
   installConfig((c) => { c.strategy.mode = "eys"; c.eys.enabled = true; c.eys.flow_floor_usd = 1; });
-  const c = candidate(`Floor-${volume}`);
+  const c = candidate(`NoiseFloor-${volume}`);
   mocks.tokenInfoByMint.mockResolvedValue(new Map([[c.tokenMint, presence(c.tokenMint, Date.now(), volume)]]));
   const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map() });
-  expect(proposals).toHaveLength(volume >= 100_000 ? 1 : 0);
+  expect(proposals).toHaveLength(volume >= 10_000 ? 1 : 0);
+});
+
+it.each([24_999, 25_000])("honours the configured flow floor with refreshed volume %s", async (volume) => {
+  installConfig((c) => { c.strategy.mode = "eys"; c.eys.enabled = true; c.eys.flow_floor_usd = 25_000; });
+  const c = candidate(`ConfiguredFloor-${volume}`);
+  mocks.tokenInfoByMint.mockResolvedValue(new Map([[c.tokenMint, presence(c.tokenMint, Date.now(), volume)]]));
+  const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map() });
+  expect(proposals).toHaveLength(volume >= 25_000 ? 1 : 0);
 });
 
 it("does not refresh a genuine fresh 1m row", async () => {

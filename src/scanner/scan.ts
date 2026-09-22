@@ -160,10 +160,18 @@ export function selectEysPoolResolutionMints(
       : 12,
     EYS_MAX_POOL_RESOLUTION_MINTS,
   );
+  const mcapFloor = Number(cfg?.market_cap_floor_usd) || 0;
   return [...gmgnByMint.entries()]
-    .map(([mint, presence]) => ({ mint, flow: gmgnOneMinuteFlow(presence, nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS) }))
-    .filter((row): row is { mint: string; flow: NonNullable<ReturnType<typeof gmgnOneMinuteFlow>> } =>
-      row.flow !== null && row.flow.volumeUsd >= floor,
+    .map(([mint, presence]) => ({
+      mint,
+      flow: gmgnOneMinuteFlow(presence, nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS),
+      // `evaluateEys` rejects below the market-cap floor after the pools are
+      // already resolved — skip those mints here so provider budget is only
+      // spent on tokens that can actually reach a proposal.
+      mcap: presence.tokenByInterval.get("1m")?.marketCapUsd ?? 0,
+    }))
+    .filter((row): row is { mint: string; flow: NonNullable<ReturnType<typeof gmgnOneMinuteFlow>>; mcap: number } =>
+      row.flow !== null && row.flow.volumeUsd >= floor && row.mcap >= mcapFloor,
     )
     .sort((a, b) => b.flow.volumeUsd - a.flow.volumeUsd)
     .slice(0, maxMints)
