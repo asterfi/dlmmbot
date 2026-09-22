@@ -34,6 +34,7 @@ export function makeConnection(config: ConnectionConfig = { commitment: "confirm
   const { rpcUrl, rpcUrlFallback } = env();
   return new Connection(rpcUrl, {
     ...config,
+    disableRetryOnRateLimit: true,
     fetch: async (input, init) => {
       // A fresh signal per attempt: reusing the caller's would hand the
       // fallback an already-aborted signal after a primary timeout, so the

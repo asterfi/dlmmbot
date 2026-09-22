@@ -58,6 +58,17 @@ describe("makeConnection RPC failover", () => {
     expect(seen.some((u) => u.includes("backup.test"))).toBe(true);
   });
 
+  it("does not amplify a rate limit when both RPC endpoints return 429", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+      seen.push(urlOf(input));
+      return new Response("slow down", { status: 429 });
+    }));
+
+    await expect(makeConnection({ commitment: "confirmed", disableRetryOnRateLimit: false }).getSlot()).rejects.toThrow(/429|Too many requests/i);
+    expect(seen).toEqual([PRIMARY, BACKUP]);
+  });
+
   it("does not retry a primary response that simply is not retryable", async () => {
     const seen: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
