@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { config } from "../config.js";
 import { makeConnection } from "../rpc.js";
 import type { RangePlan } from "../types.js";
-import { fitPlanToRentBudget } from "./planner.js";
+import { fitPlanToRentBudget, fitTokenPlanToRentBudget } from "./planner.js";
 
 /** Worst-case estimate used by planners (matches planner.ts). */
 export const BIN_ARRAY_RENT_SOL = 0.075;
@@ -129,6 +129,8 @@ export async function applyBinRentGate(opts: {
   minDownPct: number;
   /** Planned position size — caps rent as a share of it. Omit to skip that cap. */
   sizeSol?: number;
+  /** Strategy funding side; token-side ranges shrink from the active bin upward. */
+  fundingSide?: "sol" | "token";
   /** Test hook — defaults to on-chain quote. */
   quote?: typeof quoteActualBinArrayRent;
 }): Promise<BinRentGateResult> {
@@ -145,9 +147,9 @@ export async function applyBinRentGate(opts: {
     };
   }
 
-  const fitted = fitPlanToRentBudget(
-    range, softBudget, opts.price, opts.binStep, opts.decimalsX, opts.minDownPct,
-  );
+  const fitted = opts.fundingSide === "token"
+    ? fitTokenPlanToRentBudget(range, softBudget, opts.price, opts.binStep, opts.decimalsX)
+    : fitPlanToRentBudget(range, softBudget, opts.price, opts.binStep, opts.decimalsX, opts.minDownPct);
   if (fitted && fitted.estBinRentSol <= softBudget) {
     return {
       ok: true,

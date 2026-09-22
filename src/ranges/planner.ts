@@ -93,6 +93,30 @@ export function fitPlanToRentBudget(
   return buildPlan(minBinForRent, plan.maxBinId, currentPrice, binStep, decimalsX, plan.fibAnchor);
 }
 
+export function fitTokenPlanToRentBudget(
+  plan: RangePlan,
+  budgetSol: number,
+  currentPrice: number,
+  binStep: number,
+  decimalsX: number,
+): RangePlan | null {
+  if (plan.estBinRentSol <= budgetSol) return plan;
+  const maxArrays = Math.floor(budgetSol / BIN_ARRAY_RENT_SOL + 1e-12);
+  if (maxArrays < 1) return null;
+  const maxBinForRent = (Math.floor(plan.minBinId / BINS_PER_ARRAY_EST) + maxArrays) * BINS_PER_ARRAY_EST - 1;
+  const maxBinId = Math.min(plan.maxBinId, maxBinForRent);
+  if (maxBinId <= plan.minBinId) return null;
+  const binCount = maxBinId - plan.minBinId + 1;
+  return {
+    ...plan,
+    maxBinId,
+    binCount,
+    positionAccounts: Math.ceil(binCount / BINS_PER_POSITION),
+    topPricePct: (binIdToPrice(maxBinId, binStep, decimalsX) / currentPrice - 1) * 100,
+    estBinRentSol: binArraysSpanned(plan.minBinId, maxBinId) * BIN_ARRAY_RENT_SOL,
+  };
+}
+
 /** Swing high/low from candles (max 24h lookback of 5m candles). */
 export function swing(candles: Candle[]): { high: number; low: number } | null {
   if (candles.length < 6) return null;

@@ -11,13 +11,14 @@ import type * as DLMMTypes from "@meteora-ag/dlmm";
 import type { LbPosition } from "@meteora-ag/dlmm";
 import { config, env, isLive, SOL_MINT } from "../config.js";
 import { makeConnection } from "../rpc.js";
-import { getDb, logError, now, upsertTokenMeta } from "../db/db.js";
+import { getDb, logError, now, upsertTokenMeta, beginTokenAcquisition, finishTokenAcquisitionSwap, completeTokenAcquisition, failTokenAcquisition } from "../db/db.js";
 import { alert } from "../alerts.js";
 import { fetchPool } from "../scanner/meteora.js";
 import type { ExitReason, Position } from "../types.js";
 import { classifyLeftover, RESIDUAL_SWEEP_MIN_SOL } from "./executor.js";
 import type { Executor, OpenParams, PositionMark } from "./executor.js";
-import { quoteToSolLamports, swapToSolEscalating } from "./jupiter.js";
+import { quoteToSolLamports, signatureFromSwapError, swapFromSol, swapToSolEscalating } from "./jupiter.js";
+import { allocateTokenSideChunks, attributedTokenDelta, type TokenBalanceSnapshot } from "./tokenFunding.js";
 
 /**
  * Leftover-token share of the close mark at or above which an under-filled
@@ -119,6 +120,17 @@ export function wealthDeltaLamports(
       .reduce((s, b) => s + Number(b.uiTokenAmount.amount), 0);
   lamports += sumWsol(meta.postTokenBalances ?? []) - sumWsol(meta.preTokenBalances ?? []);
   return lamports;
+}
+
+export function requireOpenCostSol(walletDeltaSol: number | null): number {
+  if (walletDeltaSol === null || !Number.isFinite(walletDeltaSol)) {
+    throw new Error("open wallet debit is unknown; refusing to record position");
+  }
+  const cost = -walletDeltaSol;
+  if (!Number.isFinite(cost) || cost <= 0) {
+    throw new Error(`open wallet debit must be positive, got ${walletDeltaSol}`);
+  }
+  return cost;
 }
 
 function lbPositionEmpty(p: LbPosition): boolean {
@@ -465,6 +477,28 @@ export class LiveExecutor implements Executor {
   }
 
   /**
+   * Attribute acquisition only to token balances changed by the confirmed swap
+   * transaction. Wallet-wide after reads can include unrelated inbound transfers.
+   */
+  private async tokenDeltaFromConfirmedSwap(mint: string, signature: string): Promise<bigint> {
+    let tx: ParsedTransactionWithMeta | null = null;
+    for (let i = 0; i < 6 && tx === null; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 500));
+      tx = await this.connection
+        .getParsedTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 })
+        .catch(() => null);
+    }
+    if (!tx?.meta) throw new Error(`token acquisition ${signature} transaction is not readable`);
+    if (tx.meta.err) throw new Error(`token acquisition ${signature} landed with an on-chain error`);
+    return attributedTokenDelta(
+      (tx.meta.preTokenBalances ?? []) as unknown as TokenBalanceSnapshot[],
+      (tx.meta.postTokenBalances ?? []) as unknown as TokenBalanceSnapshot[],
+      this.wallet.publicKey.toBase58(),
+      mint,
+    );
+  }
+
+  /**
    * Wallet balance of a mint that is guaranteed to reflect `afterSig`.
    *
    * Resolves the slot that signature landed in, then re-reads until the RPC
@@ -476,8 +510,16 @@ export class LiveExecutor implements Executor {
    * be resolved at all we fall back to a plain read — a diagnostic lookup must
    * never block an exit.
    */
-  private async tokenBalanceAfter(mint: string, afterSig: string | null): Promise<bigint> {
-    if (!afterSig) return this.tokenBalanceRaw(mint);
+  private async tokenBalanceAfter(
+    mint: string,
+    afterSig: string | null,
+    options: { requirePinned?: boolean } = {},
+  ): Promise<bigint> {
+    const requirePinned = options.requirePinned === true;
+    if (!afterSig) {
+      if (requirePinned) throw new Error("token balance attribution requires a confirmed transaction signature");
+      return this.tokenBalanceRaw(mint);
+    }
     let landedSlot: number | null = null;
     // The status lookup can ALSO hit a replica that has not seen the tx yet and
     // return null. Falling back to a plain read on the first miss is exactly
@@ -490,6 +532,7 @@ export class LiveExecutor implements Executor {
       if (landedSlot == null) await new Promise((r) => setTimeout(r, 500));
     }
     if (landedSlot == null) {
+      if (requirePinned) throw new Error(`could not resolve confirmed slot for ${afterSig.slice(0, 8)}…`);
       console.warn(`[live] could not resolve slot for ${afterSig.slice(0, 8)}… — unpinned balance read`);
       return this.tokenBalanceRaw(mint);
     }
@@ -498,6 +541,10 @@ export class LiveExecutor implements Executor {
       last = await this.tokenBalanceWithSlot(mint);
       if (last.slot >= landedSlot) return last.total;
       await new Promise((r) => setTimeout(r, 500));
+    }
+    if (last?.slot != null && last.slot >= landedSlot) return last.total;
+    if (requirePinned) {
+      throw new Error(`token balance read never reached confirmed slot ${landedSlot} (got ${last?.slot ?? "unknown"})`);
     }
     console.warn(`[live] balance read never reached slot ${landedSlot} (got ${last?.slot}) — using latest`);
     return last!.total;
@@ -669,17 +716,36 @@ export class LiveExecutor implements Executor {
     // coupling "spot" to "majors" so no other sleeve could use the shape.
     // Both shapes now take the planner's bins and re-anchor the top to the
     // live active bin the same way; only the SDK strategyType differs.
-    if (rangeGapTooLarge(params.range.maxBinId, activeBin.binId)) {
+    const fundingSide = params.fundingSide ?? "sol";
+    const tokenSide = fundingSide === "token";
+    if (tokenSide) {
+      if (!meta || meta.mintX !== params.tokenMint) {
+        throw new Error(
+          `token-side funding requires pool tokenX ${params.tokenMint}, got ${meta?.mintX ?? "unknown"}`,
+        );
+      }
+      if (rangeGapTooLarge(params.range.minBinId, activeBin.binId)) {
+        const gap = Math.abs(activeBin.binId - params.range.minBinId);
+        throw new Error(
+          `range sanity: planned token-side base bin ${params.range.minBinId} is ${gap} bins from on-chain active ${activeBin.binId} — refusing to open`,
+        );
+      }
+    } else if (rangeGapTooLarge(params.range.maxBinId, activeBin.binId)) {
       const gap = Math.abs(activeBin.binId - params.range.maxBinId);
       throw new Error(
-        `range sanity: planned top bin ${params.range.maxBinId} is ${gap} bins from on-chain active ${activeBin.binId} — refusing to open`
+        `range sanity: planned top bin ${params.range.maxBinId} is ${gap} bins from on-chain active ${activeBin.binId} — refusing to open`,
       );
     }
     const width = params.range.maxBinId - params.range.minBinId;
-    let maxBin = activeBin.binId;
-    let minBin = activeBin.binId > params.range.maxBinId
-      ? maxBin - width
-      : Math.min(params.range.minBinId, maxBin - 1);
+    if (!Number.isSafeInteger(width) || width < 1) {
+      throw new Error("range sanity: token-side Spot range must contain bins above the active bin");
+    }
+    let maxBin = tokenSide ? activeBin.binId + width : activeBin.binId;
+    let minBin = tokenSide
+      ? activeBin.binId
+      : (activeBin.binId > params.range.maxBinId
+        ? maxBin - width
+        : Math.min(params.range.minBinId, maxBin - 1));
     const totalBins = maxBin - minBin + 1;
     // Re-anchor sanity: when the on-chain price has dumped THROUGH the
     // planned depth between planning and open, the min(plannedMin, maxBin-1)
@@ -687,40 +753,97 @@ export class LiveExecutor implements Executor {
     // a max-size buy wall directly under a crashing (plausibly rugging)
     // price. The 150-bin gap check only guards the other direction.
     const plannedBins = params.range.maxBinId - params.range.minBinId + 1;
-    if (totalBins < Math.max(10, Math.ceil(plannedBins * 0.5))) {
+    if (!tokenSide && totalBins < Math.max(10, Math.ceil(plannedBins * 0.5))) {
       throw new Error(
         `range sanity: re-anchored range is ${totalBins} bins vs ${plannedBins} planned — ` +
         `price fell through the planned depth between planning and open; refusing to open`
       );
     }
     let liveEntryPrice = Number(pool.fromPricePerLamport(Number(activeBin.price)));
-    const lamports = Math.floor(params.sizeSol * 1e9);
+    const lamports = BigInt(Math.floor(params.sizeSol * 1e9));
     const strategyType = shape === "spot" ? StrategyType.Spot : StrategyType.BidAsk;
-
-    const chunks: Array<{ min: number; max: number; share: number }> = [];
-    const totalWRamp = (totalBins * (totalBins + 1)) / 2;
-    for (let start = 0; start < totalBins; start += BINS_PER_ACCOUNT) {
-      const end = Math.min(start + BINS_PER_ACCOUNT - 1, totalBins - 1);
-      let share: number;
-      if (shape === "spot") share = (end - start + 1) / totalBins;
-      else {
-        let w = 0;
-        for (let i = start; i <= end; i++) w += i + 1;
-        share = w / totalWRamp;
-      }
-      chunks.push({ min: maxBin - end, max: maxBin - start, share });
+    if (tokenSide && shape !== "spot") {
+      throw new Error("token-side funding requires Spot strategy geometry");
     }
 
+    const chunks: Array<{ min: number; max: number; share: number }> = tokenSide
+      ? allocateTokenSideChunks(minBin, maxBin)
+      : (() => {
+        const out: Array<{ min: number; max: number; share: number }> = [];
+        const totalWRamp = (totalBins * (totalBins + 1)) / 2;
+        for (let start = 0; start < totalBins; start += BINS_PER_ACCOUNT) {
+          const end = Math.min(start + BINS_PER_ACCOUNT - 1, totalBins - 1);
+          let share: number;
+          if (shape === "spot") share = (end - start + 1) / totalBins;
+          else {
+            let w = 0;
+            for (let i = start; i <= end; i++) w += i + 1;
+            share = w / totalWRamp;
+          }
+          out.push({ min: maxBin - end, max: maxBin - start, share });
+        }
+        return out;
+      })();
     const accountRows: Array<{ pubkey: string; min: number; max: number }> = [];
     const sigs: string[] = [];
+    let acquisitionId: number | null = null;
+    let acquisitionSwapSig: string | null = null;
+    let acquisitionUncertainSig: string | null = null;
+    let acquisitionBeforeRaw: bigint | null = null;
+    let acquiredRaw: bigint | null = null;
+    if (tokenSide) {
+      acquisitionId = beginTokenAcquisition("live", params.poolAddress, params.tokenMint);
+      try {
+        acquisitionBeforeRaw = await this.tokenBalanceRaw(params.tokenMint);
+        const configuredSlippage = config().exec.token_acquisition_slippage_bps;
+        const slippageBps = typeof configuredSlippage === "number" && Number.isSafeInteger(configuredSlippage) && configuredSlippage >= 0
+          ? configuredSlippage
+          : 300;
+        const swap = await swapFromSol(
+          this.connection,
+          this.wallet,
+          params.tokenMint,
+          lamports,
+          slippageBps,
+        );
+        if (!swap) throw new Error("token-side acquisition returned no swap");
+        acquisitionSwapSig = swap.signature;
+        acquiredRaw = await this.tokenDeltaFromConfirmedSwap(params.tokenMint, swap.signature);
+        finishTokenAcquisitionSwap(acquisitionId, swap.signature, acquiredRaw);
+        sigs.push(swap.signature);
+        if (acquiredRaw < BigInt(chunks.length)) {
+          throw new Error(`token-side acquisition ${acquiredRaw} raw units cannot fund ${chunks.length} accounts`);
+        }
+      } catch (e) {
+        const carriedSignature = signatureFromSwapError(e);
+        if (carriedSignature) {
+          acquisitionUncertainSig = carriedSignature;
+          acquisitionSwapSig ??= carriedSignature;
+        }
+        failTokenAcquisition(acquisitionId, {
+          message: (e as Error).message,
+          swapSignature: acquisitionSwapSig,
+          uncertainSignature: acquisitionUncertainSig,
+          beforeRaw: acquisitionBeforeRaw?.toString() ?? null,
+        }, Boolean(carriedSignature));
+        throw e;
+      }
+    }
+    let allocatedTokenRaw = 0n;
     // Width preserved across rebuilds; top always re-anchors to live active bin.
     let curMin = minBin;
     let curMax = maxBin;
     let curPrice = liveEntryPrice;
-    for (let ci = 0; ci < chunks.length; ci++) {
-      let chunk = chunks[ci]!;
-      let opened = false;
-      let lastDetail: ReturnType<typeof txErrorDetail> | null = null;
+    try {
+      for (let ci = 0; ci < chunks.length; ci++) {
+        let chunk = chunks[ci]!;
+        const chunkTokenRaw = tokenSide
+          ? ((ci === chunks.length - 1)
+            ? (acquiredRaw ?? 0n) - allocatedTokenRaw
+            : (acquiredRaw ?? 0n) * BigInt(chunk.max - chunk.min + 1) / BigInt(totalBins))
+          : 0n;
+        let opened = false;
+        let lastDetail: ReturnType<typeof txErrorDetail> | null = null;
       for (let attempt = 0; attempt <= OPEN_SLIPPAGE_REBUILDS; attempt++) {
         if (attempt > 0) {
           await pool.refetchStates();
@@ -729,12 +852,23 @@ export class LiveExecutor implements Executor {
           if (accountRows.length === 0) {
             const fresh = await pool.getActiveBin();
             const widthBins = curMax - curMin;
-            curMax = fresh.binId;
-            curMin = curMax - widthBins;
-            const total = curMax - curMin + 1;
-            const start = ci * BINS_PER_ACCOUNT;
-            const end = Math.min(start + BINS_PER_ACCOUNT - 1, total - 1);
-            chunk = { min: curMax - end, max: curMax - start, share: chunk.share };
+            if (tokenSide) {
+              curMin = fresh.binId;
+              curMax = curMin + widthBins;
+              const plannedChunk = chunks[ci]!;
+              chunk = {
+                min: curMin + (plannedChunk.min - minBin),
+                max: curMin + (plannedChunk.max - minBin),
+                share: plannedChunk.share,
+              };
+            } else {
+              curMax = fresh.binId;
+              curMin = curMax - widthBins;
+              const total = curMax - curMin + 1;
+              const start = ci * BINS_PER_ACCOUNT;
+              const end = Math.min(start + BINS_PER_ACCOUNT - 1, total - 1);
+              chunk = { min: curMax - end, max: curMax - start, share: chunk.share };
+            }
             curPrice = Number(pool.fromPricePerLamport(Number(fresh.price)));
             console.warn(
               `[live] rebuild open after ${lastDetail?.code ?? "slippage"} — ` +
@@ -752,8 +886,8 @@ export class LiveExecutor implements Executor {
           const tx = await pool.initializePositionAndAddLiquidityByStrategy({
             positionPubKey: positionKp.publicKey,
             user: this.wallet.publicKey,
-            totalXAmount: new BN(0),
-            totalYAmount: new BN(Math.floor(lamports * chunk.share)),
+            totalXAmount: new BN(tokenSide ? chunkTokenRaw.toString() : "0"),
+            totalYAmount: new BN(tokenSide ? "0" : Math.floor(Number(lamports) * chunk.share)),
             strategy: { minBinId: chunk.min, maxBinId: chunk.max, strategyType },
             slippage: config().entry.liquidity_slippage_pct,
           });
@@ -769,7 +903,21 @@ export class LiveExecutor implements Executor {
           throw Object.assign(new Error(lastDetail.summary), { logs: lastDetail.logs, code: lastDetail.code });
         }
       }
-      if (!opened) throw new Error(lastDetail?.summary ?? "open failed");
+        if (!opened) throw new Error(lastDetail?.summary ?? "open failed");
+        if (tokenSide) allocatedTokenRaw += chunkTokenRaw;
+      }
+    } catch (e) {
+      if (acquisitionId !== null) {
+        const carriedSignature = signatureFromSwapError(e);
+        if (carriedSignature) acquisitionUncertainSig = carriedSignature;
+        failTokenAcquisition(acquisitionId, {
+          message: (e as Error).message,
+          swapSignature: acquisitionSwapSig,
+          uncertainSignature: acquisitionUncertainSig,
+          beforeRaw: acquisitionBeforeRaw?.toString() ?? null,
+        }, true);
+      }
+      throw e;
     }
     minBin = curMin;
     maxBin = curMax;
@@ -780,8 +928,21 @@ export class LiveExecutor implements Executor {
     // per-tx: a multi-chunk open sends one tx per position account, and a
     // baseline poll settles after the first (RUBY pos#8 recorded 0.3029 for a
     // 0.45 SOL entry that way).
-    const delta = await this.walletDelta(sigs);
-    const openCostSol = delta === null ? null : -delta;
+    let openCostSol: number;
+    try {
+      const delta = await this.walletDelta(sigs);
+      openCostSol = requireOpenCostSol(delta);
+    } catch (e) {
+      if (acquisitionId !== null) {
+        failTokenAcquisition(acquisitionId, {
+          message: (e as Error).message,
+          swapSignature: acquisitionSwapSig,
+          uncertainSignature: acquisitionUncertainSig,
+          beforeRaw: acquisitionBeforeRaw?.toString() ?? null,
+        }, true);
+      }
+      throw e;
+    }
 
     const db = getDb();
     const res = db.prepare(
@@ -796,6 +957,7 @@ export class LiveExecutor implements Executor {
     for (const a of accountRows)
       db.prepare("INSERT INTO position_accounts (position_id, pubkey, min_bin_id, max_bin_id) VALUES (?, ?, ?, ?)")
         .run(id, a.pubkey, a.min, a.max);
+    if (acquisitionId !== null) completeTokenAcquisition(acquisitionId, id);
     upsertTokenMeta(params.tokenMint, { symbol: params.symbol });
 
     // Open event. Two things that did not survive before: the open signatures
@@ -815,8 +977,21 @@ export class LiveExecutor implements Executor {
     }
     db.prepare(
       "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, tx_cost_sol, detail_json) VALUES (?, ?, 'open', ?, ?, ?, ?)"
-    ).run(id, now(), sigs[0] ?? null, openCostSol === null ? null : -openCostSol, 0.0005 * sigs.length,
-      JSON.stringify({ sigs, openCostSol, sizeSol: params.sizeSol, minBin, maxBin, bins: openBins }));
+    ).run(id, now(), sigs[0] ?? null, -openCostSol, 0.0005 * sigs.length,
+      JSON.stringify({
+        sigs,
+        openCostSol,
+        sizeSol: params.sizeSol,
+        fundingSide,
+        acquisitionId,
+        acquisitionSwapSig,
+        acquisitionUncertainSig,
+        acquiredTokenBeforeRaw: acquisitionBeforeRaw?.toString() ?? null,
+        acquiredTokenRaw: acquiredRaw?.toString() ?? null,
+        minBin,
+        maxBin,
+        bins: openBins,
+      }));
 
     return {
       id, mode: "live", poolAddress: params.poolAddress, tokenMint: params.tokenMint,

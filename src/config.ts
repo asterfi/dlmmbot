@@ -325,6 +325,8 @@ export interface Config {
   exec: {
     mode: "paper" | "live";
     exit_slippage_bps: number; safety_exit_slippage_bps: number;
+    /** SOL→token slippage for source strategies that require token-side funding. */
+    token_acquisition_slippage_bps?: number;
     tx_retries: number; paper_promotion_days: number;
     /**
      * Priority fee + compute budget (see src/executor/priorityFee.ts). Optional:

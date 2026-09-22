@@ -7,6 +7,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
+import bs58 from "bs58";
 import { config, env, SOL_MINT } from "../config.js";
 
 // Jupiter swap client (REST v1): quote -> swap tx -> sign -> send. Used to
@@ -137,7 +138,7 @@ export async function swapToSol(
 
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, "base64"));
   tx.sign([wallet]);
-  const signature = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 });
+  const signature = await sendSignedTransaction(connection, tx);
   // A confirm that times out is NOT proof the swap failed — the tx is already
   // broadcast and can still land. Throwing the bare error loses the one thing
   // that makes it recoverable: the signature. On a below-range close this swap
@@ -190,10 +191,31 @@ export async function confirmBySignatureStatus(
   }
 }
 
-/** Signature carried out of a swap whose confirm timed out (see swapToSol). */
+/** Recover the signature already present in a locally signed versioned transaction. */
+export function signedTransactionSignature(tx: Pick<VersionedTransaction, "signatures">): string | null {
+  const signature = tx.signatures[0];
+  return signature ? bs58.encode(signature) : null;
+}
+
+export async function sendSignedTransaction(connection: Connection, tx: VersionedTransaction): Promise<string> {
+  const locallySignedSignature = signedTransactionSignature(tx);
+  try {
+    return await connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 });
+  } catch (e) {
+    // sendRawTransaction may throw after the signed bytes reached the RPC. The
+    // locally signed transaction still gives us the exact signature to quarantine.
+    if (locallySignedSignature) throw Object.assign(e as Error, { signature: locallySignedSignature });
+    throw e;
+  }
+}
+
+/** Signature carried out of a swap whose send or confirm result is ambiguous. */
 export function signatureFromSwapError(e: unknown): string | null {
-  const sig = (e as { signature?: unknown } | null)?.signature;
-  return typeof sig === "string" && sig.length > 0 ? sig : null;
+  const value = e as { signature?: unknown; maybeSig?: unknown } | null;
+  for (const candidate of [value?.signature, value?.maybeSig]) {
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  }
+  return null;
 }
 
 /** Swap `lamports` of SOL to `outputMint`. Returns raw token out (from quote) + signature. */
@@ -207,7 +229,7 @@ export async function swapFromSol(
   if (lamports <= 0n || outputMint === SOL_MINT) return null;
   const built = await buildSwapFromSolTx(connection, wallet, outputMint, lamports, slippageBps);
   if (!built) return null;
-  const signature = await connection.sendRawTransaction(built.tx.serialize(), { maxRetries: 3 });
+  const signature = await sendSignedTransaction(connection, built.tx);
   try {
     await confirmBySignatureStatus(connection, signature);
   } catch (e) {

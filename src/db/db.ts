@@ -124,6 +124,24 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_position ON events(position_id, ts);
 
+-- Token-side Eys acquisition ledger. A SOL→token swap is a separate irreversible
+-- leg before the DLMM deposit; unresolved rows freeze new entries until the wallet
+-- and chain state are reconciled explicitly.
+CREATE TABLE IF NOT EXISTS acquisition_intents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  mode TEXT NOT NULL,
+  pool TEXT NOT NULL,
+  token_mint TEXT NOT NULL,
+  created_ts INTEGER NOT NULL,
+  updated_ts INTEGER NOT NULL,
+  status TEXT NOT NULL,             -- pending_swap | swapped | complete | failed | quarantined
+  swap_sig TEXT,
+  acquired_raw TEXT,
+  position_id INTEGER,
+  detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_acquisition_intents_status ON acquisition_intents(status, updated_ts);
+
 -- The tuning dataset: every enter/skip/exit with full feature vector.
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -495,6 +513,51 @@ export function _resetDbForTests(): void {
 
 export function now(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+export type AcquisitionIntentStatus = "pending_swap" | "swapped" | "complete" | "failed" | "quarantined";
+
+export function beginTokenAcquisition(mode: "paper" | "live", pool: string, tokenMint: string): number {
+  const ts = now();
+  const result = getDb().prepare(
+    `INSERT INTO acquisition_intents
+      (mode, pool, token_mint, created_ts, updated_ts, status, swap_sig, acquired_raw, position_id, detail_json)
+     VALUES (?, ?, ?, ?, ?, 'pending_swap', NULL, NULL, NULL, NULL)`,
+  ).run(mode, pool, tokenMint, ts, ts);
+  return Number(result.lastInsertRowid);
+}
+
+export function finishTokenAcquisitionSwap(
+  id: number,
+  swapSig: string,
+  acquiredRaw: bigint,
+): void {
+  getDb().prepare(
+    "UPDATE acquisition_intents SET updated_ts = ?, status = 'swapped', swap_sig = ?, acquired_raw = ? WHERE id = ?",
+  ).run(now(), swapSig, acquiredRaw.toString(), id);
+}
+
+export function completeTokenAcquisition(id: number, positionId: number): void {
+  getDb().prepare(
+    "UPDATE acquisition_intents SET updated_ts = ?, status = 'complete', position_id = ? WHERE id = ?",
+  ).run(now(), positionId, id);
+}
+
+export function failTokenAcquisition(id: number, detail: unknown, quarantined: boolean): void {
+  const candidate = detail as { swapSignature?: unknown; uncertainSignature?: unknown } | null;
+  const swapSig = typeof candidate?.swapSignature === "string"
+    ? candidate.swapSignature
+    : typeof candidate?.uncertainSignature === "string" ? candidate.uncertainSignature : null;
+  getDb().prepare(
+    "UPDATE acquisition_intents SET updated_ts = ?, status = ?, swap_sig = COALESCE(?, swap_sig), detail_json = ? WHERE id = ?",
+  ).run(now(), quarantined ? "quarantined" : "failed", swapSig, JSON.stringify(detail ?? null), id);
+}
+
+export function hasUnresolvedTokenAcquisition(mode: "paper" | "live" = currentMode()): boolean {
+  const row = getDb().prepare(
+    "SELECT 1 AS present FROM acquisition_intents WHERE mode = ? AND status IN ('pending_swap', 'swapped', 'quarantined') LIMIT 1",
+  ).get(mode) as { present?: number } | undefined;
+  return row?.present === 1;
 }
 
 /**

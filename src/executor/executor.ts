@@ -10,6 +10,8 @@ export interface OpenParams {
   sizeSol: number;
   range: RangePlan;
   entryPrice: number;
+  /** Strategy-selected funding side. Token side requires an attributed SOL→X acquisition before deposit. */
+  fundingSide?: "sol" | "token";
   trancheOf?: number;
 }
 

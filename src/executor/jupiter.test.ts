@@ -1,8 +1,31 @@
 import { describe, it, expect, vi } from "vitest";
-import { runSlippageLadder, slippageTiers, confirmBySignatureStatus } from "./jupiter.js";
+import { runSlippageLadder, slippageTiers, confirmBySignatureStatus, signatureFromSwapError, signedTransactionSignature, sendSignedTransaction } from "./jupiter.js";
 import { SOL_MINT } from "../config.js";
 
 const MINT = "So1111111111111111111111111111111111111111x"; // any non-SOL mint
+
+describe("signature recovery", () => {
+  it("carries the locally signed signature when sendRawTransaction throws", async () => {
+    const tx = {
+      signatures: [new Uint8Array(64).fill(7)],
+      serialize: () => new Uint8Array([1, 2, 3]),
+    } as never;
+    const connection = {
+      sendRawTransaction: vi.fn().mockRejectedValue(new Error("RPC response lost")),
+    } as never;
+    await expect(sendSignedTransaction(connection, tx)).rejects.toMatchObject({
+      message: "RPC response lost",
+      signature: signedTransactionSignature(tx),
+    });
+  });
+  it("recovers broadcast and ambiguous signatures from errors", () => {
+    expect(signatureFromSwapError({ signature: "sig-a" })).toBe("sig-a");
+    expect(signatureFromSwapError({ maybeSig: "sig-b" })).toBe("sig-b");
+    expect(signatureFromSwapError(new Error("pre-broadcast rejection"))).toBeNull();
+    expect(signedTransactionSignature({ signatures: [new Uint8Array(64).fill(7)] } as never)).toBeTruthy();
+  });
+
+});
 
 describe("slippageTiers", () => {
   it("base, ~3x clamped to 300–1500, then 1500", () => {

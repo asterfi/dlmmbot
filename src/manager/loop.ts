@@ -6,7 +6,7 @@ import { config, configToml, currentMode, isLive, onConfigChange, syncFarmerMode
 import { mapGrouped } from "../concurrent.js";
 import { reconcileLive } from "./reconcile.js";
 import { alert, type AlertKind } from "../alerts.js";
-import { blacklist, describeError, getDb, now, pruneHistory, recordConfigSnapshot, recordCreatorRug, recordDecision, REALIZED_PNL_SQL, logError, installProcessErrorHooks } from "../db/db.js";
+import { blacklist, describeError, getDb, now, pruneHistory, recordConfigSnapshot, recordCreatorRug, recordDecision, REALIZED_PNL_SQL, logError, installProcessErrorHooks, hasUnresolvedTokenAcquisition } from "../db/db.js";
 import { RESIDUAL_SWEEP_MIN_SOL } from "../executor/executor.js";
 import type { Executor } from "../executor/executor.js";
 import { LiveExecutor } from "../executor/live.js";
@@ -252,7 +252,7 @@ async function writeHeartbeat(exec: Executor, openCount: number): Promise<void> 
       "INSERT INTO meta (key, value) VALUES ('heartbeat', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
     ).run(JSON.stringify({
       ts: now(), pid: process.pid, build: buildSha, mode: exec.mode,
-      open: openCount, probeFailures, entriesFrozen: entriesFrozen(),
+      open: openCount, probeFailures, entriesFrozen: entriesFrozen(exec),
       walletSol,
     }));
   } catch (e) {
@@ -1449,8 +1449,8 @@ async function rpcProbe(exec: Executor): Promise<void> {
 }
 
 /** Entries are frozen well before the watchdog alerts — see watchdogCheck. */
-function entriesFrozen(): boolean {
-  return probeFailures >= PROBE_FAILURES_FREEZE_ENTRIES;
+function entriesFrozen(exec: Pick<Executor, "mode">): boolean {
+  return probeFailures >= PROBE_FAILURES_FREEZE_ENTRIES || hasUnresolvedTokenAcquisition(exec.mode);
 }
 
 /**
@@ -1566,6 +1566,10 @@ async function tryDisplacement(exec: Executor, candScore: number, candMint: stri
 
 /** Entry pipeline: scan -> vet -> size -> open, respecting portfolio limits. */
 export async function enterNewPositions(exec: Executor): Promise<void> {
+  if (entriesFrozen(exec)) {
+    console.warn(`[enter] entries frozen for ${exec.mode} mode — skipping new entries`);
+    return;
+  }
   const walletSol = await exec.walletSol();
   if (circuitBreakerTripped(walletSol)) {
     console.log("[risk] circuit breaker tripped — no new entries");
@@ -1655,17 +1659,15 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     return;
   }
   for (const cand of candidates) {
+    if (entriesFrozen(exec)) {
+      console.warn(`[enter] entries froze during scan — stopping before ${cand.symbol}`);
+      return;
+    }
     const proposal = strategyProposals.get(cand.pool.address);
     if (!proposal) continue;
     const strategyDecision = strategy.evaluate({ candidate: cand, proposal });
     if (!strategyDecision.accepted) {
       recordDecision(cand.tokenMint, cand.pool.address, "skipped", `strategy_${strategyDecision.reason ?? "rejected"}`, cand.score, { strategy: strategy.id });
-      continue;
-    }
-    if (proposal.fundingSide === "token") {
-      recordDecision(cand.tokenMint, cand.pool.address, "skipped", "strategy_token_funding_unavailable", cand.score, {
-        strategy: proposal.strategyId, stage: proposal.stage, evidence: proposal.evidence,
-      });
       continue;
     }
     const opened = openPositionCount();
@@ -1984,6 +1986,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       decimalsX: cand.pool.decimalsX,
       minDownPct: config().entry.min_down_pct,
       sizeSol: size,
+      fundingSide: proposal.fundingSide,
     });
     if (!rent.ok) {
       recordDecision(cand.tokenMint, cand.pool.address, "skipped", "bin_rent", score, {
@@ -2110,6 +2113,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         sizeSol: size,
         range,
         entryPrice,
+        fundingSide: proposal.fundingSide,
       }));
     } catch (e) {
       const err = e as Error & { code?: string; logs?: string[] };
@@ -2137,6 +2141,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         code: err.code ?? null,
         logs: Array.isArray(err.logs) ? err.logs.slice(0, 8) : [],
       });
+      if (entriesFrozen(exec)) return;
       continue;
     }
     // Re-price the bankroll after the fill: the DB now carries the new row, so
@@ -2200,7 +2205,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // Second tranche — wider BidAsk pocket below primary when score clears the
     // gate and the primary left room above the P0-safe floor.
     const te = config().entry;
-    if (te.tranche_enabled && score >= te.tranche_score_min && !isMicro) {
+    if (te.tranche_enabled && proposal.fundingSide !== "token" && score >= te.tranche_score_min && !isMicro) {
       const tSize = size * (te.tranche_size_pct / 100);
       const tFloor = minPositionSol(bankroll.walletSol);
       const slotsLeft = bankroll.effectiveSlots - openPositionCount();
@@ -2220,6 +2225,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             decimalsX: cand.pool.decimalsX,
             minDownPct: Math.abs(tPlan.bottomPricePct),
             sizeSol: tSize,
+            fundingSide: proposal.fundingSide,
           });
           if (tRent.ok) {
             try {
@@ -2230,6 +2236,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
                 sizeSol: tSize,
                 range: tRent.range,
                 entryPrice,
+                fundingSide: proposal.fundingSide,
                 trancheOf: pos.id,
               }));
               recordDecision(cand.tokenMint, cand.pool.address, "entered", null, score, {
@@ -2249,6 +2256,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
               recordDecision(cand.tokenMint, cand.pool.address, "skipped", "tranche_open_failed", score, {
                 primaryId: pos.id, size: tSize, error: msg,
               });
+              if (entriesFrozen(exec)) return;
             }
           }
         }
@@ -2422,7 +2430,7 @@ export async function runLoop(): Promise<void> {
       // Follow chains tick at poll cadence, not scanner cadence — dip detection
       // on a 15% retrace needs finer sampling than the 60s scan. Frozen entries
       // freeze follow legs too: both add exposure.
-      if (!entriesFrozen()) {
+      if (!entriesFrozen(exec)) {
         try {
           await tickFollowChains(exec);
         } catch (e) {
@@ -2430,7 +2438,7 @@ export async function runLoop(): Promise<void> {
         }
       }
       const due = scanDue(Date.now() - lastScan, config().scanner.interval_s * 1000, pollMs);
-      if (entriesFrozen()) {
+      if (entriesFrozen(exec)) {
         if (due) {
           lastScan = Date.now();
           console.warn(`[farmer] entries frozen — ${probeFailures} consecutive RPC probe failures`);

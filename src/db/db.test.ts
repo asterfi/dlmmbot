@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { describeError, getDb, isBlacklisted, openDb, REALIZED_PNL_SQL, STRANDED_GRACE_S, TELEMETRY_GATES, WAL_SIZE_LIMIT_BYTES, logError, now, pruneHistory, recordConfigSnapshot, recordCreatorRug, recordDecision, upsertTokenMeta } from "./db.js";
+import { describeError, getDb, isBlacklisted, openDb, REALIZED_PNL_SQL, STRANDED_GRACE_S, TELEMETRY_GATES, WAL_SIZE_LIMIT_BYTES, logError, now, pruneHistory, recordConfigSnapshot, recordCreatorRug, recordDecision, upsertTokenMeta, beginTokenAcquisition, completeTokenAcquisition, failTokenAcquisition, finishTokenAcquisitionSwap, hasUnresolvedTokenAcquisition } from "./db.js";
 import Database from "better-sqlite3";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { useTempDb } from "../test/db.js";
@@ -493,5 +493,29 @@ describe("WAL size limit", () => {
     // pruneHistory deletes 5000 decisions at a time; the limit must not be
     // smaller than a batch or the WAL thrashes against its own ceiling.
     expect(WAL_SIZE_LIMIT_BYTES).toBeGreaterThan(5000 * 2048);
+  });
+});
+
+describe("token-side acquisition ledger", () => {
+  beforeEach(() => useMemoryDb());
+  afterEach(() => resetTestDb());
+
+  it("freezes live entries while an acquisition is pending or swapped", () => {
+    const id = beginTokenAcquisition("live", "pool", "mint");
+    expect(hasUnresolvedTokenAcquisition("live")).toBe(true);
+    finishTokenAcquisitionSwap(id, "swap-signature", 123n);
+    expect(hasUnresolvedTokenAcquisition("live")).toBe(true);
+    completeTokenAcquisition(id, 7);
+    expect(hasUnresolvedTokenAcquisition("live")).toBe(false);
+  });
+
+  it("does not freeze after a pre-broadcast failure, but quarantines an ambiguous swap", () => {
+    const failed = beginTokenAcquisition("live", "pool", "mint-a");
+    failTokenAcquisition(failed, { message: "quote failed" }, false);
+    expect(hasUnresolvedTokenAcquisition("live")).toBe(false);
+
+    const quarantined = beginTokenAcquisition("live", "pool", "mint-b");
+    failTokenAcquisition(quarantined, { swapSignature: "sig" }, true);
+    expect(hasUnresolvedTokenAcquisition("live")).toBe(true);
   });
 });

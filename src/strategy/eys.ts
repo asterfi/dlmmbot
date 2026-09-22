@@ -226,11 +226,7 @@ export function evaluateEys(
   if (!(evidence.flowUsdPerMin != null && evidence.flowUsdPerMin >= cfg.flow_floor_usd)) {
     return { accepted: false, reason: "flow_floor" };
   }
-  if (stage === "token") {
-    // The proposal is retained for observability, but the host refuses token-side
-    // mutation until a core-owned acquisition/accounting service is present.
-    return { accepted: true };
-  }
+  if (stage === "token") return { accepted: true };
   return { accepted: true };
 }
 
@@ -264,6 +260,38 @@ function buildSpotRange(input: StrategyPlanInput): StrategyPlan {
       positionAccounts: Math.ceil(binCount / 69),
       bottomPricePct: (binIdToPrice(minBinId, input.candidate.pool.binStep, input.candidate.pool.decimalsX) / input.entryPrice - 1) * 100,
       topPricePct: 0,
+      shape: "spot",
+      fibAnchor: null,
+      estBinRentSol: binArraysSpanned(minBinId, maxBinId) * 0.075,
+    },
+  };
+}
+
+function buildTokenRange(input: StrategyPlanInput): StrategyPlan {
+  const cfg = settings();
+  const entry = config().entry;
+  const minBinId = priceToBinId(input.entryPrice, input.candidate.pool.binStep, input.candidate.pool.decimalsX);
+  // Eys' token-side stage is a Spot deposit above the active bin. Reuse the
+  // configured Eys range width; do not invent a second breakout/persistence
+  // threshold or change the existing max-account cap.
+  const maxByPrice = priceToBinId(
+    input.entryPrice * (1 + cfg.anchor_range_below_pct / 100),
+    input.candidate.pool.binStep,
+    input.candidate.pool.decimalsX,
+  );
+  const maxBins = 69 * entry.max_position_accounts;
+  const maxBinId = Math.max(minBinId + 1, Math.min(maxByPrice, minBinId + maxBins - 1));
+  const binCount = maxBinId - minBinId + 1;
+  return {
+    fundingSide: "token",
+    shape: "spot",
+    range: {
+      minBinId,
+      maxBinId,
+      binCount,
+      positionAccounts: Math.ceil(binCount / 69),
+      bottomPricePct: 0,
+      topPricePct: (binIdToPrice(maxBinId, input.candidate.pool.binStep, input.candidate.pool.decimalsX) / input.entryPrice - 1) * 100,
       shape: "spot",
       fibAnchor: null,
       estBinRentSol: binArraysSpanned(minBinId, maxBinId) * 0.075,
@@ -393,8 +421,9 @@ export const eysPlugin: StrategyPlugin = {
   },
 
   plan(input): StrategyPlan | null {
-    if (input.proposal.fundingSide !== "sol") return null;
-    return buildSpotRange(input);
+    return input.proposal.fundingSide === "token"
+      ? buildTokenRange(input)
+      : buildSpotRange(input);
   },
 
   manage(_input: StrategyMarkInput): null {

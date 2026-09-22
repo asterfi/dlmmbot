@@ -6,6 +6,7 @@ import {
   shouldRebuildOpenOnSlippage,
   wealthDeltaLamports,
   OPEN_SLIPPAGE_REBUILDS,
+  requireOpenCostSol,
 } from "./live.js";
 import { classifyLeftover, RESIDUAL_SWEEP_MIN_SOL } from "./executor.js";
 import { UNDERFILL_INCIDENT_SHARE } from "./live.js";
@@ -73,6 +74,13 @@ describe("live open/mark guards", () => {
     expect(shouldRebuildOpenOnSlippage("ExceededBinSlippageTolerance", 0)).toBe(true);
     expect(shouldRebuildOpenOnSlippage("ExceededBinSlippageTolerance", OPEN_SLIPPAGE_REBUILDS)).toBe(false);
     expect(shouldRebuildOpenOnSlippage("InsufficientFunds", 0)).toBe(false);
+  });
+
+  it("requires a known positive wallet debit before recording an open", () => {
+    expect(requireOpenCostSol(-0.105)).toBeCloseTo(0.105, 9);
+    expect(() => requireOpenCostSol(null)).toThrow(/unknown/i);
+    expect(() => requireOpenCostSol(0)).toThrow(/positive/i);
+    expect(() => requireOpenCostSol(Number.NaN)).toThrow(/unknown/i);
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { priceToBinId, binIdToPrice, binArraysSpanned, planRange, planFollowRange, planTrancheRange, fitPlanToRentBudget, depthReachable } from "./planner.js";
+import { priceToBinId, binIdToPrice, binArraysSpanned, planRange, planFollowRange, planTrancheRange, fitPlanToRentBudget, fitTokenPlanToRentBudget, depthReachable } from "./planner.js";
 import { installConfig, restoreConfig } from "../test/config.js";
 
 describe("planner bin math", () => {
@@ -116,6 +116,31 @@ describe("planner bin math", () => {
     expect(two!.estBinRentSol).toBeLessThanOrEqual(0.15);
     expect(two!.maxBinId).toBe(maxBinId);
     expect(two!.bottomPricePct).toBeLessThanOrEqual(-39);
+  });
+
+  it("fitTokenPlanToRentBudget shrinks the upper edge without moving the active-bin base", () => {
+    const price = 1;
+    const binStep = 100;
+    const decimalsX = 9;
+    const minBinId = priceToBinId(price, binStep, decimalsX);
+    const fat = {
+      minBinId, maxBinId: minBinId + 200, binCount: 201, positionAccounts: 3,
+      bottomPricePct: 0, topPricePct: 400, shape: "spot" as const, fibAnchor: null, estBinRentSol: 0.225,
+    };
+    const fitted = fitTokenPlanToRentBudget(fat, 0.15, price, binStep, decimalsX);
+    expect(fitted).not.toBeNull();
+    expect(fitted!.minBinId).toBe(minBinId);
+    expect(fitted!.maxBinId).toBeLessThan(fat.maxBinId);
+    expect(fitted!.topPricePct).toBeLessThan(fat.topPricePct);
+    expect(fitted!.estBinRentSol).toBeLessThanOrEqual(0.15);
+  });
+
+  it("fitTokenPlanToRentBudget returns null when no upward range fits one array", () => {
+    const plan = {
+      minBinId: 69, maxBinId: 300, binCount: 232, positionAccounts: 4,
+      bottomPricePct: 0, topPricePct: 100, shape: "spot" as const, fibAnchor: null, estBinRentSol: 0.3,
+    };
+    expect(fitTokenPlanToRentBudget(plan, 0.075, 1, 100, 9)).toBeNull();
   });
 
   it("binArraysSpanned counts aligned 70-bin segments, not bin count / 70", () => {

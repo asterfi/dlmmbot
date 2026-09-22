@@ -188,7 +188,7 @@ describe("hosted Eys strategy boundary", () => {
     expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "market_cap_floor" });
   });
 
-  it("proposes a core-clamped Spot plan and refuses token-side mutation", () => {
+  it("proposes core-clamped SOL Spot and token-side Spot plans", () => {
     const pool = makePool();
     const candidate: Candidate = {
       pool,
@@ -225,13 +225,17 @@ describe("hosted Eys strategy boundary", () => {
     expect(plan?.shape).toBe("spot");
     expect(plan?.range.minBinId).toBeLessThan(plan!.range.maxBinId);
 
-    expect(eysPlugin.plan({
+    const tokenPlan = eysPlugin.plan({
       candidate,
       proposal: { ...base, stage: "token", fundingSide: "token" },
       entryPrice: pool.price,
       candles: [],
       requestedSizeSol: 0.1,
-    })).toBeNull();
+    });
+    expect(tokenPlan?.fundingSide).toBe("token");
+    expect(tokenPlan?.shape).toBe("spot");
+    expect(tokenPlan?.range.minBinId).toBeLessThan(tokenPlan!.range.maxBinId);
+    expect(tokenPlan?.range.bottomPricePct).toBe(0);
   });
 
   it("marks Eys proposals as strategy-admitted rather than core-score admitted", () => {
