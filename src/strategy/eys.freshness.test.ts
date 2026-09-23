@@ -102,6 +102,39 @@ it("uses the refresh budget for distinct exact candidates, not sibling pools", a
   expect(mocks.recordDecision).not.toHaveBeenCalled();
 });
 
+it("refreshes a row that is fresh at selection but expires during the refresh await", () => {
+  // TOCTOU: selection captures `nowMs`, then `await tokenInfoByMint(...)` spends
+  // ~20s, then evaluateEys re-checks with a NEW Date.now(). A row 50s old at
+  // selection was 70s old at evaluation — skipped as fresh, never refreshed,
+  // rejected eys_flow_stale. 66.9% of live flow_stale rows had full
+  // [1m,5m,1h] intervals and refreshRequested=false: healthy data thrown away
+  // purely because our own await aged it past the window.
+  const c = candidate("NearExpiry");
+  const gmgnByMint = new Map([[c.tokenMint, presence(c.tokenMint, Date.now() - 50_000)]]);
+  const mints = selectEysRefreshMints({
+    candidates: [c],
+    gmgnByMint,
+    observedAtByPool: new Map(),
+    floorUsd: 25_000,
+  });
+  expect(mints).toContain(c.tokenMint);
+});
+
+it("does not spend a slot on a row with comfortable freshness headroom", () => {
+  // Regression guard for the slack widening above: a row just fetched must stay
+  // out of the refresh budget, or the selection window collapses toward 0 and
+  // every cycle overflows the slot budget.
+  const c = candidate("Comfortable");
+  const gmgnByMint = new Map([[c.tokenMint, presence(c.tokenMint, Date.now() - 5_000)]]);
+  const mints = selectEysRefreshMints({
+    candidates: [c],
+    gmgnByMint,
+    observedAtByPool: new Map(),
+    floorUsd: 25_000,
+  });
+  expect(mints).not.toContain(c.tokenMint);
+});
+
 it.each([9_999, 10_000])("clamps a sub-floor config to the $10k noise floor with volume %s", async (volume) => {
   installConfig((c) => { c.strategy.mode = "eys"; c.eys.enabled = true; c.eys.flow_floor_usd = 1; });
   const c = candidate(`NoiseFloor-${volume}`);

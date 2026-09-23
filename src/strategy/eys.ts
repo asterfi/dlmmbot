@@ -333,6 +333,22 @@ function buildTokenRange(input: StrategyPlanInput): StrategyPlan {
  * redistributes existing budget rather than adding rate-limit risk. */
 export const EYS_REFRESH_MAX_MINTS = 40;
 
+/**
+ * Freshness headroom required at SELECTION time only.
+ *
+ * `selectEysRefreshMints` runs before `await tokenInfoByMint(...)`, and
+ * `evaluateEys` re-checks freshness with a fresh `Date.now()` AFTER that await
+ * — measured 2026-09-23: the await costs ~20s, so a row 50s old at selection
+ * was 70s old at evaluation. Line 374 skipped it as "already fresh", it was
+ * never refreshed, and it was rejected `eys_flow_stale`: 66.9% of those rows
+ * carried full [1m,5m,1h] intervals with refreshRequested=false.
+ *
+ * Only the selection window shrinks. Evaluation still enforces the full 60s
+ * against the real clock, so this cannot admit stale evidence — it only spends
+ * a refresh slot on rows that would otherwise expire mid-cycle.
+ */
+export const EYS_REFRESH_SLACK_MS = 25_000;
+
 /** Last known 1m volume at any age; 0 when the mint carries no 1m row. */
 function lastKnownOneMinuteVolume(presence?: GmgnPresence): number {
   const volumeUsd = Number(presence?.tokenByInterval.get("1m")?.volumeUsd);
@@ -371,7 +387,7 @@ export function selectEysRefreshMints(input: {
   const budget = input.budget ?? EYS_REFRESH_MAX_MINTS;
   const byMint = new Map<string, EysRefreshRow>();
   for (const candidate of input.candidates) {
-    if (gmgnOneMinuteFlow(input.gmgnByMint.get(candidate.tokenMint), nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS)) continue;
+    if (gmgnOneMinuteFlow(input.gmgnByMint.get(candidate.tokenMint), nowMs, GMGN_ONE_MINUTE_FRESHNESS_MS - EYS_REFRESH_SLACK_MS)) continue;
     const row: EysRefreshRow = {
       candidate,
       mint: candidate.tokenMint,
