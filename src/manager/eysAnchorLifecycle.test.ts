@@ -13,6 +13,17 @@ vi.mock("../scanner/gmgn.js", async (original) => ({
   tokenInfoByMint: vi.fn(async () => new Map()),
 }));
 vi.mock("../market.js", () => ({ sol24hChangePct: vi.fn(async () => 0), solUsdPrice: vi.fn(async () => 200) }));
+// Label harness: real laya module (mode/gate decision logic) but a canned
+// approval so the synthetic lifecycle records the same detail.state -> laya_labels
+// chain the live gate writes. Network stays forbidden (afterEach asserts it).
+vi.mock("../strategy/laya.js", async (original) => ({
+  ...(await original<typeof import("../strategy/laya.js")>()),
+  requestLaya: vi.fn(async () => ({
+    attempted: true,
+    latencyMs: 1,
+    result: { model: "test-model", approved: true, approvalProbability: 0.9, stage: null, confidence: null, reason: null },
+  })),
+}));
 vi.mock("../vetting/vet.js", () => {
   const vetToken = vi.fn(async (_mint: string, _poolCreatedAtMs: number | null) => ({ verdict: "pass", softScore: 80, hardFailures: [], soft: {} }));
   return {
@@ -100,7 +111,7 @@ describe("synthetic Eys anchor → shared paper lifecycle (existing behavior cha
       c.exec.mode = "paper";
       c.apis.jupiter_price = "fixture://sol-price";
       c.strategy.mode = "eys"; c.eys.enabled = true; c.eys.entry_sol = 0.1;
-      c.eys.flow_floor_usd = 100_000; c.laya.mode = "off";
+      c.eys.flow_floor_usd = 100_000; c.laya.mode = "gate";
       c.sizing.kelly_enabled = false; c.sizing.max_positions = 1;
       c.rotation.alpha_slots = 0; c.rotation.displacement_enabled = false;
       c.entry.tranche_enabled = false; c.follow.enabled = false; c.majors.enabled = false;
@@ -141,6 +152,20 @@ describe("synthetic Eys anchor → shared paper lifecycle (existing behavior cha
     expect(JSON.parse(entry.features_json)).toMatchObject({ strategy: { id: "eys", stage: "anchor", fundingSide: "sol",
       evidence: { exactPool: c.pool.address, flowUsdPerMin: 120_000, flowObservedAtMs: CLOCK.getTime(),
         flowSource: "gmgn-market-trending", flowCadence: "1m" } }, range: { shape: "spot" } });
+    // Label harness: the entry persisted the exact modelSnapshot + questions
+    // Laya received, with gold still pending until close.
+    const label0 = getDb().prepare("SELECT * FROM laya_labels WHERE position_id=?").get(position.id) as {
+      state_json: string; questions_json: string | null; noul: number | null;
+      gold_noul: number | null; realized_pnl_sol: number | null; closed_ts: number | null;
+    };
+    expect(label0).toBeDefined();
+    expect(label0.gold_noul).toBeNull();
+    expect(label0.closed_ts).toBeNull();
+    expect(label0.noul).toBeCloseTo(0.9, 12);
+    const snap = JSON.parse(label0.state_json) as Record<string, unknown>;
+    expect(snap.strategy).toBe("eys");
+    expect(snap.evidence).toMatchObject({ exactPool: c.pool.address });
+    expect(JSON.parse(label0.questions_json ?? "null")).toBeTruthy();
 
     await managePositions(exec); // real paper fee accrual + manager marks
     expect(count("SELECT COUNT(*) n FROM positions WHERE state='open'")).toBe(1);
@@ -171,6 +196,13 @@ describe("synthetic Eys anchor → shared paper lifecycle (existing behavior cha
     expect(row.pnl).toBeCloseTo(accrued - 0.0012, 12);
     expect(await exec.walletSol()).toBeCloseTo(10 + row.pnl, 12);
     expect(count("SELECT COUNT(*) n FROM decisions WHERE action='exited' AND failed_gate='P2_rotation_age'")).toBe(1);
+    const label = getDb().prepare("SELECT * FROM laya_labels WHERE position_id=?").get(position.id) as {
+      gold_noul: number; realized_pnl_sol: number; closed_ts: number;
+    };
+    expect(label).toBeDefined();
+    expect(label.closed_ts).toBeGreaterThan(0);
+    expect(label.realized_pnl_sol).toBeCloseTo(row.pnl, 12);
+    expect(label.gold_noul).toBe(row.pnl > 0 ? 1 : 0);
     expect(count("SELECT COUNT(*) n FROM acquisition_intents")).toBe(0);
     await managePositions(exec);
     expect(close).toHaveBeenCalledTimes(1); // terminal close is not repeated

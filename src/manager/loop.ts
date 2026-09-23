@@ -331,6 +331,16 @@ async function closeAndReport(
   const pnl = measuredPnl ?? markPnl;
   const pctBase = measuredPnl != null && row?.open_cost_sol ? row.open_cost_sol : pos.entrySol;
   const pct = pctBase > 0 ? (pnl / pctBase) * 100 : 0;
+  // Close the Laya label for this position if the entry opened under the
+  // gate: gold = net positive close (measured wallet PnL > 0). One UPDATE,
+  // no row for entries that never produced a label (off-mode, follow legs).
+  try {
+    getDb().prepare(
+      "UPDATE laya_labels SET closed_ts = ?, gold_noul = ?, realized_pnl_sol = ? WHERE position_id = ?",
+    ).run(now(), pnl > 0 ? 1 : 0, pnl, pos.id);
+  } catch (e) {
+    console.error(`[laya_labels] close label for pos#${pos.id} failed:`, (e as Error).message);
+  }
   const holdH = (now() - pos.entryTs) / 3600;
   const hold = holdH < 1 ? `${(holdH * 60).toFixed(0)}m` : `${holdH.toFixed(1)}h`;
   let trueLine = "";
@@ -2190,6 +2200,28 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       entryOfSwingHigh: ofSwingHigh,
       experiment: { feePath, isMicro, baseScore, trendingBonus, flowBonus, flowPenalty },
     });
+    // Laya domain label: persist the exact snapshot Laya judged for THIS
+    // open position. Fail-soft — a label write must never break entry
+    // bookkeeping that just succeeded. Gold lands at close.
+    const labelDetail = modelGateDetail;
+    const labelState = labelDetail?.["state"];
+    if (labelDetail !== undefined && labelState !== undefined) {
+      try {
+        getDb().prepare(
+          `INSERT OR REPLACE INTO laya_labels
+             (position_id, mint, pool, opened_ts, state_json, questions_json, noul, stage_pred)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          pos.id, cand.tokenMint, cand.pool.address, now(),
+          JSON.stringify(labelState),
+          JSON.stringify(labelDetail["questions"] ?? null),
+          typeof labelDetail["approvalProbability"] === "number" ? labelDetail["approvalProbability"] : null,
+          typeof labelDetail["stage"] === "string" ? labelDetail["stage"] : null,
+        );
+      } catch (e) {
+        console.error(`[laya_labels] entry label for pos#${pos.id} failed:`, (e as Error).message);
+      }
+    }
     // TELEMETRY ONLY: SIZING-MODE-DECISION.md Gate 3, one row per ENTRY, using
     // the pre-clamp pair captured before the re-entry ladder and pool-share cap
     // (both apply identically to either sizing rule). `posId` is what separates

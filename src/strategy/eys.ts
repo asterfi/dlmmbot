@@ -19,7 +19,7 @@ import type {
   StrategyPlugin,
   StrategyProposal,
 } from "./plugin.js";
-import { decideLayaGate, layaMode, requestLaya } from "./laya.js";
+import { buildLayaRequest, decideLayaGate, layaMode, requestLaya } from "./laya.js";
 
 export interface FlowObservation {
   poolAddress: string;
@@ -502,7 +502,8 @@ export const eysPlugin: StrategyPlugin = {
     const mode = layaMode();
     if (mode === "off") return { accepted: true, reason: "laya_disabled" };
 
-    const evaluation = await requestLaya(modelSnapshot(input));
+    const snapshot = modelSnapshot(input);
+    const evaluation = await requestLaya(snapshot);
     const gate = decideLayaGate(mode, evaluation.result, config().laya.min_approval_probability);
     const expectedStage = input.proposal.stage === "token" ? "breakout" : input.proposal.stage;
     const stageMismatch = evaluation.result.stage != null && evaluation.result.stage !== expectedStage;
@@ -519,6 +520,11 @@ export const eysPlugin: StrategyPlugin = {
       error: evaluation.error ?? null,
       expectedStage,
       stageMismatch,
+      // Domain-training label payload: the exact snapshot + questions Laya
+      // saw. Persisted by the manager only for entries that actually open;
+      // finalized with gold at close (laya_labels).
+      state: snapshot,
+      questions: buildLayaRequest(snapshot).questions,
     };
     if (!gate.accepted) return { accepted: false, reason: gate.reason, detail };
     if (mode === "gate" && stageMismatch) {

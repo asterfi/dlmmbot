@@ -142,6 +142,26 @@ CREATE TABLE IF NOT EXISTS acquisition_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_acquisition_intents_status ON acquisition_intents(status, updated_ts);
 
+-- Laya domain-training labels: one row per gate-approved ENTRY holding the
+-- exact modelSnapshot + questions the model saw, finalized with gold (1 =
+-- net positive close, 0 = net non-positive, measured wallet PnL) at close.
+-- This is the ~10-trade dataset that makes a domain-calibrated retrain
+-- possible; both shipped models failed 7/7 malicious variants without it.
+CREATE TABLE IF NOT EXISTS laya_labels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id INTEGER NOT NULL UNIQUE,
+  mint TEXT NOT NULL,
+  pool TEXT,
+  opened_ts INTEGER NOT NULL,
+  closed_ts INTEGER,
+  state_json TEXT NOT NULL,
+  questions_json TEXT,
+  noul REAL,
+  stage_pred TEXT,
+  gold_noul INTEGER,
+  realized_pnl_sol REAL
+);
+
 -- The tuning dataset: every enter/skip/exit with full feature vector.
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
