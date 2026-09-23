@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildLayaRequest,
   decideLayaGate,
+  layaTimeoutMs,
   parseLayaResponse,
   type LayaMode,
 } from "./laya.js";
@@ -83,5 +84,23 @@ describe("Laya decision boundary", () => {
     expect(request.state).toMatchObject({ strategy: "eys" });
     expect(request.questions).toHaveProperty("trade");
     expect(request.questions).toHaveProperty("stage");
+  });
+});
+
+describe("Laya timeout budget", () => {
+  it("honours configured latency up to the 6s real-payload ceiling", () => {
+    // Measured 2026-09-23: full modelSnapshot on the int8 sidecar answers in
+    // 4.7-5.1s; the old 2s hard cap aborted every real proposal fail-closed
+    // (3x strategy_laya_unavailable, sidecar never got to answer).
+    expect(layaTimeoutMs(6_000)).toBe(6_000);
+    expect(layaTimeoutMs(9_999)).toBe(6_000);
+    expect(layaTimeoutMs(3_000)).toBe(3_000);
+  });
+
+  it("keeps the safe default and floor", () => {
+    expect(layaTimeoutMs(undefined)).toBe(750);
+    expect(layaTimeoutMs(Number.NaN)).toBe(750);
+    expect(layaTimeoutMs(0)).toBe(50);
+    expect(layaTimeoutMs(-100)).toBe(50);
   });
 });

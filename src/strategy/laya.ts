@@ -133,6 +133,20 @@ export function buildLayaRequest(snapshot: LayaRequestSnapshot): Record<string, 
   };
 }
 
+/**
+ * Effective sidecar timeout for one decision.
+ *
+ * Ceiling raised 2s -> 6s (2026-09-23): the full modelSnapshot answers in
+ * 4.7-5.1s on the int8 ONNX sidecar, so the old 2s hard cap aborted every
+ * real proposal fail-closed (3x strategy_laya_unavailable) before the model
+ * could answer. Default stays 750ms; floor stays 50ms.
+ */
+export function layaTimeoutMs(configured: unknown): number {
+  return typeof configured === "number" && Number.isFinite(configured)
+    ? Math.min(6_000, Math.max(50, configured))
+    : 750;
+}
+
 function localSidecarBaseUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 256) return null;
   try {
@@ -155,10 +169,7 @@ export async function requestLaya(snapshot: LayaRequestSnapshot): Promise<LayaEv
 
   const started = Date.now();
   const controller = new AbortController();
-  const configuredTimeout = config().laya?.timeout_ms;
-  const timeoutMs = typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout)
-    ? Math.min(2_000, Math.max(50, configuredTimeout))
-    : 750;
+  const timeoutMs = layaTimeoutMs(config().laya?.timeout_ms);
   const baseUrl = localSidecarBaseUrl(config().laya?.base_url);
   if (!baseUrl) {
     return {
