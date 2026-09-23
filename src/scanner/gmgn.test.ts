@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  MAX_DIRECT_INFO_CALLS,
+  FLOW_CACHE_TTL_MS,
+  ENRICH_TTL_MS,
   parseTokenSecurity,
   parseGmgnResetMs,
   isGmgnRateLimitText,
@@ -16,6 +19,8 @@ import {
   gmgnSpendBudget,
   gmgnIntervalsForStrategy,
   gmgnMarketCapRangesForStrategy,
+  SPEND_WINDOW_MAX as SPEND_WINDOW_MAX_FOR_TEST,
+  GMGN_ONE_MINUTE_FRESHNESS_MS,
 } from "./gmgn.js";
 import type { GmgnPresence, GmgnTrendingToken } from "./gmgn.js";
 
@@ -109,6 +114,36 @@ describe("Eys GMGN market-cap intake", () => {
     expect(ranges).toContainEqual({ min: 2_000_000 });
     expect(gmgnMarketCapRangesForStrategy("5m", true)).toEqual([{}]);
     expect(gmgnMarketCapRangesForStrategy("1m", false)).toEqual([{}]);
+  });
+});
+
+describe("Eys direct-refresh spend + freshness headroom", () => {
+  // Operator "go" 2026-09-23: two-stage starvation measured live — refresh
+  // budget 30 < 35-40 candidates, and a 16-call fetch cap covered ~42% of
+  // candidates, so most landed flow_unavailable/stale and could never clear
+  // the $25k/min floor (0 candidates past fresh flow in a 47-min window).
+  // Ceiling SPEND_WINDOW_MAX 36/min is deliberately NOT raised: runOne waits
+  // or throws "gmgn budget exhausted" against it, so raising the cap only
+  // redistributes existing spend instead of adding rate-limit risk.
+  it("raises the direct-info fetch cap to 20 without touching the spend ceiling", () => {
+    expect(MAX_DIRECT_INFO_CALLS).toBe(20);
+    expect(SPEND_WINDOW_MAX_FOR_TEST).toBe(36);
+  });
+
+  // ENRICH_TTL_MS is shared by the security and tag caches: shortening THAT
+  // would double weight-1/weight-5 enrichment calls inside the same fixed
+  // ceiling and crowd out the very refresh fetches this change pays for.
+  // Only the flow cache gets a shorter TTL.
+  it("keeps security/tag enrichment TTL at 60s but shortens the flow cache", () => {
+    expect(ENRICH_TTL_MS).toBe(60_000);
+    expect(FLOW_CACHE_TTL_MS).toBe(30_000);
+  });
+
+  // The live bug: cache TTL equal to the freshness window hands back a row
+  // with ~0 seconds of headroom, so a "successful" refresh still fails the
+  // 60s freshness check at evaluation. Headroom must be strictly positive.
+  it("leaves positive headroom inside the 1m freshness window", () => {
+    expect(GMGN_ONE_MINUTE_FRESHNESS_MS - FLOW_CACHE_TTL_MS).toBeGreaterThanOrEqual(30_000);
   });
 });
 

@@ -97,7 +97,7 @@ const TOKEN_HEAVY_GAP_MS = 2_000;
 const DEFAULT_BAN_MS = 300_000;
 /** Rolling cap — optional/heavy routes shed first (two bots on one key need headroom). */
 const SPEND_WINDOW_MS = 60_000;
-const SPEND_WINDOW_MAX = 36;
+export const SPEND_WINDOW_MAX = 36;
 /** Start below full bucket so a cold boot cannot burst 20 weight-1 calls. */
 const BUCKET_START_TOKENS = 8;
 
@@ -708,10 +708,29 @@ export function parseTokenInfo(raw: string): GmgnTrendingToken | null {
 }
 
 const infoCache = new Map<string, { at: number; token: GmgnTrendingToken }>();
-/** Per-call cache-miss cap for tokenInfoByMint; widened 5 -> 8 with the refresh budget (2026-09-22). */
-const MAX_DIRECT_INFO_CALLS = 16;
+/**
+ * Per-call cache-miss cap for tokenInfoByMint. Widened 5 -> 8 (2026-09-22),
+ * 8 -> 16 with the refresh budget, then 16 -> 20 (2026-09-23, operator "go"):
+ * candidates run 35-40/cycle and a 16-call cap covered only ~42% of them, so
+ * most mints landed flow_unavailable/stale and could never clear the $25k/min
+ * floor. This redistributes spend SPEND_WINDOW_MAX already permits — it does
+ * not raise the rate ceiling, and runOne still paces against it.
+ */
+export const MAX_DIRECT_INFO_CALLS = 20;
 const MAX_INFO_CACHE_ENTRIES = 1000;
 let infoCursor = 0;
+
+/**
+ * TTL for the *flow* cache (infoCache) only. Must stay strictly BELOW
+ * GMGN_ONE_MINUTE_FRESHNESS_MS: while it matched (60s == 60s) the cache could
+ * hand back a row with ~0s of headroom left, so a "successful" refresh still
+ * failed the 60s freshness check at evaluation and was recorded flow_stale.
+ *
+ * Kept separate from ENRICH_TTL_MS, which also governs the security and tag
+ * caches — weight-1/weight-5 calls inside the same fixed spend ceiling.
+ * Shortening those too would crowd out the refresh fetches this change funds.
+ */
+export const FLOW_CACHE_TTL_MS = 30_000;
 
 function trimInfoCache(): void {
   while (infoCache.size > MAX_INFO_CACHE_ENTRIES) {
@@ -734,7 +753,8 @@ export interface GmgnSecurity {
 }
 
 const SECURITY_FIELDS = ["honeypot", "is_honeypot", "can_not_sell", "sell_tax", "buy_tax"];
-const ENRICH_TTL_MS = 60_000;
+/** Security + trader-tag enrichment TTL. Not the flow cache — see FLOW_CACHE_TTL_MS. */
+export const ENRICH_TTL_MS = 60_000;
 const secCache = new Map<string, { at: number; v: GmgnSecurity | null }>();
 const tagCache = new Map<string, { at: number; v: TraderTagStats | null }>();
 
@@ -862,7 +882,7 @@ export async function tokenInfoByMint(mints: readonly string[]): Promise<Map<str
   for (let offset = 0; offset < unique.length; offset++) {
     const mint = unique[(start + offset) % unique.length]!;
     const cached = infoCache.get(mint);
-    const cachedFresh = cached != null && Date.now() - cached.at < ENRICH_TTL_MS;
+    const cachedFresh = cached != null && Date.now() - cached.at < FLOW_CACHE_TTL_MS;
     let token = cachedFresh ? cached!.token : null;
     let fetchedAtMs = cachedFresh ? cached!.at : 0;
     if (!token) {
