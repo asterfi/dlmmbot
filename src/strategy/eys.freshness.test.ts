@@ -118,19 +118,20 @@ it("ranks a stale proven qualifier ahead of a higher-scored never-seen candidate
   expect(mints).toEqual(["StaleQualifier"]);
 });
 
-it("default refresh budget covers the coverage-starved funnel (12 mints)", () => {
-  // Widened 2026-09-22: budget 8 with a 5-call direct-info cap left most
-  // candidates permanently flow_unavailable; 12 keeps the tiered priority
-  // order while letting more never-seen mints get a real 1m reading.
-  expect(EYS_REFRESH_MAX_MINTS).toBe(12);
-  const candidates = Array.from({ length: 20 }, (_, i) => candidate(`Default${i}`, 90 - i));
+it("default refresh budget covers the coverage-starved funnel (30 mints)", () => {
+  // Widened 2026-09-23: budget 12 with an 8-call direct-info cap left ~105 of
+  // 117 candidates permanently flow_unavailable (86% of rejections). 30 slots
+  // keep the tiered priority order while letting far more never-seen mints get
+  // a real 1m reading; direct-info cache-miss cap raised 8 -> 16 alongside.
+  expect(EYS_REFRESH_MAX_MINTS).toBe(30);
+  const candidates = Array.from({ length: 40 }, (_, i) => candidate(`Default${i}`, 90 - i));
   const mints = selectEysRefreshMints({
     candidates,
     gmgnByMint: new Map(),
     observedAtByPool: new Map(),
     floorUsd: 25_000,
   });
-  expect(mints).toHaveLength(12);
+  expect(mints).toHaveLength(30);
 });
 
 it("never returns more mints than the budget allows", () => {

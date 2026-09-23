@@ -709,7 +709,7 @@ export function parseTokenInfo(raw: string): GmgnTrendingToken | null {
 
 const infoCache = new Map<string, { at: number; token: GmgnTrendingToken }>();
 /** Per-call cache-miss cap for tokenInfoByMint; widened 5 -> 8 with the refresh budget (2026-09-22). */
-const MAX_DIRECT_INFO_CALLS = 8;
+const MAX_DIRECT_INFO_CALLS = 16;
 const MAX_INFO_CACHE_ENTRIES = 1000;
 let infoCursor = 0;
 

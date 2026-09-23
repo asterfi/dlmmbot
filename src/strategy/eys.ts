@@ -324,8 +324,12 @@ function buildTokenRange(input: StrategyPlanInput): StrategyPlan {
  * the GMGN spend window once the 1m trending intake is down to four bands
  * (18 weight/min against a 36 weight/min window).
  */
-/** Widened 8 -> 12 (2026-09-22): coverage starved the funnel at 1,865 flow_unavailable/2h. */
-export const EYS_REFRESH_MAX_MINTS = 12;
+/** Widened 8 -> 12 (09-22) -> 30 (09-23): flow_unavailable was 86% of all
+ * rejections (564/658 in 30m); ~19% of scanned pools clear the 5% yield gate
+ * but never got a 1m reading under a 12-slot budget. Direct-info cache-miss
+ * cap (MAX_DIRECT_INFO_CALLS) raised 8 -> 16 alongside; ~19 GMGN weight-1
+ * calls/min stays inside the 36/min window. */
+export const EYS_REFRESH_MAX_MINTS = 30;
 
 /** Last known 1m volume at any age; 0 when the mint carries no 1m row. */
 function lastKnownOneMinuteVolume(presence?: GmgnPresence): number {
