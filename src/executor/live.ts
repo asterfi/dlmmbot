@@ -133,6 +133,64 @@ export function requireOpenCostSol(walletDeltaSol: number | null): number {
   return cost;
 }
 
+/**
+ * Book a reclaimed empty-token-account (ATA) rent into the ledger.
+ *
+ * The rent comes back ~24h AFTER the position closed, as its own transaction,
+ * so `close_return_sol` — which only sums the close's own signatures — never
+ * saw it. Writing just the events row left `recovered_sol` (the column
+ * REALIZED_PNL_SQL reads) at 0 and reported the book worse than chain truth:
+ * pos#1 JEANPHIL and pos#2 PAID each returned 0.001508818 SOL uncredited.
+ *
+ * Receipt and credit run in ONE transaction: a crash between them would leave
+ * the row credited but un-receipted — i.e. invisible to the very reconciler
+ * meant to find it, and re-runnable into a double credit. Idempotent on
+ * `txSig`, because the reclaim path can be retried against the same landed tx.
+ *
+ * Credit is deliberately withheld when no single position owns the batch (the
+ * walletDelta then spans several mints) or when the delta is unknown — an
+ * unattributable or unfetched amount must not be pinned on whichever position
+ * sorts last. The receipt still stands in both cases so nothing disappears.
+ *
+ * @returns true when this call wrote the receipt, false when it was already booked.
+ */
+export function bookRentReclaim(opts: {
+  positionId: number | null;
+  deltaSol: number | null;
+  txSig: string;
+  detail?: Record<string, unknown>;
+}): boolean {
+  const db = getDb();
+  const seen = db
+    .prepare("SELECT 1 AS x FROM events WHERE type = 'rent_reclaim' AND tx_sig = ?")
+    .get(opts.txSig);
+  if (seen) return false;
+
+  const delta = opts.deltaSol !== null && Number.isFinite(opts.deltaSol) ? opts.deltaSol! : 0;
+  const credit = opts.positionId !== null && delta !== 0 ? delta : 0;
+
+  // `credited` is the reconciler's marker — the same idea as repair-close's
+  // `repairedSigs`. Without it a backfill of a pre-fix receipt cannot tell a
+  // credited reclaim from an uncredited one, and would double-book.
+  const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
+  if (credit !== 0) detail.credited = credit;
+
+  db.transaction(() => {
+    db.prepare(
+      "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, detail_json) VALUES (?, ?, 'rent_reclaim', ?, ?, ?)"
+    ).run(opts.positionId, now(), opts.txSig, delta, JSON.stringify(detail));
+    // `stranded_sol` is untouched: the residual sweep owns that transition and
+    // zeroes it as it credits, so reclaim and sweep can never double-count.
+    if (credit !== 0) {
+      db.prepare("UPDATE positions SET recovered_sol = COALESCE(recovered_sol, 0) + ? WHERE id = ?").run(
+        credit,
+        opts.positionId,
+      );
+    }
+  })();
+  return true;
+}
+
 function lbPositionEmpty(p: LbPosition): boolean {
   return Number(p.positionData.totalXAmount) === 0 && Number(p.positionData.totalYAmount) === 0
     && Number(p.positionData.feeX.toString()) === 0 && Number(p.positionData.feeY.toString()) === 0;
@@ -1570,14 +1628,18 @@ export class LiveExecutor implements Executor {
               "SELECT id FROM positions WHERE token_mint = ? ORDER BY id DESC LIMIT 1"
             ).get(batch[0]!.mint) as { id: number } | undefined)?.id ?? null
           : null;
-        getDb().prepare(
-          "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, detail_json) VALUES (?, ?, 'rent_reclaim', ?, ?, ?)"
-        ).run(posId, now(), sig, delta ?? 0, JSON.stringify({
-          accounts: tokens.map((t) => t.account),
-          tokens,
-        }));
+        const booked = bookRentReclaim({
+          positionId: posId,
+          deltaSol: delta,
+          txSig: sig,
+          detail: { accounts: tokens.map((t) => t.account), tokens },
+        });
         const syms = [...new Set(tokens.map((t) => t.symbol))].join(",");
-        console.log(`[live] 🧹 reclaimed rent ${syms} (${batch.length} acct) — +${(delta ?? 0).toFixed(5)} SOL (tx ${sig})`);
+        console.log(
+          `[live] 🧹 reclaimed rent ${syms} (${batch.length} acct) — +${(delta ?? 0).toFixed(5)} SOL (tx ${sig})`
+          + (booked ? "" : " — already booked, credit not repeated")
+          + (booked && posId === null && delta ? " ⚠️ not credited: no single position owns this batch" : ""),
+        );
       } catch (e) {
         console.error("[live] rent reclaim failed:", (e as Error).message.split("\n")[0]);
       }

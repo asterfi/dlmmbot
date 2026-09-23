@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   txErrorDetail,
   landedTxError,
@@ -7,11 +7,14 @@ import {
   wealthDeltaLamports,
   OPEN_SLIPPAGE_REBUILDS,
   requireOpenCostSol,
+  bookRentReclaim,
 } from "./live.js";
 import { classifyLeftover, RESIDUAL_SWEEP_MIN_SOL } from "./executor.js";
 import { UNDERFILL_INCIDENT_SHARE } from "./live.js";
 import { PublicKey } from "@solana/web3.js";
 import { SOL_MINT } from "../config.js";
+import { useMemoryDb, insertClosedPosition, resetTestDb } from "../test/db.js";
+import { getDb, REALIZED_PNL_SQL } from "../db/db.js";
 
 describe("txErrorDetail", () => {
   it("extracts ExceededBinSlippageTolerance from 0x1774", () => {
@@ -178,5 +181,143 @@ describe("classifyLeftover — what a close left in the wallet", () => {
 
   it("returns no share when the mark is zero (empty close)", () => {
     expect(classifyLeftover(0.05, 0, true).share).toBeNull();
+  });
+});
+
+describe("bookRentReclaim — reclaimed rent must reach realized PnL", () => {
+  // pos#1 JEANPHIL and pos#2 PAID each had an ATA closed ~24h after the
+  // position closed, returning 0.001508818 SOL. The receipt (the events row)
+  // was written; the credit was not, so REALIZED_PNL_SQL — which reads
+  // recovered_sol — never saw the money. Everything downstream reported the
+  // book worse than chain truth. The receipt and the credit must be one
+  // atomic, replayable-safe act.
+  const RECLAIM = 0.001508818;
+  const SIG = "5ReclaimSigAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+  beforeEach(() => useMemoryDb());
+  afterEach(() => resetTestDb());
+
+  function recoveredOf(id: number): number {
+    const row = getDb().prepare("SELECT recovered_sol AS r FROM positions WHERE id = ?").get(id) as { r: number | null };
+    return row.r ?? 0;
+  }
+
+  function pnlFor(id: number): number | null {
+    const row = getDb().prepare(`SELECT (${REALIZED_PNL_SQL}) AS pnl FROM positions WHERE id = ?`).get(id) as { pnl: number | null };
+    return row.pnl;
+  }
+
+  function reclaimReceipts(): Array<{ position_id: number | null; sol_delta: number | null }> {
+    return getDb().prepare("SELECT position_id, sol_delta FROM events WHERE type = 'rent_reclaim' ORDER BY id").all() as Array<{
+      position_id: number | null;
+      sol_delta: number | null;
+    }>;
+  }
+
+  function reclaimDetail(): Array<{ credited?: number }> {
+    return (getDb().prepare("SELECT detail_json FROM events WHERE type = 'rent_reclaim' ORDER BY id").all() as Array<{
+      detail_json: string;
+    }>).map((r) => JSON.parse(r.detail_json) as { credited?: number });
+  }
+
+  /** A closed row measured on the real basis so REALIZED_PNL_SQL returns a number. */
+  function closedPos(): number {
+    return insertClosedPosition({
+      entrySol: 0.1,
+      exitSol: 0.100219,
+      openCostSol: 0.143427, // 0.1 deploy + 0.043427 rents/fees
+      closeReturnSol: 0.142212,
+      feesMeasuredSol: 0.000572,
+    });
+  }
+
+  it("credits the reclaim to recovered_sol AND writes the receipt, atomically", () => {
+    const id = closedPos();
+    const before = pnlFor(id)!;
+
+    const booked = bookRentReclaim({ positionId: id, deltaSol: RECLAIM, txSig: SIG });
+
+    expect(booked).toBe(true);
+    expect(recoveredOf(id)).toBeCloseTo(RECLAIM, 9);
+    expect(pnlFor(id)!).toBeCloseTo(before + RECLAIM, 9);
+    expect(reclaimReceipts()).toHaveLength(1);
+    expect(reclaimReceipts()[0]!.sol_delta).toBeCloseTo(RECLAIM, 9);
+    expect(reclaimReceipts()[0]!.position_id).toBe(id);
+    // The receipt must carry the marker, or a later backfill cannot tell this
+    // credited reclaim from a pre-fix one and would book it a second time.
+    expect(reclaimDetail()[0]!.credited).toBeCloseTo(RECLAIM, 9);
+  });
+
+  // The reclaim path can retry. Two inserts for one signature would book the
+  // rent twice — turning an accounting bug into an accounting forger.
+  it("is idempotent on txSig: a replayed reclaim credits exactly once", () => {
+    const id = closedPos();
+
+    expect(bookRentReclaim({ positionId: id, deltaSol: RECLAIM, txSig: SIG })).toBe(true);
+    expect(bookRentReclaim({ positionId: id, deltaSol: RECLAIM, txSig: SIG })).toBe(false);
+
+    expect(recoveredOf(id)).toBeCloseTo(RECLAIM, 9);
+    expect(reclaimReceipts()).toHaveLength(1);
+  });
+
+  // closeEmptyAccounts only resolves a position when the batch held one
+  // account. A multi-account batch's walletDelta spans several mints and must
+  // not be blamed on whichever position sorts last.
+  it("writes the receipt but credits nothing when no single position owns the batch", () => {
+    const id = closedPos();
+
+    expect(bookRentReclaim({ positionId: null, deltaSol: RECLAIM, txSig: SIG })).toBe(true);
+
+    expect(recoveredOf(id)).toBe(0);
+    expect(reclaimReceipts()).toHaveLength(1);
+    expect(reclaimReceipts()[0]!.position_id).toBeNull();
+    expect(reclaimDetail()[0]!.credited).toBeUndefined(); // nothing was credited, so say so
+  });
+
+  // walletDelta returns null when the tx cannot be fetched. An unknown amount
+  // must not be invented — the receipt stands, the credit does not.
+  it("writes the receipt but credits nothing when the delta is unknown", () => {
+    const id = closedPos();
+
+    expect(bookRentReclaim({ positionId: id, deltaSol: null, txSig: SIG })).toBe(true);
+
+    expect(recoveredOf(id)).toBe(0);
+    expect(reclaimReceipts()).toHaveLength(1);
+    expect(reclaimReceipts()[0]!.sol_delta).toBe(0);
+    expect(reclaimDetail()[0]!.credited).toBeUndefined();
+  });
+
+  // recovered_sol is also written by the residual sweep. The rent reclaim must
+  // ADD to it, never reset it, and must not touch stranded_sol (the sweep owns
+  // that transition).
+  it("accumulates onto an existing recovered credit and leaves stranded_sol alone", () => {
+    const id = insertClosedPosition({
+      entrySol: 0.75,
+      exitSol: 0.7144,
+      openCostSol: 0.8669,
+      closeReturnSol: 0.2955,
+      feesMeasuredSol: 0.0292,
+      recoveredSol: 0.5323, // what the residual sweep already booked
+      strandedSol: 0, // the sweep zeroed it as it credited
+    });
+
+    bookRentReclaim({ positionId: id, deltaSol: RECLAIM, txSig: SIG });
+
+    expect(recoveredOf(id)).toBeCloseTo(0.5323 + RECLAIM, 9);
+    const row = getDb().prepare("SELECT stranded_sol AS s FROM positions WHERE id = ?").get(id) as { s: number };
+    expect(row.s).toBe(0);
+  });
+
+  // Two ATAs closed for two different positions must not be collapsed.
+  it("credits each position independently", () => {
+    const a = closedPos();
+    const b = closedPos();
+
+    bookRentReclaim({ positionId: a, deltaSol: RECLAIM, txSig: SIG + "a" });
+    bookRentReclaim({ positionId: b, deltaSol: RECLAIM, txSig: SIG + "b" });
+
+    expect(recoveredOf(a)).toBeCloseTo(RECLAIM, 9);
+    expect(recoveredOf(b)).toBeCloseTo(RECLAIM, 9);
+    expect(reclaimReceipts()).toHaveLength(2);
   });
 });
