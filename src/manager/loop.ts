@@ -32,7 +32,8 @@ import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
 import type { Candidate, Position } from "../types.js";
 import { activeStrategyPlugin } from "../strategy/registry.js";
-import { vetToken, vetWithRetry } from "../vetting/vet.js";
+import { vetToken } from "../vetting/vet.js";
+import { resetVetCacheForTests, vetCached } from "../vetting/vetCache.js";
 
 // STRATEGY.md §4 — P0–P5 state machine. Live: P0 (TVL/price/rugcheck + GMGN
 // holder-watch), P1–P5, escape hatch, follow, micro/majors sleeves, residual
@@ -216,6 +217,7 @@ export function resetManagerStateForTests(): void {
   peakPnl.clear();
   giveBackLogged.clear();
   claimRetryAfter.clear();
+  resetVetCacheForTests();
 }
 
 // Watchdog / breaker state.
@@ -1723,7 +1725,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // candidate loop and kill entries for every LATER candidate that tick.
     let vet: Awaited<ReturnType<typeof vetToken>>;
     try {
-      vet = await vetWithRetry(cand.tokenMint, poolCreatedAtMs);
+      vet = await vetCached(cand.tokenMint, poolCreatedAtMs);
     } catch (e) {
       logError({
         source: "enter", code: "vet_error",
@@ -2125,6 +2127,30 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       if (!displaced) {
         recordDecision(cand.tokenMint, cand.pool.address, "skipped", "displacement_declined", score, { opened, normalCap });
         continue;
+      }
+    }
+
+    // FINAL freshness re-check. The stale-quote guard above runs before the
+    // bin-rent gate and Laya's model gate, which together add 1.7-6s — so a
+    // re-quote that passed there can be stale again by the time we send. This
+    // second check measures scan->open drift at the actual moment of entry and
+    // skips rather than chases (the CatGPT lesson: a range planned off a quote
+    // that has since run mis-places the range top and stops out).
+    if (driftLimit > 0 && cand.pool.price > 0 && cand.pool.binStep > 0) {
+      const preOpen = await fetchPool(cand.pool.address).catch(() => null);
+      if (preOpen && preOpen.price > 0) {
+        const preOpenDrift = Math.log(preOpen.price / cand.pool.price) / Math.log(1 + cand.pool.binStep / 10_000);
+        if (Math.abs(preOpenDrift) > driftLimit) {
+          recordDecision(cand.tokenMint, cand.pool.address, "skipped", "quote_stale", score, {
+            symbol: cand.symbol, quotedPrice: cand.pool.price, freshPrice: preOpen.price,
+            driftBins: preOpenDrift, driftLimit, binStep: cand.pool.binStep, stage: "pre_open",
+          });
+          console.log(
+            `[enter] ${cand.symbol}: quote moved ${preOpenDrift > 0 ? "+" : ""}${preOpenDrift.toFixed(1)} bins ` +
+            `during approval — skipping rather than chasing`
+          );
+          continue;
+        }
       }
     }
 

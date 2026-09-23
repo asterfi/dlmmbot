@@ -232,4 +232,25 @@ describe("synthetic Eys anchor → shared paper lifecycle (existing behavior cha
     expect(count("SELECT COUNT(*) n FROM positions WHERE state='open'")).toBe(1);
     expect(count("SELECT COUNT(*) n FROM acquisition_intents")).toBe(0);
   });
+it("dies at the PRE-OPEN re-quote if the pool ran during approval", async () => {
+    const c = candidate();
+    offer(c);
+    // guard1 returns the fresh scan price (drift 0, passes); the pre-open
+    // re-quote returns a price 5 bins beyond, over the 3-bin limit.
+    let calls = 0;
+    vi.mocked(fetchPool).mockImplementation(async () => {
+      calls++;
+      if (calls === 1) return c.pool as never;
+      return { ...c.pool, price: c.pool.price * Math.pow(1 + c.pool.binStep / 10_000, 5) } as never;
+    });
+    const open = vi.spyOn(exec, "open");
+    await enterNewPositions(exec);
+    expect(open).not.toHaveBeenCalled();
+    expect(calls).toBe(2); // guard1 then pre-open — died before open
+    expect(gates()).toContain("quote_stale");
+    const row = getDb().prepare(
+      "SELECT features_json FROM decisions WHERE action='skipped' AND failed_gate='quote_stale'",
+    ).get() as { features_json: string };
+    expect(JSON.parse(row.features_json)).toMatchObject({ stage: "pre_open", driftLimit: 3 });
+  });
 });

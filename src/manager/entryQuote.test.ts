@@ -126,8 +126,9 @@ describe("stale quote guard", () => {
     useMemoryDb();
     exec = new FakeExecutor("paper");
     installConfig((c) => { c.entry.max_quote_drift_bins = 0; }); // guard off entirely
+    vi.mocked(fetchPool).mockClear(); // count only this run
     await enterNewPositions(exec);
-    expect(vi.mocked(fetchPool)).toHaveBeenCalledTimes(1); // not re-quoted at all
+    expect(vi.mocked(fetchPool)).toHaveBeenCalledTimes(0); // not re-quoted at all
     expect(exec.opens[0]!.entryPrice).toBe(QUOTED);
   });
 
