@@ -82,6 +82,37 @@ export async function withRpcRetry<T>(fn: () => Promise<T>, opts: RpcRetryOption
  * signature, so the worst case is the same signed transaction reaching the
  * cluster twice, which is what any rebroadcast does anyway.
  */
+/**
+ * Helius free tier allows 10 RPC requests/second (getProgramAccounts 5/s).
+ * Measured 2026-09-21/22: vet's cluster scan fires 4 parallel
+ * getSignaturesForAddress + getParsedTransactions per holder batch on top of
+ * onchain facts and holder chunks — one vet bursts ~25-30 requests in 1-2s
+ * and trips 429s that cost real entries (ALLINU x2, PAID x2), plus scanner
+ * parsed-tx batches and the watchdog probe at 12:2x. GMGN already has a
+ * token bucket; this is the same treatment for Helius.
+ *
+ * Shared min-gap (module-level, all connections): 130ms => <=7.7 req/s,
+ * leaving headroom under the plan. Pure pacing, no retry: a 429 must not be
+ * amplified at this layer (the failover path owns what happens next).
+ */
+const RPC_MIN_GAP_MS = 130;
+let nextRpcSlotAt = 0;
+
+async function waitRpcSlot(gapMs: number): Promise<void> {
+  const now = Date.now();
+  const slot = Math.max(now, nextRpcSlotAt);
+  nextRpcSlotAt = slot + gapMs;
+  if (slot > now) await new Promise((r) => setTimeout(r, slot - now));
+}
+
+export async function pacedSend(
+  send: () => Promise<Response>,
+  opts: { gapMs?: number } = {},
+): Promise<Response> {
+  await waitRpcSlot(opts.gapMs ?? RPC_MIN_GAP_MS);
+  return send();
+}
+
 export function makeConnection(config: ConnectionConfig = { commitment: "confirmed" }): Connection {
   const { rpcUrl, rpcUrlFallback } = env();
   return new Connection(rpcUrl, {
@@ -92,7 +123,7 @@ export function makeConnection(config: ConnectionConfig = { commitment: "confirm
       // fallback an already-aborted signal after a primary timeout, so the
       // retry would fail instantly and the failover would be decorative.
       const send = (url: Parameters<typeof fetch>[0]) =>
-        fetch(url, { ...init, signal: AbortSignal.timeout(RPC_TIMEOUT_MS) });
+        pacedSend(() => fetch(url, { ...init, signal: AbortSignal.timeout(RPC_TIMEOUT_MS) }));
       if (!rpcUrlFallback) return send(input);
       try {
         const res = await send(input);

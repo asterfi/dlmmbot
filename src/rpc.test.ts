@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isTransientRpcError, makeConnection, withRpcRetry } from "./rpc.js";
+import { isTransientRpcError, makeConnection, pacedSend, withRpcRetry } from "./rpc.js";
 
 const PRIMARY = "http://primary.test";
 const BACKUP = "http://backup.test";
@@ -151,5 +151,35 @@ describe("withRpcRetry", () => {
 
     await expect(withRpcRetry(fn, { attempts: 3, delaysMs: [10_000] })).resolves.toBe(42);
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pacedSend (Helius free tier = 10 req/s)", () => {
+  const resp = (status: number) =>
+    ({ status, body: { cancel: () => Promise.resolve() } }) as unknown as Response;
+
+  it("spaces requests by the min gap so a burst cannot exceed the plan", async () => {
+    const send = vi.fn().mockResolvedValue(resp(200));
+    const t = Date.now();
+    for (let i = 0; i < 6; i++) await pacedSend(send, { gapMs: 15 });
+    const elapsed = Date.now() - t;
+    // first call is immediate; calls 2..6 wait >= 15ms each
+    expect(elapsed).toBeGreaterThanOrEqual(60);
+    expect(send).toHaveBeenCalledTimes(6);
+  });
+
+  it("never amplifies a 429 at this layer — one send, response passed through", async () => {
+    const send = vi.fn().mockResolvedValue(resp(429));
+    const res = await pacedSend(send, { gapMs: 1 });
+    expect(res.status).toBe(429);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not pace away a successful first attempt", async () => {
+    const send = vi.fn().mockResolvedValue(resp(200));
+    const t = Date.now();
+    await pacedSend(send, { gapMs: 5_000 });
+    expect(Date.now() - t).toBeLessThan(1_000);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });
