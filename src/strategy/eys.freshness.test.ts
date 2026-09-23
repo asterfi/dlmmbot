@@ -135,12 +135,12 @@ it("does not spend a slot on a row with comfortable freshness headroom", () => {
   expect(mints).not.toContain(c.tokenMint);
 });
 
-it.each([9_999, 10_000])("clamps a sub-floor config to the $10k noise floor with volume %s", async (volume) => {
+it.each([4_999, 5_000])("clamps a sub-floor config to the $5k noise floor with volume %s", async (volume) => {
   installConfig((c) => { c.strategy.mode = "eys"; c.eys.enabled = true; c.eys.flow_floor_usd = 1; });
   const c = candidate(`NoiseFloor-${volume}`);
   mocks.tokenInfoByMint.mockResolvedValue(new Map([[c.tokenMint, presence(c.tokenMint, Date.now(), volume)]]));
   const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map() });
-  expect(proposals).toHaveLength(volume >= 10_000 ? 1 : 0);
+  expect(proposals).toHaveLength(volume >= 5_000 ? 1 : 0);
 });
 
 it.each([24_999, 25_000])("honours the configured flow floor with refreshed volume %s", async (volume) => {

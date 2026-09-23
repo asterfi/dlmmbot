@@ -36,8 +36,15 @@ import { parse } from "smol-toml";
  * nobody can pass turns the whole strategy into a no-op, so the clamp only
  * guards against garbage/zero configuration now — the operating floor lives
  * in `[eys] flow_floor_usd` and is chosen from measured flow distribution.
+ *
+ * 2026-09-23: this clamp was 10_000 and silently overrode the operator's
+ * approved `flow_floor_usd = 5000` (max(10_000, 5_000) = 10_000), so the
+ * configured floor never took effect. Measured cost over 3 days: 11 mints
+ * that cleared both fee gates were rejected by the clamp — WALTER peaked at
+ * $9,485/min ($515 short) carrying $17,058 fees/24h and 157.7%/d yield.
+ * Lowered to 5_000 so it guards garbage again without overriding config.
  */
-export const EYS_MIN_FLOW_FLOOR_USD = 10_000;
+export const EYS_MIN_FLOW_FLOOR_USD = 5_000;
 export const EYS_MAX_POOL_RESOLUTION_MINTS = 25;
 
 /**

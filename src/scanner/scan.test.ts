@@ -153,14 +153,19 @@ describe("Eys-first discovery boundary", () => {
 });
 
 describe("Eys flow floor", () => {
-  it("clamps to the $10k noise floor and honours any higher configured floor", () => {
-    expect(EYS_MIN_FLOW_FLOOR_USD).toBe(10_000);
-    expect(effectiveEysFlowFloorUsd(1)).toBe(10_000);
-    expect(effectiveEysFlowFloorUsd(5_000)).toBe(10_000);
-    expect(effectiveEysFlowFloorUsd("5000")).toBe(10_000);
+  // 2026-09-23: the clamp sat at 10_000, which silently raised the operator's
+  // approved `[eys] flow_floor_usd = 5000` back to $10,000/min. Cost measured
+  // over 3 days: 11 fee-qualifying mints blocked (WALTER peaked at $9,485 —
+  // $515 short — on $17,058 fees + 157.7%/d yield). Clamp = noise floor only.
+  it("clamps to the $5k noise floor and honours any higher configured floor", () => {
+    expect(EYS_MIN_FLOW_FLOOR_USD).toBe(5_000);
+    expect(effectiveEysFlowFloorUsd(1)).toBe(5_000);
+    expect(effectiveEysFlowFloorUsd(4_999)).toBe(5_000);
+    expect(effectiveEysFlowFloorUsd(5_000)).toBe(5_000);
+    expect(effectiveEysFlowFloorUsd("5000")).toBe(5_000);
     expect(effectiveEysFlowFloorUsd("50000")).toBe(50_000);
-    expect(effectiveEysFlowFloorUsd(Number.NaN)).toBe(10_000);
-    expect(effectiveEysFlowFloorUsd(Number.POSITIVE_INFINITY)).toBe(10_000);
+    expect(effectiveEysFlowFloorUsd(Number.NaN)).toBe(5_000);
+    expect(effectiveEysFlowFloorUsd(Number.POSITIVE_INFINITY)).toBe(5_000);
     expect(effectiveEysFlowFloorUsd(25_000)).toBe(25_000);
     expect(effectiveEysFlowFloorUsd(150_000)).toBe(150_000);
   });
@@ -204,7 +209,7 @@ describe("Eys GMGN exact-pool resolution selection", () => {
     const gmgn = new Map([
       ["mint-high", presence("mint-high", 220_000, nowMs - 10_000)],
       ["mint-mid", presence("mint-mid", 150_000, nowMs - 20_000)],
-      ["mint-low", presence("mint-low", 9_999, nowMs - 10_000)],
+      ["mint-low", presence("mint-low", 4_999, nowMs - 10_000)],
       ["mint-stale", presence("mint-stale", 500_000, nowMs - 61_000)],
       ["mint-future", presence("mint-future", 500_000, nowMs + 1)],
       // Huge flow, but the Eys market-cap floor rejects it downstream anyway —
