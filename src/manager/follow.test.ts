@@ -4,15 +4,19 @@ vi.mock("../scanner/meteora.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../scanner/meteora.js")>();
   return { ...actual, fetchPool: vi.fn() };
 });
-vi.mock("../vetting/vet.js", () => ({
-  vetToken: vi.fn(async () => ({
+vi.mock("../vetting/vet.js", () => {
+  const vetToken = vi.fn(async (_mint: string, _poolCreatedAtMs: number | null) => ({
     mint: "mint",
     verdict: "pass",
     hardFailures: [],
     softScore: 80,
     facts: {},
-  })),
-}));
+  }));
+  return {
+    vetToken,
+    vetWithRetry: (mint: string, poolCreatedAtMs: number | null) => vetToken(mint, poolCreatedAtMs),
+  };
+});
 vi.mock("../market.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../market.js")>();
   return { ...actual, sol24hChangePct: vi.fn(async () => 0) };

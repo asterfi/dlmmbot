@@ -32,7 +32,7 @@ import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
 import type { Candidate, Position } from "../types.js";
 import { activeStrategyPlugin } from "../strategy/registry.js";
-import { vetToken } from "../vetting/vet.js";
+import { vetToken, vetWithRetry } from "../vetting/vet.js";
 
 // STRATEGY.md §4 — P0–P5 state machine. Live: P0 (TVL/price/rugcheck + GMGN
 // holder-watch), P1–P5, escape hatch, follow, micro/majors sleeves, residual
@@ -1713,7 +1713,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // candidate loop and kill entries for every LATER candidate that tick.
     let vet: Awaited<ReturnType<typeof vetToken>>;
     try {
-      vet = await vetToken(cand.tokenMint, poolCreatedAtMs);
+      vet = await vetWithRetry(cand.tokenMint, poolCreatedAtMs);
     } catch (e) {
       logError({
         source: "enter", code: "vet_error",

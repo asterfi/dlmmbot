@@ -13,9 +13,13 @@ vi.mock("../scanner/gmgn.js", async (original) => ({
   tokenInfoByMint: vi.fn(async () => new Map()),
 }));
 vi.mock("../market.js", () => ({ sol24hChangePct: vi.fn(async () => 0), solUsdPrice: vi.fn(async () => 200) }));
-vi.mock("../vetting/vet.js", () => ({
-  vetToken: vi.fn(async () => ({ verdict: "pass", softScore: 80, hardFailures: [], soft: {} })),
-}));
+vi.mock("../vetting/vet.js", () => {
+  const vetToken = vi.fn(async (_mint: string, _poolCreatedAtMs: number | null) => ({ verdict: "pass", softScore: 80, hardFailures: [], soft: {} }));
+  return {
+    vetToken,
+    vetWithRetry: (mint: string, poolCreatedAtMs: number | null) => vetToken(mint, poolCreatedAtMs),
+  };
+});
 vi.mock("../vetting/rugcheck.js", () => ({ fetchSummary: vi.fn(async () => null) }));
 vi.mock("../alerts.js", () => ({ alert: vi.fn(async () => {}) }));
 vi.mock("../executor/live.js", () => ({

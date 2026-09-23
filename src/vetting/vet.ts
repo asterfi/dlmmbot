@@ -8,6 +8,7 @@ import { tokenSecurity, tokenTraderTags } from "../scanner/gmgn.js";
 import { concentrationFromShares, holdersExcludingAmms } from "./holders.js";
 import { detectInsiderClusterPct } from "./clusters.js";
 import type { HolderShare } from "./knownAccounts.js";
+import { withRpcRetry, type RpcRetryOptions } from "../rpc.js";
 
 // STRATEGY.md §2.2 — token hard gates. Fresh RPC facts are authoritative;
 // RugCheck is a veto layer (cached, but sees insider networks & creator
@@ -48,6 +49,23 @@ export function resolveTokenCreatedAtMs(
     return poolCreatedAtMs;
   }
   return null;
+}
+
+/**
+ * Enter-path vet with bounded transient retry.
+ *
+ * Live evidence 2026-09-22/23 (`enter . vet_error`, PAID x2 + ALLINU): a
+ * transient Helius 429 inside the pipeline escaped as a throw and cost the
+ * whole entry. vetToken is read-only, so rate-limit/connect blips retry
+ * through the same withRpcRetry the wallet path uses — domain errors and the
+ * final attempt still fail closed to the caller.
+ */
+export function vetWithRetry(
+  mint: string,
+  poolCreatedAtMs: number | null,
+  opts: RpcRetryOptions = {},
+): Promise<VetResult> {
+  return withRpcRetry(() => vetToken(mint, poolCreatedAtMs), opts);
 }
 
 export async function vetToken(mint: string, poolCreatedAtMs: number | null): Promise<VetResult> {
