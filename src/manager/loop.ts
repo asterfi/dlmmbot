@@ -2513,6 +2513,37 @@ export async function runLoop(): Promise<void> {
           logError({ source: "follow", code: "tick", message: (e as Error).message, err: e, dedupeSec: 60 });
         }
       }
+      // Residual sweep runs BEFORE the entry scan. It is gated on tick age
+      // (`tickStart < poll_s`, 20s), but the scan reliably spends ~70s of that
+      // window, so sitting after the scan made the guard unreachable: the live
+      // log recorded 204 deferrals and 0 sweeps, leaving stranded residue and
+      // the 0.00204 SOL empty-ATA rent unreclaimed. Own try/catch: a cleanup
+      // failure must not skip the entry scan below.
+      if (exec.sweepResiduals && Date.now() - lastSweep > RESIDUAL_SWEEP_INTERVAL_MS) {
+        if (Date.now() - tickStart < pollMs) {
+          lastSweep = Date.now();
+          try {
+            for (const r of await exec.sweepResiduals(RESIDUAL_SWEEP_MIN_SOL)) {
+              const tag = r.positionId ? ` pos#${r.positionId}` : "";
+              let restated = "";
+              if (r.positionId) {
+                const p = getDb().prepare(
+                  "SELECT open_cost_sol o, close_return_sol c, fees_measured_sol f, recovered_sol v, withdrawn_sol w FROM positions WHERE id = ?"
+                ).get(r.positionId) as { o: number | null; c: number | null; f: number; v: number; w: number } | undefined;
+                if (p?.o != null && p.c != null) {
+                  restated = `\n${r.symbol} pos#${r.positionId} true PnL now ${(p.c + p.f + p.v + p.w - p.o >= 0 ? "+" : "")}${(p.c + p.f + p.v + p.w - p.o).toFixed(4)} SOL`;
+                }
+              }
+              await alert("claim", `🧹 [sweep] sold stranded ${r.symbol}${tag} residue for ${r.soldSol.toFixed(4)} SOL${restated}`);
+            }
+          } catch (e) {
+            logError({ source: "farmer", code: "sweep", message: `residual sweep failed: ${(e as Error).message}`, err: e, dedupeSec: 300 });
+          }
+        } else {
+          console.warn(`[farmer] deferring residual sweep — tick already ${Date.now() - tickStart}ms`);
+        }
+      }
+
       const due = scanDue(Date.now() - lastScan, config().scanner.interval_s * 1000, pollMs);
       if (entriesFrozen(exec)) {
         if (due) {
@@ -2527,26 +2558,6 @@ export async function runLoop(): Promise<void> {
           await enterNewPositions(exec);
         } else {
           console.warn(`[farmer] deferring entry scan — tick already ${Date.now() - tickStart}ms (poll ${pollMs}ms)`);
-        }
-      }
-      if (exec.sweepResiduals && Date.now() - lastSweep > RESIDUAL_SWEEP_INTERVAL_MS) {
-        if (Date.now() - tickStart < pollMs) {
-          lastSweep = Date.now();
-          for (const r of await exec.sweepResiduals(RESIDUAL_SWEEP_MIN_SOL)) {
-            const tag = r.positionId ? ` pos#${r.positionId}` : "";
-            let restated = "";
-            if (r.positionId) {
-              const p = getDb().prepare(
-                "SELECT open_cost_sol o, close_return_sol c, fees_measured_sol f, recovered_sol v, withdrawn_sol w FROM positions WHERE id = ?"
-              ).get(r.positionId) as { o: number | null; c: number | null; f: number; v: number; w: number } | undefined;
-              if (p?.o != null && p.c != null) {
-                restated = `\n${r.symbol} pos#${r.positionId} true PnL now ${(p.c + p.f + p.v + p.w - p.o >= 0 ? "+" : "")}${(p.c + p.f + p.v + p.w - p.o).toFixed(4)} SOL`;
-              }
-            }
-            await alert("claim", `🧹 [sweep] sold stranded ${r.symbol}${tag} residue for ${r.soldSol.toFixed(4)} SOL${restated}`);
-          }
-        } else {
-          console.warn(`[farmer] deferring residual sweep — tick already ${Date.now() - tickStart}ms`);
         }
       }
       if (Date.now() - lastRetention > RETENTION_INTERVAL_MS) {
