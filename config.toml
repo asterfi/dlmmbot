@@ -178,8 +178,23 @@ max_position_accounts = 2
 # top 13 bins above the other bot's on the same pool. Every upside exit is
 # measured from the range top, so P3 sustain and the escape-hatch recovery band
 # both went out of reach on a price path that paid the other bot twice.
+#
+# GUARD 1 is allowed to be loose because it RE-PLANS the range off the fresh
+# quote it just fetched (loop.ts entryPrice = fresh.price) — admitting a moved
+# quote costs no misplacement, only however stale we accept the SCORE to be.
+# 2026-09-23: 3 -> 10. Measured over all 24 quote_stale rejects: median drift
+# 10 bins, 12 of 24 (6 distinct mints, scores 66.7-84.4) inside 10, ZERO inside
+# 3 — at 3 this gate rejected every single entry for a full day.
+# The pre-open check below is the one that protects the planted range.
 # 0 disables the guard (old behaviour: plan off the scan quote, however old).
-max_quote_drift_bins = 3
+max_quote_drift_bins = 10
+# PRE-OPEN re-check, run AFTER the range is planted at entryPrice (Laya + rent
+# gates add 1.7-6s). Measured from the PLANNED price, not the scan price.
+# Deliberately much tighter than guard 1: nothing can be re-planned here, so
+# every bin this lets through lands on the real range top. 3 bins matches the
+# original CatGPT protection and is what kept 2x misplacement out.
+# 0 turns the whole quote guard off.
+max_pre_open_drift_bins = 3
 # Bin-array rent (~0.075 SOL each) is non-refundable when arrays are new.
 # Soft budget = one array (shrink target). Hard = two arrays only if score ≥ min.
 # Entry also quotes on-chain uninitialized arrays; if actual ≤ tier budget, allow.

@@ -47,6 +47,12 @@ import type { Candidate } from "../types.js";
 const QUOTED = 3.6176e-6;
 const DRIFTED = 3.7645e-6;   // +4.0 bins
 const NUDGED = 3.6538e-6;    // +1.0 bin
+// +11.0 bins: past the shipped tolerance, so "skips rather than chasing"
+// keeps firing once the limit is widened beyond the original 3.
+const RAN = 4.0361e-6;
+
+/** A quote `bins` away from QUOTED, on the same 100-bp step. */
+const atBins = (bins: number) => QUOTED * Math.pow(1.01, bins);
 
 function candidate(price = QUOTED): Candidate {
   const pool = makePool({ address: "CatPool11111111111111111111111111111111", binStep: 100, price });
@@ -80,7 +86,7 @@ describe("stale quote guard", () => {
   });
 
   it("skips rather than chasing when the pool has run since the scan", async () => {
-    vi.mocked(fetchPool).mockResolvedValue({ ...candidate(DRIFTED).pool, extras: {} } as never);
+    vi.mocked(fetchPool).mockResolvedValue({ ...candidate(RAN).pool, extras: {} } as never);
 
     await enterNewPositions(exec);
 
@@ -88,9 +94,53 @@ describe("stale quote guard", () => {
     const stale = skips().filter((s) => s.failed_gate === "quote_stale");
     expect(stale).toHaveLength(1);
     const f = JSON.parse(stale[0]!.features_json);
-    expect(f.driftBins).toBeCloseTo(4.0, 1);
+    expect(f.driftBins).toBeCloseTo(11.0, 1);
     expect(f.quotedPrice).toBe(QUOTED);
-    expect(f.freshPrice).toBe(DRIFTED);
+    expect(f.freshPrice).toBe(RAN);
+  });
+
+  /**
+   * The pre-open re-quote must be measured from the price the range was
+   * actually PLANNED at (entryPrice), not from the scan price.
+   *
+   * Without that, the two checks bookend each other and the total
+   * misplacement they allow is 2x the limit: guard 1 accepts a quote 9 bins
+   * below the scan and plans the range there, the pre-open check then
+   * accepts a quote 10 bins above the scan — inside the limit — while the
+   * position is actually being opened 19 bins away from where the range was
+   * planted. That is the CatGPT failure mode the guard exists to prevent.
+   */
+  it("measures pre-open drift from the PLANNED price, not the scan price", async () => {
+    const c = candidate();
+    vi.mocked(scan).mockResolvedValue({ candidates: [c], rejected: [], sweptPools: 1 });
+    // Pinned independently of the shipped tolerance so this test isolates the
+    // BASELINE bug: what matters is which price each check is measured from.
+    installConfig((ic) => {
+      ic.entry.max_quote_drift_bins = 10;
+      ic.entry.max_pre_open_drift_bins = 10;
+    });
+
+    let calls = 0;
+    vi.mocked(fetchPool).mockImplementation(async () => {
+      calls++;
+      // guard 1: 9 bins BELOW the scan — inside the 10-bin limit, so the
+      // range gets planned at entryPrice = atBins(-9).
+      if (calls === 1) return { ...c.pool, price: atBins(-9), extras: {} } as never;
+      // pre-open: 10 bins ABOVE the scan, i.e. 19 bins from entryPrice.
+      return { ...c.pool, price: atBins(10), extras: {} } as never;
+    });
+    const open = vi.spyOn(exec, "open");
+
+    await enterNewPositions(exec);
+
+    const stale = skips().filter((s) => s.failed_gate === "quote_stale");
+    expect(calls).toBe(2);
+    expect(open).not.toHaveBeenCalled();
+    expect(stale).toHaveLength(1);
+    const f = JSON.parse(stale[0]!.features_json);
+    expect(f.stage).toBe("pre_open");
+    // 19 bins from the planned price, not 10 from the scan price.
+    expect(Math.abs(f.driftBins)).toBeCloseTo(19.0, 0);
   });
 
   it("plans off the fresh quote, not the scan's, when the drift is tolerable", async () => {
@@ -101,6 +151,70 @@ describe("stale quote guard", () => {
     expect(skips().map((s) => s.failed_gate)).not.toContain("quote_stale");
     expect(exec.opens).toHaveLength(1);
     expect(exec.opens[0]!.entryPrice).toBe(NUDGED); // the fresh price, not QUOTED
+  });
+
+  /**
+   * The two checks are deliberately NOT the same tolerance.
+   *
+   * guard 1 can afford to be loose (10 bins = the observed median drift over
+   * the ~60s scan pipeline) because it RE-PLANS the range off the fresh quote.
+   * The pre-open check cannot: the range is already planted at entryPrice, so
+   * anything it lets through is pure misplacement. That one stays at 3.
+   */
+  it("widens guard 1 for re-planning but keeps pre-open tight", async () => {
+    const c = candidate();
+    vi.mocked(scan).mockResolvedValue({ candidates: [c], rejected: [], sweptPools: 1 });
+    installConfig((ic) => {
+      ic.entry.max_quote_drift_bins = 10;   // loose: will be re-planned anyway
+      ic.entry.max_pre_open_drift_bins = 3; // tight: range already planted
+    });
+
+    let calls = 0;
+    vi.mocked(fetchPool).mockImplementation(async () => {
+      calls++;
+      // guard 1: 9 bins up — inside the loose limit, so planning proceeds at
+      // entryPrice = atBins(9).
+      if (calls === 1) return { ...c.pool, price: atBins(9), extras: {} } as never;
+      // pre-open: 4 bins beyond the PLANTED price — over the 3-bin limit.
+      return { ...c.pool, price: atBins(13), extras: {} } as never;
+    });
+    const open = vi.spyOn(exec, "open");
+
+    await enterNewPositions(exec);
+
+    expect(open).not.toHaveBeenCalled();
+    const stale = skips().filter((s) => s.failed_gate === "quote_stale");
+    expect(stale).toHaveLength(1);
+    const f = JSON.parse(stale[0]!.features_json);
+    expect(f.stage).toBe("pre_open");
+    expect(f.driftLimit).toBe(3);          // pre-open's own limit, not guard 1's
+    expect(Math.abs(f.driftBins)).toBeCloseTo(4.0, 1);
+  });
+
+  it("opens when pre-open drift stays inside its own (tighter) limit", async () => {
+    const c = candidate();
+    vi.mocked(scan).mockResolvedValue({ candidates: [c], rejected: [], sweptPools: 1 });
+    installConfig((ic) => {
+      ic.entry.max_quote_drift_bins = 10;
+      ic.entry.max_pre_open_drift_bins = 3;
+    });
+
+    let calls = 0;
+    vi.mocked(fetchPool).mockImplementation(async () => {
+      calls++;
+      if (calls === 1) return { ...c.pool, price: atBins(9), extras: {} } as never;
+      // 2 bins past the planted price: inside 3, so the open goes out.
+      return { ...c.pool, price: atBins(11), extras: {} } as never;
+    });
+    const open = vi.spyOn(exec, "open");
+
+    await enterNewPositions(exec);
+
+    expect(calls).toBe(2);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(skips().map((s) => s.failed_gate)).not.toContain("quote_stale");
+    // Range was planted at guard 1's fresh quote, not the scan quote.
+    expect(open.mock.calls[0]![0].entryPrice).toBeCloseTo(QUOTED * Math.pow(1.01, 9), 18);
   });
 
   it("falls through on the scan quote when the re-quote fails", async () => {

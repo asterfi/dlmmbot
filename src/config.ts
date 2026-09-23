@@ -195,6 +195,15 @@ export interface Config {
      * Optional: defaults in code for installs whose config predates the key.
      */
     max_quote_drift_bins?: number;
+    /**
+     * Tolerance for the PRE-OPEN re-quote, in bins, measured from the price the
+     * range was actually planted at (entryPrice). Guard 1 above re-plans off
+     * the fresh quote so it can be loose; this check runs AFTER planning, so
+     * every bin it admits is real range misplacement (CatGPT 2026-08-21).
+     * 0 — or 0 on guard 1 — keeps the whole guard off.
+     * Optional: defaults in code for installs whose config predates the key.
+     */
+    max_pre_open_drift_bins?: number;
   };
   manage: {
     poll_s: number;

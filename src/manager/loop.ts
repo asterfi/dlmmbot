@@ -766,6 +766,15 @@ export const DEFAULT_MARK_CONCURRENCY = 4;
 export const DEFAULT_MAX_QUOTE_DRIFT_BINS = 3;
 
 /**
+ * Default PRE-OPEN tolerance, in bins — deliberately the tight one. Guard 1
+ * re-plans the range off the fresh quote, so it can absorb ordinary drift over
+ * the ~60s scan pipeline; this second check runs after the range has been
+ * planted at entryPrice, where nothing can be re-planned away and every bin
+ * admitted lands directly on the range top.
+ */
+export const DEFAULT_MAX_PRE_OPEN_DRIFT_BINS = 3;
+
+/**
  * TELEMETRY ONLY — nothing acts on this. How close to the planner's swing high
  * an entry has to be before it is flagged as a top-blast.
  *
@@ -2133,17 +2142,33 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // FINAL freshness re-check. The stale-quote guard above runs before the
     // bin-rent gate and Laya's model gate, which together add 1.7-6s — so a
     // re-quote that passed there can be stale again by the time we send. This
-    // second check measures scan->open drift at the actual moment of entry and
-    // skips rather than chases (the CatGPT lesson: a range planned off a quote
-    // that has since run mis-places the range top and stops out).
-    if (driftLimit > 0 && cand.pool.price > 0 && cand.pool.binStep > 0) {
+    // second check measures planted-price -> open drift at the actual moment of
+    // entry and skips rather than chases (the CatGPT lesson: a range planned off
+    // a quote that has since run mis-places the range top and stops out).
+    // It runs at its OWN tolerance: guard 1 above re-plans off the fresh quote
+    // so it can be loose, while here the range is already planted at entryPrice
+    // and every bin admitted is pure misplacement. 0 on either key keeps the
+    // whole guard off — the "0 disables" contract and the datapi-hiccup
+    // fallback (fall through to the scan quote rather than lose every entry)
+    // both depend on that.
+    const preOpenLimit = driftLimit > 0
+      ? (config().entry.max_pre_open_drift_bins ?? DEFAULT_MAX_PRE_OPEN_DRIFT_BINS)
+      : 0;
+    if (preOpenLimit > 0 && cand.pool.price > 0 && cand.pool.binStep > 0) {
       const preOpen = await fetchPool(cand.pool.address).catch(() => null);
       if (preOpen && preOpen.price > 0) {
-        const preOpenDrift = Math.log(preOpen.price / cand.pool.price) / Math.log(1 + cand.pool.binStep / 10_000);
-        if (Math.abs(preOpenDrift) > driftLimit) {
+        // Measured from entryPrice — the price the range was actually PLANNED
+        // at after guard 1 — not from cand.pool.price (the scan quote).
+        // Baseline matters: against the scan price, guard 1 could accept a
+        // quote 9 bins low and the pre-open check accept one 10 bins high,
+        // each inside the limit, while the position opens 19 bins from where
+        // the range was planted. That is 2x the tolerance and is exactly the
+        // CatGPT misplacement this guard exists to prevent.
+        const preOpenDrift = Math.log(preOpen.price / entryPrice) / Math.log(1 + cand.pool.binStep / 10_000);
+        if (Math.abs(preOpenDrift) > preOpenLimit) {
           recordDecision(cand.tokenMint, cand.pool.address, "skipped", "quote_stale", score, {
-            symbol: cand.symbol, quotedPrice: cand.pool.price, freshPrice: preOpen.price,
-            driftBins: preOpenDrift, driftLimit, binStep: cand.pool.binStep, stage: "pre_open",
+            symbol: cand.symbol, quotedPrice: entryPrice, freshPrice: preOpen.price,
+            driftBins: preOpenDrift, driftLimit: preOpenLimit, binStep: cand.pool.binStep, stage: "pre_open",
           });
           console.log(
             `[enter] ${cand.symbol}: quote moved ${preOpenDrift > 0 ? "+" : ""}${preOpenDrift.toFixed(1)} bins ` +
