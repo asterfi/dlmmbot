@@ -495,20 +495,24 @@ export interface GmgnMarketCapRange {
 
 const EYS_1M_MARKET_CAP_RANGES: readonly GmgnMarketCapRange[] = [
   {},
-  { min: 100_000, max: 500_000 },
-  { min: 500_000, max: 2_000_000 },
+  { min: 100_000, max: 250_000 },
+  { min: 250_000, max: 500_000 },
+  { min: 500_000, max: 1_000_000 },
+  { min: 1_000_000, max: 2_000_000 },
   { min: 2_000_000 },
 ];
 
 /**
  * Eys widens only the genuine 1m intake; core keeps its single request/window.
  *
- * Four bands, not eight: measured 2026-09-22, eight bands x weight 3 = 30
- * GMGN calls/min, which crowded out the per-candidate refresh — the only path
- * to a genuinely fresh 1m row at evaluation time. Four bands + 5m + 1h = 6
- * calls = 18/min, leaving spend-window room for the refresh budget. The
- * unfiltered `{}` band still ranks the whole board by 1m volume, and the
- * banded calls recover tokens the unfiltered top-100 crowds out.
+ * Six bands (widened 2026-09-22 from four): the narrowed intake starved the
+ * funnel — 1,865 `flow_unavailable` rejects in 2h because banded trending is
+ * the only discovery path for tokens outside the unfiltered top-100. The hot
+ * 100k-500k zone is finely split; spend stays bounded at 6 bands + 5m + 1h =
+ * 8 weight-1 calls/min against SPEND_WINDOW_MAX 36, leaving room for the
+ * per-candidate refresh — the only path to a genuinely fresh 1m row at
+ * evaluation time. The unfiltered `{}` band still ranks the whole board by
+ * 1m volume; banded calls recover tokens the unfiltered top-100 crowds out.
  */
 export function gmgnMarketCapRangesForStrategy(interval: string, eysActive: boolean): GmgnMarketCapRange[] {
   return eysActive && interval === "1m"
@@ -704,7 +708,8 @@ export function parseTokenInfo(raw: string): GmgnTrendingToken | null {
 }
 
 const infoCache = new Map<string, { at: number; token: GmgnTrendingToken }>();
-const MAX_DIRECT_INFO_CALLS = 5;
+/** Per-call cache-miss cap for tokenInfoByMint; widened 5 -> 8 with the refresh budget (2026-09-22). */
+const MAX_DIRECT_INFO_CALLS = 8;
 const MAX_INFO_CACHE_ENTRIES = 1000;
 let infoCursor = 0;
 

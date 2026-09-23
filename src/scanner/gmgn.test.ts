@@ -95,12 +95,17 @@ describe("Eys GMGN interval requirement", () => {
 describe("Eys GMGN market-cap intake", () => {
   it("keeps the widened 1m intake inside the trending spend budget", () => {
     const ranges = gmgnMarketCapRangesForStrategy("1m", true);
-    // Measured 2026-09-22: 8 bands x weight 3 = 30/min, which crowded out the
-    // per-candidate refresh — the only source of a genuinely fresh 1m row at
-    // evaluation time. 4 bands + 5m + 1h = 6 calls = 18/min, leaving room.
-    expect(ranges).toHaveLength(4);
-    expect(ranges.length + 2).toBeLessThanOrEqual(6);
-    expect(ranges).toContainEqual({ min: 500_000, max: 2_000_000 });
+    // Widened 2026-09-22 (operator "follow your recommendations"): 4 bands
+    // starved the funnel (1,865 flow_unavailable rejects / 2h). 6 bands keep
+    // the hot 100k-500k zone finely split while intake spend stays bounded:
+    // 6 bands + 5m + 1h = 8 weight-1 calls/min vs SPEND_WINDOW_MAX 36.
+    expect(ranges).toHaveLength(6);
+    expect(ranges.length + 2).toBeLessThanOrEqual(8);
+    expect(ranges).toContainEqual({});
+    expect(ranges).toContainEqual({ min: 100_000, max: 250_000 });
+    expect(ranges).toContainEqual({ min: 250_000, max: 500_000 });
+    expect(ranges).toContainEqual({ min: 500_000, max: 1_000_000 });
+    expect(ranges).toContainEqual({ min: 1_000_000, max: 2_000_000 });
     expect(ranges).toContainEqual({ min: 2_000_000 });
     expect(gmgnMarketCapRangesForStrategy("5m", true)).toEqual([{}]);
     expect(gmgnMarketCapRangesForStrategy("1m", false)).toEqual([{}]);

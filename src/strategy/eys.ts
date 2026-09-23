@@ -324,7 +324,8 @@ function buildTokenRange(input: StrategyPlanInput): StrategyPlan {
  * the GMGN spend window once the 1m trending intake is down to four bands
  * (18 weight/min against a 36 weight/min window).
  */
-export const EYS_REFRESH_MAX_MINTS = 8;
+/** Widened 8 -> 12 (2026-09-22): coverage starved the funnel at 1,865 flow_unavailable/2h. */
+export const EYS_REFRESH_MAX_MINTS = 12;
 
 /** Last known 1m volume at any age; 0 when the mint carries no 1m row. */
 function lastKnownOneMinuteVolume(presence?: GmgnPresence): number {

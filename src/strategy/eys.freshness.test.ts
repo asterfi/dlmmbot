@@ -13,7 +13,7 @@ vi.mock("../scanner/gmgn.js", async (original) => ({
   tokenInfoByMint: mocks.tokenInfoByMint,
 }));
 vi.mock("../db/db.js", () => ({ recordDecision: mocks.recordDecision }));
-import { eysPlugin, _resetEysRuntimeForTests, selectEysRefreshMints } from "./eys.js";
+import { eysPlugin, _resetEysRuntimeForTests, selectEysRefreshMints, EYS_REFRESH_MAX_MINTS } from "./eys.js";
 
 function candidate(mint = "FreshnessMint", score = 90, poolAddress = mint + "Pool"): Candidate {
   const pool = makePool({ address: poolAddress, mintX: mint, marketCapUsd: 250_000 });
@@ -73,14 +73,14 @@ it("uses the refresh budget for distinct exact candidates, not sibling pools", a
   const gmgnByMint = new Map(candidates.map((c) => [c.tokenMint, presence(c.tokenMint, Date.now() - 61_000)]));
   mocks.tokenInfoByMint.mockImplementation(async (mints: string[]) => new Map(mints.map((mint) => [mint, presence(mint, Date.now())])));
   const proposals = await eysPlugin.discover({ candidates, gmgnByMint });
-  // 11 distinct mints compete for 8 slots; dedupe collapses the 5 sibling
-  // pools to one mint so no slot is spent twice.
+  // 11 distinct mints compete for the 12-slot default budget; dedupe collapses
+  // the 5 sibling pools to one mint so no slot is spent twice.
   expect(mocks.tokenInfoByMint).toHaveBeenCalledExactlyOnceWith([
-    "Sibling", "Other0", "Other1", "Other2", "Other3", "Other4", "Other5", "Other6",
+    "Sibling", "Other0", "Other1", "Other2", "Other3", "Other4",
+    "Other5", "Other6", "Other7", "Other8", "Other9",
   ]);
-  expect(proposals).toHaveLength(12);
-  expect(mocks.recordDecision).toHaveBeenCalledWith("Other7", "Other7Pool", "skipped", "eys_flow_stale", 83,
-    expect.objectContaining({ evidence: expect.objectContaining({ refreshRequested: false }) }));
+  expect(proposals).toHaveLength(15);
+  expect(mocks.recordDecision).not.toHaveBeenCalled();
 });
 
 it.each([9_999, 10_000])("clamps a sub-floor config to the $10k noise floor with volume %s", async (volume) => {
@@ -116,6 +116,21 @@ it("ranks a stale proven qualifier ahead of a higher-scored never-seen candidate
   });
 
   expect(mints).toEqual(["StaleQualifier"]);
+});
+
+it("default refresh budget covers the coverage-starved funnel (12 mints)", () => {
+  // Widened 2026-09-22: budget 8 with a 5-call direct-info cap left most
+  // candidates permanently flow_unavailable; 12 keeps the tiered priority
+  // order while letting more never-seen mints get a real 1m reading.
+  expect(EYS_REFRESH_MAX_MINTS).toBe(12);
+  const candidates = Array.from({ length: 20 }, (_, i) => candidate(`Default${i}`, 90 - i));
+  const mints = selectEysRefreshMints({
+    candidates,
+    gmgnByMint: new Map(),
+    observedAtByPool: new Map(),
+    floorUsd: 25_000,
+  });
+  expect(mints).toHaveLength(12);
 });
 
 it("never returns more mints than the budget allows", () => {
