@@ -66,6 +66,25 @@ it.each(["missing", "stale", "wrong-cadence"])("records explicit flow diagnostic
     expect.objectContaining({ strategy: "eys", evidence: expect.objectContaining({ exactPool: c.pool.address }) }));
 });
 
+it("records below-floor fresh flow so the real bottleneck stays visible", async () => {
+  // The funnel logged `flow-qualified mints 2-3` every cycle while the ledger
+  // showed ZERO eys_flow_floor rows. Both cannot be true: candidates holding
+  // genuine fresh 1m flow were failing the floor and being dropped silently,
+  // so "0 past flow" understated reality. recordEysRejection already dedupes
+  // per mint+pool+gate for 5 min, so the flood the old guard defended against
+  // is already bounded — the guard only hid the number.
+  const c = candidate("BelowFloorFlow");
+  const p = presence(c.tokenMint, Date.now() - 5_000, 50_000); // fresh, floor is 100_000
+  const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map([[c.tokenMint, p]]) });
+  expect(proposals).toEqual([]);
+  expect(mocks.recordDecision).toHaveBeenCalledWith(c.tokenMint, c.pool.address, "skipped",
+    "eys_flow_floor", c.score,
+    expect.objectContaining({
+      strategy: "eys",
+      evidence: expect.objectContaining({ exactPool: c.pool.address, flowUsdPerMin: 50_000 }),
+    }));
+});
+
 it("uses the refresh budget for distinct exact candidates, not sibling pools", async () => {
   const siblings = Array.from({ length: 5 }, (_, i) => candidate("Sibling", 100, `SiblingPool${i}`));
   const others = Array.from({ length: 10 }, (_, i) => candidate(`Other${i}`, 90 - i));

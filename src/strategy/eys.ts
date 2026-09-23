@@ -478,12 +478,14 @@ export const eysPlugin: StrategyPlugin = {
       };
       const decision = evaluateEys(candidate, evidence, stage);
       if (!decision.accepted) {
-        // Persist only official-flow crossings: recording every below-floor
-        // candidate every minute would drown the decision ledger while still
-        // leaving the important Eys bottleneck invisible.
-        if (flow.volumeUsd >= cfg.flow_floor_usd) {
-          recordEysRejection(candidate, decision.reason, evidence);
-        }
+        // Record EVERY rejection, including below-floor flow. An earlier guard
+        // persisted only official-flow crossings, fearing the ledger would
+        // drown — but recordEysRejection already dedupes per mint+pool+gate for
+        // 5 min, so volume was never unbounded. The guard made the funnel lie:
+        // logs reported `flow-qualified mints 2-3`/cycle while the ledger showed
+        // 0 eys_flow_floor rows, hiding the actual bottleneck (fresh flow below
+        // the floor) behind an apparently clean "0 past flow".
+        recordEysRejection(candidate, decision.reason, evidence);
         return null;
       }
       return {
