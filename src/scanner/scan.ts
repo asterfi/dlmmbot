@@ -178,6 +178,22 @@ export function selectEysPoolResolutionMints(
     .map((row) => row.mint);
 }
 
+/**
+ * Eys sources candidates from the GMGN trending/event universe ("trending 1m
+ * $100k+"). A Meteora-swept pool whose mint has no GMGN sighting is never
+ * trending: its token-info volume_1m is 0, so it can never yield a fresh 1m
+ * flow row. It would only reach evaluateEys as flow_unavailable (46% of all
+ * rejections) while consuming refresh budget the genuinely-hot tokens need.
+ * Returns a gate failure when the mint carries no GMGN flow source.
+ */
+export function eysFlowSourceGateFailure(
+  mint: string,
+  gmgnByMint: ReadonlyMap<string, unknown>,
+): { gate: string; value: string; limit: string } | null {
+  if (gmgnByMint.has(mint)) return null;
+  return { gate: "no_gmgn_flow_source", value: "absent", limit: "GMGN trending/event sighting" };
+}
+
 export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanResult> {
   const eysMode = eysModeActive();
   const [sweptPools, gmgnTrending, eventDiscovery] = await Promise.all([
@@ -270,6 +286,14 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
 
   for (const p of bestPool.values()) {
     const gateFailures = eysMode ? eysDiscoveryGates(p) : poolGates(p);
+    // Eys candidates must have a GMGN flow source (trending/event): a swept
+    // pool with no GMGN sighting can never produce a 1m flow row (not trending;
+    // token-info volume_1m=0) and only floods flow_unavailable while diluting
+    // the refresh budget. Non-core strategies keep the broad Meteora sweep.
+    if (eysMode) {
+      const flowSource = eysFlowSourceGateFailure(p.mintX, gmgnByMint);
+      if (flowSource) gateFailures.push(flowSource);
+    }
     const symbol = p.name.split("-")[0] ?? p.name;
 
     // Eys evaluates price/flow economics after broad intake. Core retains the

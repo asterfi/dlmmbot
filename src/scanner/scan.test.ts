@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { eysDiscoveryGates, pickBestPool, pickCopycatWinner, selectEysPoolResolutionMints } from "./scan.js";
+import { eysDiscoveryGates, eysFlowSourceGateFailure, pickBestPool, pickCopycatWinner, selectEysPoolResolutionMints } from "./scan.js";
 import { poolGates } from "./gates.js";
 import { makePool } from "../test/pool.js";
 import { effectiveEysFlowFloorUsd, EYS_MIN_FLOW_FLOOR_USD } from "../config.js";
@@ -213,5 +213,23 @@ describe("Eys GMGN exact-pool resolution selection", () => {
     ]);
 
     expect(selectEysPoolResolutionMints(gmgn, nowMs)).toEqual(["mint-high", "mint-mid"]);
+  });
+});
+
+describe("Eys GMGN flow-source admission (candidate universe)", () => {
+  it("rejects a swept pool whose mint has no GMGN sighting", () => {
+    // A Meteora-swept pool absent from GMGN trending/event is never trending:
+    // token-info volume_1m = 0, so it can never yield a 1m flow row. It only
+    // floods flow_unavailable (46% of rejections) and dilutes the refresh
+    // budget away from genuinely-hot tokens. Must not become a candidate.
+    const gmgn = new Map<string, unknown>([["Trending1111111111111111111111111111111111", {}]]);
+    const failure = eysFlowSourceGateFailure("SweptOnly1111111111111111111111111111111", gmgn);
+    expect(failure?.gate).toBe("no_gmgn_flow_source");
+    expect(failure?.limit).toBe("GMGN trending/event sighting");
+  });
+
+  it("admits a pool whose mint is in the GMGN trending/event universe", () => {
+    const gmgn = new Map<string, unknown>([["Trending1111111111111111111111111111111111", {}]]);
+    expect(eysFlowSourceGateFailure("Trending1111111111111111111111111111111111", gmgn)).toBeNull();
   });
 });
