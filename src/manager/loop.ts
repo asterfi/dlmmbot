@@ -1175,7 +1175,9 @@ export async function managePositions(exec: Executor): Promise<void> {
           await closeAndReport(exec, pos, "P1_stop", config().exec.exit_slippage_bps, "stop_loss",
             `stop loss at ${(stopFrac * 100 - 100).toFixed(1)}%${inGrace ? ` (sustained ${streak} polls below range)` : ""}`);
           clearRangeTimers(pos.id);
-          blacklist(pos.tokenMint, "token", "stop loss cooldown", m.loss_reentry_cooldown_h);
+          // Cooldown 0 = no bench (Eys: take the next opportunity). blacklist()
+          // treats a falsy ttl as PERMANENT, so skip the call entirely.
+          if (m.loss_reentry_cooldown_h > 0) blacklist(pos.tokenMint, "token", "stop loss cooldown", m.loss_reentry_cooldown_h);
           recordDecision(pos.tokenMint, pos.poolAddress, "exited", "P1_stop", null, { valueFrac, feeInclFrac, countClaimed, mark, sustainedPolls: streak, inGrace });
           continue;
         }
@@ -1198,6 +1200,10 @@ export async function managePositions(exec: Executor): Promise<void> {
         clearRangeTimers(pos.id);
         bankProfit(pos, exitSol, "Eys green take-profit");
         recordDecision(pos.tokenMint, pos.poolAddress, "exited", "eys_green_tp", null, { stopFrac, greenTpPct, mark, sleeve });
+        // Eys-green IS an up-and-out close: the print that beat the floor is the
+        // high, so arm the follow chain here too — otherwise P3-F only ever sees
+        // the slower P3 path while green TP takes most of our exits.
+        if (pos.followChainId == null && sleeve !== "majors") armFollowChain(pos, mark.price, mark.vol30mUsd);
         continue;
       }
 
@@ -1268,7 +1274,7 @@ export async function managePositions(exec: Executor): Promise<void> {
         } else if (now() - since >= pm.below_range_grace_min * 60) {
           await closeAndReport(exec, pos, "P5_below", config().exec.exit_slippage_bps, "below_cut", `below-range cut after ${pm.below_range_grace_min}m grace`);
           clearRangeTimers(pos.id);
-          blacklist(pos.tokenMint, "token", "below range cut", m.loss_reentry_cooldown_h);
+          if (m.loss_reentry_cooldown_h > 0) blacklist(pos.tokenMint, "token", "below range cut", m.loss_reentry_cooldown_h);
           recordDecision(pos.tokenMint, pos.poolAddress, "exited", "P5_below", null, { mark, graceS: now() - since });
         }
         continue;

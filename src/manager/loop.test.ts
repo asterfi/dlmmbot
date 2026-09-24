@@ -3,7 +3,7 @@ import { CLAIM_EST_TX_COST_SOL, giveBackPeakFloor, managePositions, pollSleepMs,
 import { FakeExecutor } from "../test/fakeExecutor.js";
 import { installConfig, restoreConfig } from "../test/config.js";
 import { useMemoryDb, resetTestDb, insertOpenPosition } from "../test/db.js";
-import { getDb, now } from "../db/db.js";
+import { getDb, isBlacklisted, now } from "../db/db.js";
 import { config, ESCAPE_ARM_DRAWDOWN_PCT, ESCAPE_RECOVER_DRAWDOWN_PCT } from "../config.js";
 import type { ExitReason, Position } from "../types.js";
 
@@ -260,6 +260,35 @@ describe("managePositions contracts", () => {
     exec.setMark(id, { valueSol: 0.411, price: 1, activeBinId: 150, inRange: true });
     await managePositions(exec);
     expect(exec.closed).toEqual([]);
+  });
+
+  it("Eys green take-profit arms an up-only follow chain (P3-F)", async () => {
+    // Eys-green is an up-and-out close just like P3: the print that beat the
+    // floor IS the high, so the chain must start here or follow mode sleeps
+    // through our primary win path (green TP is most Eys exits now).
+    installConfig((c) => {
+      c.strategy.mode = "eys";
+      c.eys.green_take_profit_pct = 2.5;
+      c.follow.enabled = true;
+      c.follow.min_vol_30m_usd = 100_000;
+    });
+    const id = insertOpenPosition({ entrySol: 0.4 });
+    exec.setMark(id, { valueSol: 0.411, price: 1, activeBinId: 150, inRange: true, vol30mUsd: 200_000 }); // +2.75%, hot pool
+    await managePositions(exec);
+    expect(exec.closed).toEqual([{ id, reason: "Eys_green" }]);
+    const chain = getDb().prepare("SELECT state FROM follow_chains WHERE token_mint = 'mint1'").get() as { state: string } | undefined;
+    expect(chain?.state).toBe("awaiting_dip");
+  });
+
+  it("loss_reentry_cooldown_h = 0 keeps the token re-enterable — P1 must not blacklist", async () => {
+    // blacklist() reads ttlHours 0 as "permanent" (falsy -> null expiry). With
+    // the cooldown off (Eys: take the next opportunity), P1 must skip it.
+    installConfig((c) => { c.manage.loss_reentry_cooldown_h = 0; });
+    const id = insertOpenPosition({ entrySol: 0.4 });
+    exec.setMark(id, { valueSol: 0.28, price: 0.8, activeBinId: 150, inRange: true });
+    await managePositions(exec);
+    expect(exec.closed).toEqual([{ id, reason: "P1_stop" }]);
+    expect(isBlacklisted("mint1")).toBeNull();
   });
 
   /**
