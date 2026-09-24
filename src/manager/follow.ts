@@ -123,9 +123,13 @@ export function armFollowChain(pos: Position, exitPrice: number, vol30mUsd?: num
 }
 
 /**
- * Called from closeAndReport for every close of a follow leg. P3 up-and-out
- * continues the chain (back to awaiting_high); anything else ends it — a stop,
- * safety, or below-cut on a leg is the reversal the chain was betting against.
+ * Called from closeAndReport for every close of a follow leg. An up-and-out
+ * close continues the chain (back to awaiting_high): P3_above (price exited
+ * range top) or Eys_green (green take-profit fired first — it is checked
+ * before P3, so without treating it as up-and-out the BEST winners would kill
+ * the chain while slower P3 closes kept it alive). Anything else — a stop,
+ * safety, or below-cut on a leg — is the reversal the chain was betting
+ * against, and ends it.
  */
 export function onFollowLegClosed(pos: Position, reason: string, pnlSol: number): void {
   const chain = getDb().prepare(
@@ -137,7 +141,7 @@ export function onFollowLegClosed(pos: Position, reason: string, pnlSol: number)
   getDb().prepare("UPDATE follow_chains SET chain_pnl_sol = ?, updated_ts = ? WHERE id = ?")
     .run(pnl, now(), chain.id);
   chain.chain_pnl_sol = pnl;
-  if (reason !== "P3_above") return endChain(chain, `leg_${reason}`);
+  if (reason !== "P3_above" && reason !== "Eys_green") return endChain(chain, `leg_${reason}`);
   if (chain.legs >= f.max_legs) return endChain(chain, "max_legs");
   if (pnl <= -f.chain_loss_budget_sol) return endChain(chain, "loss_budget");
   // Continue: demand a new chain high before the next dip-wait (up-only).

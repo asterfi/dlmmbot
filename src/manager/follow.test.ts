@@ -153,8 +153,37 @@ describe("follow state machine", () => {
     onFollowLegClosed(leg, "P1_stop", -0.05);
     expect(loadChain().state).toBe("done");
     expect(loadChain().end_reason).toBe("leg_P1_stop");
-  });
-});
+    });
+
+    it("Eys_green leg close CONTINUES the chain (green is an up-and-out, not a reversal)", () => {
+    // Green TP is checked before P3 in the loop and fires first for legs —
+    // without this the BEST winners kill the chain while small P3 closes keep
+    // it alive. Eys: keep stacking while the token stays hot.
+    const id = insertOpenPosition({ entrySol: 0.3, entryPrice: 1 });
+    armFollowChain({
+      id, mode: "paper", poolAddress: "pool1", tokenMint: "mint1", symbol: "TST",
+      trancheOf: null, entryTs: now(), entryPrice: 1, entrySol: 0.3, minBinId: 1, maxBinId: 10,
+      state: "open", feesClaimedSol: 0, rentPaidSol: 0, profitLockFires: 0,
+      exitTs: null, exitSol: null, exitReason: null,
+    }, 1);
+    const chainId = loadChain().id as number;
+    getDb().prepare("UPDATE follow_chains SET state='leg_open', legs=1 WHERE id=?").run(chainId);
+    const leg: Position = {
+      id, mode: "paper", poolAddress: "pool1", tokenMint: "mint1", symbol: "TST",
+      trancheOf: null, entryTs: now(), entryPrice: 1, entrySol: 0.3, minBinId: 1, maxBinId: 10,
+      state: "open", feesClaimedSol: 0, rentPaidSol: 0, profitLockFires: 0,
+      exitTs: null, exitSol: null, exitReason: null, followChainId: chainId,
+    };
+    onFollowLegClosed(leg, "Eys_green", 0.008);
+    expect(loadChain().state).toBe("awaiting_high");
+    expect(loadChain().end_reason).toBeNull();
+    // and the reversal guard stays: a red close still kills it
+    getDb().prepare("UPDATE follow_chains SET state='leg_open', legs=2 WHERE id=?").run(chainId);
+    onFollowLegClosed(leg, "P1_stop", -0.05);
+    expect(loadChain().state).toBe("done");
+    expect(loadChain().end_reason).toBe("leg_P1_stop");
+    });
+    });
 
 describe("follow arming and dip timeout (2026-08-17)", () => {
   let exec: FakeExecutor;
