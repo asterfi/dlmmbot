@@ -499,7 +499,7 @@ retrace_arm_pct = 15       # wait for this dip from the post-exit / post-high pe
 range_depth_pct = 30       # bid-ask depth — tighter than the 40% default, far from "top blast"
 leg_size_sol = 0.25        # small legs; the mode earns bigger sizing with its own ledger
 max_legs = 3               # per chain
-chain_loss_budget_sol = 0.075  # chain ends when cumulative leg PnL breaches this
+chain_loss_budget_sol = 0.1   # chain ends when cumulative leg PnL breaches this
 chain_max_age_h = 12
 cold_polls_end = 3         # consecutive polls under gates.vol_30m_min_usd ends the chain
 # 2026-08-17: measured over the server bot's 15 chains. The 3 that fired a leg

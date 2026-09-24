@@ -255,7 +255,7 @@ Thresholds:
 | `range_depth_pct` | `30` | Leg depth (tighter than the 40% default) |
 | `leg_size_sol` | `0.25` | Fixed leg size — the mode earns more with its own ledger |
 | `max_legs` | `3` | Per chain |
-| `chain_loss_budget_sol` | `0.075` | Chain ends when cumulative leg PnL breaches this |
+| `chain_loss_budget_sol` | `0.1` | Chain ends when cumulative leg PnL breaches this |
 | `chain_max_age_h` | `12` | Chain lifetime |
 | `cold_polls_end` | `3` | Consecutive polls under the normal volume floor ends the chain |
 | `open_fail_cooldown_s` | `300` | Wait after a failed leg open |
