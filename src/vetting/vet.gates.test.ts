@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { vetToken } from "./vet.js";
 import { fetchReport, type RugcheckReport } from "./rugcheck.js";
 import { fetchTokenFacts } from "./onchain.js";
+import { tokenSecurity } from "../scanner/gmgn.js";
 import { installConfig, restoreConfig } from "../test/config.js";
 import { useMemoryDb, resetTestDb } from "../test/db.js";
 import { getDb, isBlacklisted, now, recordCreatorRug } from "../db/db.js";
@@ -184,6 +185,40 @@ describe("vetToken fail-closed gates", () => {
     const r = await vetToken(MINT, THREE_H_AGO);
     expect(r.facts.securityDataUnavailable).toBe(true);
     // Soft note only — must not hard-fail an otherwise clean token.
+    expect(r.verdict).toBe("pass");
+  });
+
+  it("hard-fails a nonzero buy tax (Eys selection: 0 developer fees)", async () => {
+    // GMGN `token security` buy_tax is source-parsed and domain-validated
+    // ([0,1] → %), so a nonzero value is a CONFIRMED dev fee on buys — the
+    // buy-side twin of the existing sell-tax gate. Unknown security data
+    // stays the soft note above; only confirmed nonzero rejects.
+    vi.mocked(tokenSecurity).mockResolvedValue({
+      honeypot: false,
+      sellTaxPct: 0,
+      buyTaxPct: 5,
+      renouncedMint: true,
+      renouncedFreeze: true,
+    });
+    reportMock.mockResolvedValue(rugReport());
+    const r = await vetToken(MINT, THREE_H_AGO);
+    expect(r.verdict).toBe("fail");
+    expect(gatesOf(r)).toContain("gmgn_buy_tax");
+    expect(r.facts.gmgnBuyTaxPct).toBe(5);
+  });
+
+  it("passes a confirmed 0% buy tax as evidence of no dev fee", async () => {
+    vi.mocked(tokenSecurity).mockResolvedValue({
+      honeypot: false,
+      sellTaxPct: 0,
+      buyTaxPct: 0,
+      renouncedMint: true,
+      renouncedFreeze: true,
+    });
+    reportMock.mockResolvedValue(rugReport());
+    const r = await vetToken(MINT, THREE_H_AGO);
+    expect(gatesOf(r)).not.toContain("gmgn_buy_tax");
+    expect(r.facts.gmgnBuyTaxPct).toBe(0);
     expect(r.verdict).toBe("pass");
   });
 });

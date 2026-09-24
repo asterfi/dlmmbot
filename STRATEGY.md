@@ -56,6 +56,15 @@ hard gate, discover missing pools, choose size, sign/broadcast, manage exits,
 or replace reconciliation/accounting. `shadow` is the validation mode and
 `gate` is fail-closed and opt-in. Removing hard safety gates is not supported.
 
+Stage compatibility is deliberately loose on first entries: a fresh mint is
+always proposed as the SOL-side Spot anchor, and a Laya read of `tight` or
+`breakout` only describes recent upward motion — which is exactly what Eys
+enters on — so it does not veto the anchor (probe 2026-09-24: 168 of 215
+historical `laya_stage_mismatch` rejections were `tight`/`breakout`). Only
+`dump-bonus` still mismatches, because it implies a position shape (wide
+bid-ask near ATH) the anchor planner cannot build. The probability floor is
+unaffected: a low-confidence approval rejects as before.
+
 ---
 
 ## 1. Scanning — building the candidate list
@@ -118,6 +127,7 @@ Computed fresh at entry time from RPC + RugCheck free API:
 - Insider/funding clusters ≤ `[10%]` of supply (same-funder wallet clustering + launch-slot snipers).
 - Creator has **zero** tokens in our DB or RugCheck's `creatorTokens` that rugged. One strike = permanent creator blacklist.
 - RugCheck `score_normalised` < `[41]` (their "Danger" line) — used as a veto only, never as approval.
+- GMGN `token security` buy tax = 0% (Eys "0 developer fees"): `buy_tax` is source-parsed and domain-validated, so any nonzero value is a confirmed dev fee on buys → `gmgn_buy_tax` hard fail. This is the buy-side twin of the existing sell-tax veto; unknown security data stays a soft note, never a reject.
 - Token age ≥ `[45 min]` — survive the instant-rug window; the video author got burned skipping this. This one is a **safety** gate and stays on.
 - Token age ≤ `[14 days]` is **off by default** (`age_max_enabled = false`). It was a *fit* gate, never a safety gate, and a poor proxy: the pool gates (`fee_tvl_24h`, `fee_tvl_30m_daily`, `vol_30m`, `mcap_min`) already measure current traction directly, and anything clearing them is by definition active right now. A revived old meme catching a bid is a legitimate pool — the strategy wants fee flow, and fee flow does not care when the mint was created. Nothing else in the engine reads token age: it is recorded as a fact and carries no score, sizing or ranking weight, so allowing older mints adds no hidden penalty. Turn it back on to restore the ceiling.
 - Not on our blacklist (§7) — checked for both the token mint **and** the creator address.

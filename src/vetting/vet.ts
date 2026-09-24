@@ -208,11 +208,16 @@ export async function vetToken(mint: string, poolCreatedAtMs: number | null): Pr
   if (gmgnSec) {
     facts.gmgnHoneypot = gmgnSec.honeypot;
     facts.gmgnSellTaxPct = gmgnSec.sellTaxPct;
+    facts.gmgnBuyTaxPct = gmgnSec.buyTaxPct;
     if (v.gmgn_security_enabled !== false) {
       if (gmgnSec.invalid) fail("gmgn_security_invalid", "invalid payload", "valid payload");
       else {
         if (gmgnSec.honeypot) fail("gmgn_honeypot", "true", "false");
         if (gmgnSec.sellTaxPct > 0) fail("gmgn_sell_tax", `${gmgnSec.sellTaxPct}%`, "0%");
+        // Eys selection rule: 0 developer fees. buy_tax is source-parsed and
+        // domain-validated ([0,1] → %), so nonzero = CONFIRMED dev fee on
+        // buys. Unknown security data stays the soft note below.
+        if (gmgnSec.buyTaxPct > 0) fail("gmgn_buy_tax", `${gmgnSec.buyTaxPct}%`, "0%");
       }
     }
   } else if (v.gmgn_security_enabled !== false) {

@@ -15,6 +15,10 @@ const gmgnMocks = vi.hoisted(() => ({
   trendingByMint: vi.fn(),
 }));
 vi.mock("../scanner/gmgn.js", () => gmgnMocks);
+vi.mock("./laya.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./laya.js")>()),
+  requestLaya: vi.fn(),
+}));
 
 import {
   _resetEysRuntimeForTests,
@@ -23,6 +27,8 @@ import {
   recordFlowObservation,
 } from "./eys.js";
 import { activeStrategyPlugin, resetStrategyRegistryForTests } from "./registry.js";
+import { requestLaya, type LayaStage } from "./laya.js";
+import type { StrategyModelInput } from "./plugin.js";
 
 function makeGmgnPresence(mint: string, flow: number, observedAtMs: number): GmgnPresence {
   const token: GmgnTrendingToken = {
@@ -230,6 +236,58 @@ describe("hosted Eys strategy boundary", () => {
     expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "fee_yield_below_floor" });
   });
 
+  it("rejects a pool whose fees are negligible against 24h volume — Eys' fake-volume ratio check", () => {
+    // Eys: "check fees against volume to detect fake volume." $2,000 fees on
+    // $10M 24h volume = ratio 0.0002 — busy volume, no real fee take. Probe of
+    // pool_snapshots: p01 ratio among fee-floor passers = 0.00037, so the
+    // 0.0005 floor trims only the degenerate bottom tail.
+    const pool = makePool({ tvlUsd: 100_000, feeTvl24hPct: 2, vol24hUsd: 10_000_000 });
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
+      gmgnIntervals: ["1m"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "fee_vol_ratio_below_min" });
+  });
+
+  it("keeps a pool whose 24h fees track its 24h volume", () => {
+    // $2,000 fees / $2M volume = 0.001 ≥ 0.0005 — normal fee take passes.
+    const pool = makePool({ tvlUsd: 100_000, feeTvl24hPct: 2, vol24hUsd: 2_000_000 });
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
+      gmgnIntervals: ["1m"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: true });
+  });
+
+  it("does not invent a fake-volume verdict when 24h volume is absent", () => {
+    // vol24h = 0 is missing evidence, not proof of fakeness — the ratio gate
+    // must skip rather than reject (unknown never becomes a fail).
+    const pool = makePool({ tvlUsd: 100_000, feeTvl24hPct: 2, vol24hUsd: 0 });
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
+      gmgnIntervals: ["1m"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: true });
+  });
+
   it("proposes core-clamped SOL Spot and token-side Spot plans", () => {
     const pool = makePool();
     const candidate: Candidate = {
@@ -311,5 +369,105 @@ describe("hosted Eys strategy boundary", () => {
       c.eys.enabled = true;
     });
     expect(activeStrategyPlugin().id).toBe("eys");
+  });
+});
+
+describe("Eys modelGate stage compatibility (relaxed per source)", () => {
+  let dir: string;
+  let priorDbPath: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "dlmmbot-eys-gate-"));
+    priorDbPath = process.env.FARMER_DB_PATH;
+    process.env.FARMER_DB_PATH = join(dir, "farmer.db");
+    _resetEysRuntimeForTests();
+    resetStrategyRegistryForTests();
+    installConfig((c) => {
+      c.strategy.mode = "eys";
+      c.eys.enabled = true;
+      c.laya.mode = "gate";
+      c.laya.min_approval_probability = 0.5;
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    restoreConfig();
+    _resetEysRuntimeForTests();
+    if (priorDbPath === undefined) delete process.env.FARMER_DB_PATH;
+    else process.env.FARMER_DB_PATH = priorDbPath;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function gateInput(): StrategyModelInput {
+    const pool = makePool();
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
+      gmgnIntervals: ["1m"],
+      priceChangePct1h: 2,
+    };
+    return {
+      candidate,
+      proposal: { strategyId: "eys", candidate, stage: "anchor", fundingSide: "sol", shape: "spot", requestedSizeSol: 0.1, evidence },
+      discovery: {},
+      vetting: {},
+      score: 90,
+      requestedSizeSol: 0.1,
+      bankroll: {},
+      range: { minBinId: 1, maxBinId: 11, binCount: 11, positionAccounts: 1, bottomPricePct: -40, shape: "spot", fibAnchor: null, estBinRentSol: 0.001 },
+    };
+  }
+
+  function approveWith(stage: LayaStage | null) {
+    vi.mocked(requestLaya).mockResolvedValue({
+      attempted: true,
+      latencyMs: 5,
+      result: { approved: true, approvalProbability: 0.6, ...(stage != null ? { stage } : {}) },
+    });
+  }
+
+  // Source-grounded relaxation: his first entry on a fresh token is the default
+  // SOL anchor REGARDLESS of how the token moved in the last hour — tight /
+  // breakout describe the token's recent motion (which he enters on: "strong
+  // upward spikes"), not a different geometry we must build. Only dump-bonus
+  // implies a different position shape (wide bid-ask near ATH) that plan()
+  // cannot build, so it alone must still veto an anchor proposal.
+  it("accepts an approved anchor proposal when the model labels the stage tight", async () => {
+    approveWith("tight");
+    const out = await eysPlugin.modelGate!(gateInput());
+    expect(out).toMatchObject({ accepted: true, reason: "laya_approved" });
+  });
+
+  it("accepts an approved anchor proposal when the model labels the stage breakout", async () => {
+    approveWith("breakout");
+    const out = await eysPlugin.modelGate!(gateInput());
+    expect(out).toMatchObject({ accepted: true, reason: "laya_approved" });
+  });
+
+  it("accepts when the model returns no stage at all", async () => {
+    approveWith(null);
+    const out = await eysPlugin.modelGate!(gateInput());
+    expect(out).toMatchObject({ accepted: true, reason: "laya_approved" });
+  });
+
+  it("still vetoes dump-bonus: plan() cannot build that geometry for a first entry", async () => {
+    approveWith("dump-bonus");
+    const out = await eysPlugin.modelGate!(gateInput());
+    expect(out).toMatchObject({ accepted: false, reason: "laya_stage_mismatch" });
+  });
+
+  it("still honors the probability floor regardless of stage", async () => {
+    vi.mocked(requestLaya).mockResolvedValue({
+      attempted: true,
+      latencyMs: 5,
+      result: { approved: true, approvalProbability: 0.3, stage: "tight" },
+    });
+    const out = await eysPlugin.modelGate!(gateInput());
+    expect(out).toMatchObject({ accepted: false, reason: "laya_probability_below_threshold" });
   });
 });

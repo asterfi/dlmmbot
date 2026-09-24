@@ -19,7 +19,7 @@ import type {
   StrategyPlugin,
   StrategyProposal,
 } from "./plugin.js";
-import { buildLayaRequest, decideLayaGate, layaMode, requestLaya } from "./laya.js";
+import { buildLayaRequest, decideLayaGate, layaMode, requestLaya, type LayaStage } from "./laya.js";
 
 export interface FlowObservation {
   poolAddress: string;
@@ -42,6 +42,9 @@ const DEFAULT_EYS = {
   gmgn_pool_resolution_max_mints: 12,
   // Eys' "at least 10 SOL in fees" rule (post 2099817371372560521) ≈ $1,700.
   min_pool_fees_usd: 1_700,
+  // Eys' "check fees against volume" fake-volume rule: fees24h/vol24h floor.
+  // 0.0005 = p01 of fee-floor passers in pool_snapshots (p01 0.00037).
+  min_fee_vol_ratio: 0.0005,
   // Entry floor == meme rotation exit floor: feeTvl30m × 48 ≥ 5%/d.
   min_fee_yield_daily_pct: 5,
 };
@@ -87,6 +90,7 @@ function settings() {
     market_cap_floor_usd: finiteAtLeast(raw.market_cap_floor_usd, DEFAULT_EYS.market_cap_floor_usd, 1),
     flow_floor_usd: effectiveEysFlowFloorUsd(raw.flow_floor_usd),
     min_pool_fees_usd: finiteAtLeast(raw.min_pool_fees_usd, DEFAULT_EYS.min_pool_fees_usd, 0),
+    min_fee_vol_ratio: finiteAtLeast(raw.min_fee_vol_ratio, DEFAULT_EYS.min_fee_vol_ratio, 0),
     min_fee_yield_daily_pct: finiteAtLeast(raw.min_fee_yield_daily_pct, DEFAULT_EYS.min_fee_yield_daily_pct, 0),
     entry_sol: finiteAtLeast(raw.entry_sol, DEFAULT_EYS.entry_sol, 0.000001),
     anchor_range_below_pct: finiteAtLeast(raw.anchor_range_below_pct, DEFAULT_EYS.anchor_range_below_pct, 0),
@@ -240,6 +244,13 @@ export function evaluateEys(
   // out in 47s for −1.1% because fees could never cover the round trip).
   const feesUsd24h = (candidate.pool.tvlUsd * candidate.pool.feeTvl24hPct) / 100;
   if (!(feesUsd24h >= cfg.min_pool_fees_usd)) return { accepted: false, reason: "pool_fees_below_min" };
+  // Eys' stated fake-volume check: "check fees against volume." Ratio =
+  // fees24h / vol24h; the 0.0005 floor sits at p01 of fee-floor passers in
+  // pool_snapshots (p01 = 0.00037), so it trims only the degenerate tail of
+  // pools whose busy volume produces no real fee take. vol24h = 0 is missing
+  // evidence, not proof of fakeness — skip, never reject on unknown.
+  const vol24hUsd = candidate.pool.vol24hUsd;
+  if (vol24hUsd > 0 && !(feesUsd24h / vol24hUsd >= cfg.min_fee_vol_ratio)) return { accepted: false, reason: "fee_vol_ratio_below_min" };
   const feeYieldDailyPct = candidate.pool.feeTvl30mPct * 48;
   if (!(feeYieldDailyPct >= cfg.min_fee_yield_daily_pct)) return { accepted: false, reason: "fee_yield_below_floor" };
   if (stage !== "anchor") return { accepted: false, reason: "child_stage_unsupported" };
@@ -530,7 +541,20 @@ export const eysPlugin: StrategyPlugin = {
     const evaluation = await requestLaya(snapshot);
     const gate = decideLayaGate(mode, evaluation.result, config().laya.min_approval_probability);
     const expectedStage = input.proposal.stage === "token" ? "breakout" : input.proposal.stage;
-    const stageMismatch = evaluation.result.stage != null && evaluation.result.stage !== expectedStage;
+    // Relaxed stage compatibility (source-grounded): his first entry on a
+    // fresh token is the default SOL anchor regardless of the token's recent
+    // motion — tight / breakout label upward motion he ENTERS on ("strong
+    // upward spikes"), not a different geometry. Only dump-bonus implies a
+    // position shape plan() cannot build for a first entry (wide bid-ask
+    // near ATH), so it alone remains a mismatch. Probe: 168/215 historical
+    // laya_stage_mismatch rows were tight/breakout and now clear; 47
+    // dump-bonus rows stay vetoed.
+    const anchorCompatibleStages: ReadonlySet<LayaStage> = new Set(["anchor", "tight", "breakout"]);
+    const modelStage = evaluation.result.stage;
+    const stageMismatch = modelStage != null &&
+      (input.proposal.stage === "anchor"
+        ? !anchorCompatibleStages.has(modelStage)
+        : modelStage !== expectedStage);
     const detail = {
       mode,
       attempted: evaluation.attempted,

@@ -38,6 +38,8 @@ Datapi sweep; it does not alter core mode or bypass any safety/execution gate.
 | `market_cap_floor_usd` | `100000` | Eys market-cap floor |
 | `flow_floor_usd` | `100000` | Genuine GMGN `1m` flow floor used for Eys evidence and supplemental exact-pool lookup |
 | `gmgn_pool_resolution_max_mints` | `12` | Maximum fresh flow-qualified GMGN mints resolved through Datapi per scan; Eys `1m` intake also uses bounded market-cap slices including `$1M–$2M`; failed/malformed lookups are omitted |
+| `min_pool_fees_usd` | `1700` | Eys fee floor: ≥10 SOL/day in pool fees (~$1,700) |
+| `min_fee_vol_ratio` | `0.0005` | Eys fake-volume check: minimum 24h fees ÷ 24h volume (rejects `fee_vol_ratio_below_min`). At p01 of fee-floor passers, trims only the degenerate tail; `vol24h = 0` skips the check — unknown is never treated as fake |
 
 ## `[discovery]` — optional exact-pool event intake
 
@@ -94,7 +96,7 @@ Master switches (also in Settings UI) — off skips that hard fail; thresholds a
 | `holder_gate_enabled` | `true` | Block single-holder / top-10 concentration |
 | `rugcheck_veto_enabled` | `true` | Block high RugCheck score (the rugged-creator flag stays on regardless) |
 | `creator_rug_enabled` | `true` | Block creators with prior rugs |
-| `gmgn_security_enabled` | `true` | Block honeypot / sell-tax flags from GMGN |
+| `gmgn_security_enabled` | `true` | Block honeypot / buy-tax / sell-tax flags from GMGN (buy tax ≥0% = confirmed dev fee, Eys "0 developer fees") |
 
 Thresholds:
 

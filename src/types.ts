@@ -59,6 +59,7 @@ export interface VetResult {
     launchpad: string | null;
     tokenAgeMinutes: number | null;
     gmgnSellTaxPct?: number | null;       // GMGN security cross-check
+    gmgnBuyTaxPct?: number | null;        // GMGN security cross-check (Eys "0 dev fees")
     gmgnHoneypot?: boolean | null;
     /** True when the honeypot/sell-tax source was blind for this vet (soft note, not a gate). */
     securityDataUnavailable?: boolean;

@@ -75,6 +75,13 @@ export interface EysConfig {
    */
   min_pool_fees_usd?: number;
   /**
+   * Eys' stated fake-volume check: "check fees against volume." Reject when
+   * fees24h / vol24h falls below this floor. 0.0005 = p01 of fee-floor
+   * passers in pool_snapshots (p01 = 0.00037), so it trims only the
+   * degenerate tail. vol24h = 0 skips the check (unknown ≠ fake).
+   */
+  min_fee_vol_ratio?: number;
+  /**
    * Never enter a pool whose 30m fee yield is already under the rotation
    * exit floor — entering what you would immediately exit is how PAID pos#2
    * lost 1.1% in 47s. Keep equal to [manage] meme rotation floor (5).
