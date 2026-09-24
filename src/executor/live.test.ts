@@ -8,6 +8,7 @@ import {
   OPEN_SLIPPAGE_REBUILDS,
   requireOpenCostSol,
   bookRentReclaim,
+  allocateBatchReclaim,
 } from "./live.js";
 import { classifyLeftover, RESIDUAL_SWEEP_MIN_SOL } from "./executor.js";
 import { UNDERFILL_INCIDENT_SHARE } from "./live.js";
@@ -320,4 +321,204 @@ describe("bookRentReclaim — reclaimed rent must reach realized PnL", () => {
     expect(recoveredOf(b)).toBeCloseTo(RECLAIM, 9);
     expect(reclaimReceipts()).toHaveLength(2);
   });
+
 });
+
+// The 2026-09-23 20:42:10Z batch (tx 3KHRxZdjjCufQ4…) closed three ATAs in ONE
+// transaction: WALTER 1,488,440 lamports, CALI 1,513,840, KCAT 1,513,840, for a
+// measured wallet delta of 4,418,178 (fee 97,942). closeEmptyAccounts only
+// resolved a position when `batch.length === 1`, so posId was null, the credit
+// was withheld, and +0.004418178 SOL never reached any position — the money is
+// on the chain and absent from the book. Each closed account's own pre-close
+// lamports ARE its rent, and each mint maps to exactly one position, so the
+// batch can be attributed instead of abandoned.
+describe("allocateBatchReclaim — per-account attribution of a multi-account batch", () => {
+  // Real lamports from tx 3KHRxZdjjCufQ4…, real wallet delta, real fee.
+  const LAMPORTS = [1_488_440, 1_513_840, 1_513_840];
+  const DELTA = 4_418_178 / 1e9;
+  const POS = [5, 3, 4]; // WALTER, CALI, KCAT
+
+  const batch = (positionIds: Array<number | null>) =>
+    positionIds.map((positionId, i) => ({ lamports: LAMPORTS[i]!, positionId }));
+
+  it("gives each owning position its own rent share", () => {
+    const out = allocateBatchReclaim(batch(POS), DELTA)!;
+
+    expect(out).toHaveLength(3);
+    expect(out.map((a) => a.positionId)).toEqual(POS);
+    // WALTER's ATA was the cheaper one — it must get the smaller share, not an
+    // equal split. Each position is credited its own rent NET of its pro-rata
+    // share of the 97,942-lamport fee, so the three shares sum to the wallet delta.
+    expect(out[0]!.creditSol).toBeCloseTo(1_456_159.903262092 / 1e9, 9);
+    expect(out[1]!.creditSol).toBeCloseTo(1_513_840 / 1e9 * (DELTA * 1e9 / 4_516_120), 9);
+    expect(out[0]!.creditSol).toBeLessThan(out[1]!.creditSol);
+  });
+
+  // Chain truth: what the book credits must EQUAL what the wallet received.
+  it("allocations sum exactly to the measured wallet delta", () => {
+    const out = allocateBatchReclaim(batch(POS), DELTA)!;
+    const sum = out.reduce((s, a) => s + a.creditSol, 0);
+    expect(sum).toBeCloseTo(DELTA, 12);
+  });
+
+  it("leaves an unowning account's share uncredited instead of guessing", () => {
+    const out = allocateBatchReclaim(batch([5, null, 4]), DELTA)!;
+
+    expect(out.map((a) => a.positionId)).toEqual([5, 4]);
+    const sum = out.reduce((s, a) => s + a.creditSol, 0);
+    // The unowned account's proportional share stays out of the book — no
+    // position owns it, so nothing may claim it. The receipt still records the
+    // full wallet delta.
+    expect(sum).toBeLessThan(DELTA);
+    expect(sum).toBeCloseTo(DELTA - 1_481_009.048368954 / 1e9, 9);
+  });
+
+  // An unknown delta must not be invented from lamports alone: the fee is only
+  // knowable from the landed tx.
+  it("returns null when the wallet delta is unknown", () => {
+    expect(allocateBatchReclaim(batch(POS), null)).toBeNull();
+    expect(allocateBatchReclaim(batch(POS), Number.NaN)).toBeNull();
+  });
+
+  it("returns null when no account's lamports could be read", () => {
+    const zeroed = POS.map((positionId) => ({ lamports: 0, positionId }));
+    expect(allocateBatchReclaim(zeroed, DELTA)).toBeNull();
+  });
+
+  it("degenerates to a single credit when the batch held one account", () => {
+    const out = allocateBatchReclaim([{ lamports: 1_513_840, positionId: 7 }], 1_513_840 / 1e9)!;
+    expect(out).toEqual([{ positionId: 7, creditSol: 1_513_840 / 1e9 }]);
+  });
+});
+
+describe("bookRentReclaim — batch allocations", () => {
+  const SIG = "3BatchReclaimSigAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const DELTA = 4_418_178 / 1e9;
+
+  beforeEach(() => useMemoryDb());
+  afterEach(() => resetTestDb());
+
+  function recoveredOf(id: number): number {
+    const row = getDb().prepare("SELECT recovered_sol AS r FROM positions WHERE id = ?").get(id) as { r: number | null };
+    return row.r ?? 0;
+  }
+  function receipts(): Array<{ position_id: number | null; sol_delta: number | null }> {
+    return getDb().prepare("SELECT position_id, sol_delta FROM events WHERE type = 'rent_reclaim' ORDER BY id").all() as Array<{
+      position_id: number | null; sol_delta: number | null;
+    }>;
+  }
+  function detail(): Array<Record<string, unknown>> {
+    return (getDb().prepare("SELECT detail_json FROM events WHERE type = 'rent_reclaim' ORDER BY id").all() as Array<{ detail_json: string }>)
+      .map((r) => JSON.parse(r.detail_json) as Record<string, unknown>);
+  }
+  function closedPos(): number {
+    return insertClosedPosition({
+      entrySol: 0.1, exitSol: 0.100219, openCostSol: 0.143427,
+      closeReturnSol: 0.142212, feesMeasuredSol: 0.000572,
+    });
+  }
+
+  // THE BUG: one receipt for the batch, but the credit must reach all three
+  // positions — otherwise the money stays invisible to REALIZED_PNL_SQL.
+  it("credits every owning position and writes ONE receipt for the batch", () => {
+    const walter = closedPos(), cali = closedPos(), kcat = closedPos();
+
+    const booked = bookRentReclaim({
+      positionId: null,
+      deltaSol: DELTA,
+      txSig: SIG,
+      allocations: [
+        { positionId: walter, creditSol: 1_456_159.903262092 / 1e9 },
+        { positionId: cali, creditSol: 1_481_009.048368954 / 1e9 },
+        { positionId: kcat, creditSol: 1_481_009.048368954 / 1e9 },
+      ],
+    });
+
+    expect(booked).toBe(true);
+    expect(recoveredOf(walter)).toBeCloseTo(1_456_159.903262092 / 1e9, 9);
+    expect(recoveredOf(cali)).toBeCloseTo(1_481_009.048368954 / 1e9, 9);
+    expect(recoveredOf(kcat)).toBeCloseTo(1_481_009.048368954 / 1e9, 9);
+    // One receipt per landed tx — idempotency stays keyed on txSig.
+    expect(receipts()).toHaveLength(1);
+    expect(receipts()[0]!.sol_delta).toBeCloseTo(DELTA, 9);
+    expect(receipts()[0]!.position_id).toBeNull();
+    // The reconciler's marker must equal the total actually credited.
+    const credited = recoveredOf(walter) + recoveredOf(cali) + recoveredOf(kcat);
+    expect(detail()[0]!.credited).toBeCloseTo(credited, 9);
+    expect(detail()[0]!.credited).toBeCloseTo(DELTA, 9);
+    expect(detail()[0]!.allocations).toHaveLength(3);
+  });
+
+  // A replayed reclaim must not book the batch twice.
+  it("is idempotent on txSig: a replayed batch credits exactly once", () => {
+    const a = closedPos(), b = closedPos();
+    const allocations = [
+      { positionId: a, creditSol: 2_000_000 / 1e9 },
+      { positionId: b, creditSol: 2_000_000 / 1e9 },
+    ];
+
+    expect(bookRentReclaim({ positionId: null, deltaSol: 4_000_000 / 1e9, txSig: SIG, allocations })).toBe(true);
+    expect(bookRentReclaim({ positionId: null, deltaSol: 4_000_000 / 1e9, txSig: SIG, allocations })).toBe(false);
+
+    expect(recoveredOf(a)).toBeCloseTo(2_000_000 / 1e9, 9);
+    expect(recoveredOf(b)).toBeCloseTo(2_000_000 / 1e9, 9);
+    expect(receipts()).toHaveLength(1);
+  });
+
+  // Book must never claim more than the wallet actually received.
+  it("withholds the whole credit when allocations exceed the measured delta", () => {
+    const a = closedPos(), b = closedPos();
+
+    const booked = bookRentReclaim({
+      positionId: null,
+      deltaSol: DELTA,
+      txSig: SIG,
+      allocations: [
+        { positionId: a, creditSol: 3_000_000 / 1e9 },
+        { positionId: b, creditSol: 3_000_000 / 1e9 },
+      ],
+    });
+
+    expect(booked).toBe(true); // receipt still stands
+    expect(recoveredOf(a)).toBe(0);
+    expect(recoveredOf(b)).toBe(0);
+    expect(receipts()).toHaveLength(1);
+    expect(detail()[0]!.credited).toBeUndefined();
+    expect(detail()[0]!.creditWithheld).toMatch(/exceed/);
+  });
+
+  it("withholds when an allocation names a non-positive amount", () => {
+    const a = closedPos();
+
+    bookRentReclaim({ positionId: null, deltaSol: DELTA, txSig: SIG, allocations: [{ positionId: a, creditSol: 0 }] });
+
+    expect(recoveredOf(a)).toBe(0);
+    expect(detail()[0]!.credited).toBeUndefined();
+    expect(detail()[0]!.creditWithheld).toBeTruthy();
+  });
+
+  // delta unknown → the receipt stands, nothing is credited, same as the
+  // single-account path.
+  it("withholds when the wallet delta is unknown", () => {
+    const a = closedPos();
+
+    bookRentReclaim({ positionId: null, deltaSol: null, txSig: SIG, allocations: [{ positionId: a, creditSol: 0.001 }] });
+
+    expect(recoveredOf(a)).toBe(0);
+    expect(detail()[0]!.credited).toBeUndefined();
+  });
+
+  it("adds onto an existing recovered credit and leaves stranded_sol alone", () => {
+    const id = insertClosedPosition({
+      entrySol: 0.75, exitSol: 0.7144, openCostSol: 0.8669, closeReturnSol: 0.2955,
+      feesMeasuredSol: 0.0292, recoveredSol: 0.5323, strandedSol: 0,
+    });
+
+    bookRentReclaim({ positionId: null, deltaSol: DELTA, txSig: SIG, allocations: [{ positionId: id, creditSol: DELTA }] });
+
+    expect(recoveredOf(id)).toBeCloseTo(0.5323 + DELTA, 9);
+    const row = getDb().prepare("SELECT stranded_sol AS s FROM positions WHERE id = ?").get(id) as { s: number };
+    expect(row.s).toBe(0);
+  });
+});
+

@@ -147,10 +147,19 @@ export function requireOpenCostSol(walletDeltaSol: number | null): number {
  * meant to find it, and re-runnable into a double credit. Idempotent on
  * `txSig`, because the reclaim path can be retried against the same landed tx.
  *
- * Credit is deliberately withheld when no single position owns the batch (the
- * walletDelta then spans several mints) or when the delta is unknown — an
- * unattributable or unfetched amount must not be pinned on whichever position
- * sorts last. The receipt still stands in both cases so nothing disappears.
+ * A multi-account batch (several ATAs closed under ONE signature) is attributed
+ * per account instead of abandoned: each closed account's own pre-close
+ * lamports ARE its rent, and each mint maps to exactly one position, so
+ * `allocations` splits the measured wallet delta across the positions owning
+ * those mints. Shares are NET of the fee the batch paid, so the total credited
+ * is exactly what the wallet received — the book never claims more than chain
+ * truth (tx 3KHRxZdjjCufQ4… closed WALTER/CALI/KCAT together and lost
+ * +0.004418178 SOL to this path before attribution existed).
+ *
+ * Credit is still withheld when the delta is unknown, when an allocation is
+ * non-positive, when the allocations exceed the measured delta, or when no
+ * allocation is supplied and no single position owns the batch. The receipt
+ * stands in every case so nothing disappears.
  *
  * @returns true when this call wrote the receipt, false when it was already booked.
  */
@@ -159,6 +168,8 @@ export function bookRentReclaim(opts: {
   deltaSol: number | null;
   txSig: string;
   detail?: Record<string, unknown>;
+  /** Per-account split of `deltaSol` across the positions owning the closed mints. */
+  allocations?: ReadonlyArray<{ positionId: number; creditSol: number }>;
 }): boolean {
   const db = getDb();
   const seen = db
@@ -167,13 +178,34 @@ export function bookRentReclaim(opts: {
   if (seen) return false;
 
   const delta = opts.deltaSol !== null && Number.isFinite(opts.deltaSol) ? opts.deltaSol! : 0;
-  const credit = opts.positionId !== null && delta !== 0 ? delta : 0;
 
   // `credited` is the reconciler's marker — the same idea as repair-close's
   // `repairedSigs`. Without it a backfill of a pre-fix receipt cannot tell a
   // credited reclaim from an uncredited one, and would double-book.
   const detail: Record<string, unknown> = { ...(opts.detail ?? {}) };
-  if (credit !== 0) detail.credited = credit;
+  const credits: Array<{ positionId: number; creditSol: number }> = [];
+
+  if (opts.allocations !== undefined) {
+    const allocs = opts.allocations;
+    detail.allocations = allocs.map((a) => ({ positionId: a.positionId, creditSol: a.creditSol }));
+    const sum = allocs.reduce((s, a) => s + (Number.isFinite(a.creditSol) ? a.creditSol : 0), 0);
+    let withheld: string | null = null;
+    if (opts.deltaSol === null || !Number.isFinite(opts.deltaSol)) withheld = "wallet delta unknown";
+    else if (allocs.some((a) => !Number.isFinite(a.creditSol) || a.creditSol <= 0))
+      withheld = "non-positive allocation";
+    else if (sum > delta + 1e-12) withheld = `allocations ${sum} exceed measured delta ${delta}`;
+    if (withheld) detail.creditWithheld = withheld;
+    else {
+      credits.push(...allocs.map((a) => ({ positionId: a.positionId, creditSol: a.creditSol })));
+      detail.credited = sum;
+    }
+  } else {
+    const credit = opts.positionId !== null && delta !== 0 ? delta : 0;
+    if (credit !== 0) {
+      credits.push({ positionId: opts.positionId!, creditSol: credit });
+      detail.credited = credit;
+    }
+  }
 
   db.transaction(() => {
     db.prepare(
@@ -181,14 +213,55 @@ export function bookRentReclaim(opts: {
     ).run(opts.positionId, now(), opts.txSig, delta, JSON.stringify(detail));
     // `stranded_sol` is untouched: the residual sweep owns that transition and
     // zeroes it as it credits, so reclaim and sweep can never double-count.
-    if (credit !== 0) {
+    for (const c of credits) {
       db.prepare("UPDATE positions SET recovered_sol = COALESCE(recovered_sol, 0) + ? WHERE id = ?").run(
-        credit,
-        opts.positionId,
+        c.creditSol,
+        c.positionId,
       );
     }
   })();
   return true;
+}
+
+/**
+ * Split a batch's measured wallet delta across the positions that own the
+ * closed mints, pro-rata to each account's own pre-close lamports.
+ *
+ * Pro-rata (rather than an equal split or a raw-lamport credit) because the
+ * batch paid ONE fee: the shares must sum to the wallet delta, which is the
+ * only figure chain truth can confirm. The last account absorbs the float
+ * remainder so the sum is exact.
+ *
+ * An account with no owning position keeps its share OUT of the result — an
+ * unowned amount must not be pinned on whichever position sorts last. Returns
+ * null when the delta is unknown or when any account's lamports could not be
+ * read (a 0-lamport token account cannot exist, so 0 means the fetch failed and
+ * the split would be distorted); the caller then falls back to withholding.
+ */
+export function allocateBatchReclaim(
+  accounts: ReadonlyArray<{ lamports: number; positionId: number | null }>,
+  deltaSol: number | null,
+): Array<{ positionId: number; creditSol: number }> | null {
+  if (deltaSol === null || !Number.isFinite(deltaSol)) return null;
+  if (accounts.some((a) => !Number.isFinite(a.lamports) || a.lamports <= 0)) return null;
+  const totalLamports = accounts.reduce((s, a) => s + a.lamports, 0);
+  if (!(totalLamports > 0)) return null;
+
+  const shares: number[] = [];
+  let assigned = 0;
+  accounts.forEach((a, i) => {
+    if (i === accounts.length - 1) {
+      shares.push(deltaSol! - assigned); // last takes the float remainder → sum is exact
+      return;
+    }
+    const share = deltaSol! * (a.lamports / totalLamports);
+    shares.push(share);
+    assigned += share;
+  });
+
+  return accounts
+    .map((a, i) => ({ positionId: a.positionId, creditSol: shares[i]! }))
+    .filter((s): s is { positionId: number; creditSol: number } => s.positionId !== null);
 }
 
 function lbPositionEmpty(p: LbPosition): boolean {
@@ -1620,25 +1693,41 @@ export class LiveExecutor implements Executor {
       for (const a of batch)
         tx.add(createCloseAccountInstruction(a.pubkey, this.wallet.publicKey, this.wallet.publicKey, [], a.programId));
       try {
+        // Read each account's lamports BEFORE the close lands — once the tx
+        // executes, the account (and the record of whose rent it was) is gone.
+        const preLamports = await Promise.all(
+          batch.map((a) =>
+            this.connection.getAccountInfo(a.pubkey).then((info) => info?.lamports ?? 0).catch(() => 0),
+          ),
+        );
         const sig = await this.send(tx);
         const delta = await this.walletDelta([sig]);
         const tokens = batch.map((a) => ({ mint: a.mint, symbol: a.symbol, account: a.pubkey.toBase58() }));
-        const posId = batch.length === 1
-          ? (getDb().prepare(
-              "SELECT id FROM positions WHERE token_mint = ? ORDER BY id DESC LIMIT 1"
-            ).get(batch[0]!.mint) as { id: number } | undefined)?.id ?? null
-          : null;
+        const positionIdOf = (mint: string): number | null =>
+          (getDb().prepare(
+            "SELECT id FROM positions WHERE token_mint = ? ORDER BY id DESC LIMIT 1"
+          ).get(mint) as { id: number } | undefined)?.id ?? null;
+        // Per-account attribution: every closed account's own lamports are its
+        // rent, and each mint maps to one position — so a 3-account batch is
+        // split across its positions instead of being abandoned as unattributable.
+        const allocations = allocateBatchReclaim(
+          batch.map((a, idx) => ({ lamports: preLamports[idx] ?? 0, positionId: positionIdOf(a.mint) })),
+          delta,
+        ) ?? undefined;
         const booked = bookRentReclaim({
-          positionId: posId,
+          positionId: batch.length === 1 ? positionIdOf(batch[0]!.mint) : null,
           deltaSol: delta,
           txSig: sig,
           detail: { accounts: tokens.map((t) => t.account), tokens },
+          allocations,
         });
         const syms = [...new Set(tokens.map((t) => t.symbol))].join(",");
+        const allocated = allocations ? allocations.length : 0;
         console.log(
           `[live] 🧹 reclaimed rent ${syms} (${batch.length} acct) — +${(delta ?? 0).toFixed(5)} SOL (tx ${sig})`
           + (booked ? "" : " — already booked, credit not repeated")
-          + (booked && posId === null && delta ? " ⚠️ not credited: no single position owns this batch" : ""),
+          + (booked && !allocations && delta ? " ⚠️ not attributed: could not measure per-account rent" : "")
+          + (allocated ? ` → ${allocated} position${allocated === 1 ? "" : "s"} credited` : ""),
         );
       } catch (e) {
         console.error("[live] rent reclaim failed:", (e as Error).message.split("\n")[0]);
