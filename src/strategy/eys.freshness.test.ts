@@ -53,7 +53,7 @@ afterEach(() => {
 
 it.each(["missing", "stale", "wrong-cadence"])("records explicit flow diagnostic for %s evidence", async (kind) => {
   const c = candidate(`Diagnostic-${kind}`);
-  const p = presence(c.tokenMint, Date.now() - 61_000);
+  const p = presence(c.tokenMint, Date.now() - 121_000);
   if (kind === "wrong-cadence") {
     p.tokenByInterval = new Map([["5m", p.token]]);
     p.intervals = new Set(["5m"]);
@@ -89,7 +89,7 @@ it("uses the refresh budget for distinct exact candidates, not sibling pools", a
   const siblings = Array.from({ length: 5 }, (_, i) => candidate("Sibling", 100, `SiblingPool${i}`));
   const others = Array.from({ length: 10 }, (_, i) => candidate(`Other${i}`, 90 - i));
   const candidates = [...siblings, ...others];
-  const gmgnByMint = new Map(candidates.map((c) => [c.tokenMint, presence(c.tokenMint, Date.now() - 61_000)]));
+  const gmgnByMint = new Map(candidates.map((c) => [c.tokenMint, presence(c.tokenMint, Date.now() - 100_000)]));
   mocks.tokenInfoByMint.mockImplementation(async (mints: string[]) => new Map(mints.map((mint) => [mint, presence(mint, Date.now())])));
   const proposals = await eysPlugin.discover({ candidates, gmgnByMint });
   // 11 distinct mints compete for the 12-slot default budget; dedupe collapses
@@ -104,13 +104,14 @@ it("uses the refresh budget for distinct exact candidates, not sibling pools", a
 
 it("refreshes a row that is fresh at selection but expires during the refresh await", () => {
   // TOCTOU: selection captures `nowMs`, then `await tokenInfoByMint(...)` spends
-  // ~20s, then evaluateEys re-checks with a NEW Date.now(). A row 50s old at
-  // selection was 70s old at evaluation — skipped as fresh, never refreshed,
-  // rejected eys_flow_stale. 66.9% of live flow_stale rows had full
-  // [1m,5m,1h] intervals and refreshRequested=false: healthy data thrown away
-  // purely because our own await aged it past the window.
+  // ~20s, then evaluateEys re-checks with a NEW Date.now(). A row 100s old at
+  // selection has only 20s of headroom left — the await alone puts it at the
+  // 120s window edge, so it must be selected, not skipped as fresh. 66.9% of
+  // live flow_stale rows (under the old 60s window) had full [1m,5m,1h]
+  // intervals and refreshRequested=false: healthy data thrown away purely
+  // because our own await aged it past the window.
   const c = candidate("NearExpiry");
-  const gmgnByMint = new Map([[c.tokenMint, presence(c.tokenMint, Date.now() - 50_000)]]);
+  const gmgnByMint = new Map([[c.tokenMint, presence(c.tokenMint, Date.now() - 100_000)]]);
   const mints = selectEysRefreshMints({
     candidates: [c],
     gmgnByMint,
@@ -157,7 +158,7 @@ it("ranks a stale proven qualifier ahead of a higher-scored never-seen candidate
   // high-score mint cannot prove anything about flow this cycle.
   const qualifier = candidate("StaleQualifier", 10);
   const unseen = candidate("NeverSeen", 99);
-  const gmgnByMint = new Map([[qualifier.tokenMint, presence(qualifier.tokenMint, Date.now() - 61_000, 40_000)]]);
+  const gmgnByMint = new Map([[qualifier.tokenMint, presence(qualifier.tokenMint, Date.now() - 100_000, 40_000)]]);
 
   const mints = selectEysRefreshMints({
     candidates: [unseen, qualifier],
@@ -234,7 +235,7 @@ it("rechecks the timestamp after slow refresh without widening the provider budg
   const c = candidate("AgedDuringRefresh");
   const p = presence(c.tokenMint, Date.now());
   mocks.tokenInfoByMint.mockImplementation(async () => {
-    vi.setSystemTime(Date.now() + 61_000);
+    vi.setSystemTime(Date.now() + 121_000);
     return new Map([[c.tokenMint, p]]);
   });
   expect(await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map() })).toEqual([]);
@@ -244,12 +245,38 @@ it("rechecks the timestamp after slow refresh without widening the provider budg
 
 it("refreshes present-but-stale exact candidate 1m evidence after scan enrichment", async () => {
   const c = candidate();
-  const stale = presence(c.tokenMint, Date.now() - 61_000);
+  const stale = presence(c.tokenMint, Date.now() - 100_000);
   const fresh = presence(c.tokenMint, Date.now(), 130_000);
   mocks.tokenInfoByMint.mockResolvedValue(new Map([[c.tokenMint, fresh]]));
   const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map([[c.tokenMint, stale]]) });
   expect(mocks.tokenInfoByMint).toHaveBeenCalledExactlyOnceWith([c.tokenMint]);
   expect(proposals).toHaveLength(1);
   expect(proposals[0]!.evidence).toMatchObject({ flowUsdPerMin: 130_000, flowObservedAtMs: Date.now(), flowSource: "gmgn-market-trending", flowCadence: "1m" });
-  expect(stale.fetchedAtMsByInterval.get("1m")).toBe(Date.now() - 61_000);
+  expect(stale.fetchedAtMsByInterval.get("1m")).toBe(Date.now() - 100_000);
+});
+
+it("accepts flow aged within our own pipeline latency (measured p50 = 74s)", async () => {
+  // 2026-09-24 live measurement over 300 eys_flow_stale rejects: flow age AT
+  // EVALUATION ran p50=74s, p90=101s, max=163s — a ~65s scan cycle plus the
+  // tokenInfoByMint await + queueing ages rows past a 60s window before
+  // evaluateEys ever runs. 129 score>=70 candidates died on this gate since
+  // boot; 66.9% carried full [1m,5m,1h] intervals with refreshRequested=false
+  // — healthy evidence discarded because our own clock outran it. The window
+  // must cover scan cadence + refresh await + queue margin.
+  const c = candidate("PipelineLatency");
+  const p = presence(c.tokenMint, Date.now() - 74_000);
+  const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map([[c.tokenMint, p]]) });
+  expect(proposals).toHaveLength(1);
+  expect(mocks.recordDecision).not.toHaveBeenCalled();
+});
+
+it("still rejects flow beyond the pipeline window (the >150s tail is genuinely stale)", async () => {
+  // Companion guard: widening for pipeline latency must not become an
+  // unbounded persistence window. Observed live max was 163s; anything
+  // past the window describes a minute the market already left behind.
+  const c = candidate("GenuinelyStale");
+  const p = presence(c.tokenMint, Date.now() - 150_000);
+  const proposals = await eysPlugin.discover({ candidates: [c], gmgnByMint: new Map([[c.tokenMint, p]]) });
+  expect(proposals).toEqual([]);
+  expect(mocks.recordDecision.mock.calls[0]?.[3]).toBe("eys_flow_stale");
 });

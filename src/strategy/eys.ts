@@ -437,9 +437,9 @@ export const eysPlugin: StrategyPlugin = {
     if (!cfg.enabled) return [];
 
     // Exact candidates may be absent from trending, or their 1m evidence may
-    // have expired during scanner enrichment (a ~65s cycle outruns the 60s
-    // freshness window). Refresh a budgeted, prioritised set of unique mints
-    // through the existing provider path; never re-stamp an old row.
+    // sit near the window edge and cross it while the batch refresh await runs
+    // (every candidate waits it out). Refresh a budgeted, prioritised set of
+    // unique mints through the existing provider path; never re-stamp an old row.
     const nowMs = Date.now();
     const recentObservedAtByPool = new Map<string, number>();
     const observationCutoff = nowMs - GMGN_ONE_MINUTE_FRESHNESS_MS;

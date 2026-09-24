@@ -237,7 +237,7 @@ describe("Eys one-minute GMGN provenance", () => {
     expect(gmgnOneMinuteFlow(presence, now, 10_000)).toBeNull();
     const stale = {
       ...presence,
-      fetchedAtMsByInterval: new Map([["1m", now - 61_000], ["5m", now - 30_000]]),
+      fetchedAtMsByInterval: new Map([["1m", now - 121_000], ["5m", now - 30_000]]),
     };
     expect(gmgnOneMinuteFlow(stale, now)).toBeNull();
   });

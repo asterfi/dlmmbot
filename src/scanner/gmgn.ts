@@ -65,8 +65,16 @@ export interface GmgnOneMinuteFlow {
   observedAtMs: number;
 }
 
-/** Eys consumes the current GMGN 1m fetch cadence, not a persistence window. */
-export const GMGN_ONE_MINUTE_FRESHNESS_MS = 60_000;
+/**
+ * One GMGN 1m cadence PLUS our own pipeline latency. Measured live 2026-09-24
+ * over 300 eys_flow_stale rejects: flow age AT EVALUATION ran p50=74s,
+ * p90=101s, max=163s — a ~65s scan cycle + the tokenInfoByMint await + queue
+ * consumed the old 60s window before evaluateEys ever ran, discarding healthy
+ * [1m,5m,1h] evidence (66.9% of rejects had refreshRequested=false). 120s
+ * covers measured p90 with margin; the >150s tail stays rejected as evidence
+ * the market already left behind.
+ */
+export const GMGN_ONE_MINUTE_FRESHNESS_MS = 120_000;
 
 export function gmgnOneMinuteFlow(
   presence: GmgnPresence | undefined,

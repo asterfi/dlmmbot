@@ -8,7 +8,7 @@ import type { Candidate } from "../types.js";
 import type { GmgnPresence, GmgnTrendingToken } from "../scanner/gmgn.js";
 
 const gmgnMocks = vi.hoisted(() => ({
-  GMGN_ONE_MINUTE_FRESHNESS_MS: 60_000,
+  GMGN_ONE_MINUTE_FRESHNESS_MS: 120_000,
   gmgnOneMinuteFlow: vi.fn(),
   mergeGmgnPresenceMaps: vi.fn(),
   tokenInfoByMint: vi.fn(),
@@ -177,7 +177,7 @@ describe("hosted Eys strategy boundary", () => {
     const evidence = {
       exactPool: pool.address,
       flowUsdPerMin: 110_000,
-      flowObservedAtMs: Date.now() - 61_000,
+      flowObservedAtMs: Date.now() - 121_000,
       flowSource: "gmgn-market-trending" as const,
       flowCadence: "1m" as const,
       gmgnIntervals: ["1m", "5m", "1h"],
