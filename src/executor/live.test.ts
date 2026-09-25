@@ -373,6 +373,32 @@ describe("allocateBatchReclaim — per-account attribution of a multi-account ba
     expect(sum).toBeCloseTo(DELTA - 1_481_009.048368954 / 1e9, 9);
   });
 
+  // pos#41 OP: the exit swap routed through USDC and pumpCmXq hop mints and
+  // created a fresh ATA for each (1,488,440 + 1,539,240 lamports). Those mints
+  // are not position mints, so positionIdOf() returns null — yet the wallet
+  // paid that rent inside the swap and received it back in the reclaim. With
+  // ONE owning position in the batch the creator is not a guess: there is only
+  // one possible owner, so the share must be credited or the book records a
+  // loss the chain never took.
+  it("attributes a hop-mint ATA's share when the batch has one owning position", () => {
+    const out = allocateBatchReclaim(batch([5, null, null]), DELTA)!;
+
+    expect(out).toHaveLength(3);
+    expect(out.every((a) => a.positionId === 5)).toBe(true);
+    // What the book credits must EQUAL what the wallet received.
+    const sum = out.reduce((s, a) => a.creditSol + s, 0);
+    expect(sum).toBeCloseTo(DELTA, 12);
+  });
+
+  // Two distinct owning positions in one batch makes the unowned account's
+  // creator genuinely unknowable — it still goes uncredited rather than guessed.
+  it("still refuses to guess when one batch spans two owning positions", () => {
+    const out = allocateBatchReclaim(batch([5, null, 4]), DELTA)!;
+    expect(out.map((a) => a.positionId)).toEqual([5, 4]);
+    const sum = out.reduce((s, a) => a.creditSol + s, 0);
+    expect(sum).toBeLessThan(DELTA);
+  });
+
   // An unknown delta must not be invented from lamports alone: the fee is only
   // knowable from the landed tx.
   it("returns null when the wallet delta is unknown", () => {

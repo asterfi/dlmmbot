@@ -259,8 +259,22 @@ export function allocateBatchReclaim(
     assigned += share;
   });
 
+  // An account we could not map to a position is typically a hop-mint ATA
+  // (USDC, pumpCmXq) that an exit swap created in order to route: the wallet
+  // pays that rent inside the swap and receives it back in this reclaim, so
+  // leaving its share uncredited books a loss the chain never took (pos#41 OP
+  // credited 0.001487 of a 0.004516 reclaim). It has exactly one possible
+  // owner only when every account we COULD resolve belongs to the same
+  // position — attribution is then determined, not guessed. Two or more
+  // distinct owners in one batch leave the creator unknowable, so those shares
+  // still go uncredited rather than claimed by the wrong position.
+  const owners = new Set(
+    accounts.map((a) => a.positionId).filter((p): p is number => p !== null),
+  );
+  const fallback = owners.size === 1 ? [...owners][0]! : null;
+
   return accounts
-    .map((a, i) => ({ positionId: a.positionId, creditSol: shares[i]! }))
+    .map((a, i) => ({ positionId: a.positionId ?? fallback, creditSol: shares[i]! }))
     .filter((s): s is { positionId: number; creditSol: number } => s.positionId !== null);
 }
 
