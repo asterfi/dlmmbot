@@ -15,6 +15,15 @@ export interface StrategyEvidence {
   flowCadence: "1m" | null;
   gmgnIntervals: string[];
   priceChangePct1h: number | null;
+  /** Present only when Laya overruled a selection gate at discovery time. */
+  layaSelectionOverride?: {
+    gate: string;
+    atMs: number;
+    approved: boolean;
+    approvalProbability: number | null;
+    modelStage: string | null;
+    layaReason: string | null;
+  };
 }
 
 export interface StrategyProposal {

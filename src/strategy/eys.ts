@@ -65,6 +65,8 @@ function integerAtLeast(value: unknown, fallback: number, minimum: number): numb
 
 const EYS_REJECTION_DEDUPE_MS = 5 * 60_000;
 const eysRejectionLoggedAt = new Map<string, number>();
+/** mint:pool -> last selection-override consult, so one reject can't burn a scan. */
+const selectionOverrideConsultedAt = new Map<string, number>();
 
 function recordEysRejection(candidate: Candidate, reason: string | undefined, evidence: unknown): void {
   const gate = `eys_${reason ?? "rejected"}`;
@@ -112,6 +114,231 @@ function settings() {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+/**
+ * Selection gates Laya may overrule when `[laya] selection_authority > 0`.
+ *
+ * FAIL-CLOSED BY CONSTRUCTION: only Eys' *taste* gates are listed — they say
+ * "this setup isn't good enough for the strategy", never "this trade is
+ * unsafe". Everything absent stays rule-based and can never be overruled here:
+ * pool identity (`exact_pool_mismatch`), missing or stale flow evidence
+ * (`flow_stale`, `flow_unavailable`), every scanner/vet/entry-score/sizing/follow
+ * gate, and the whole exit ladder. A reason this set does not contain is
+ * therefore treated as non-overridable too — unknown never unlocks.
+ */
+const SELECTION_OVERRIDABLE: ReadonlySet<string> = new Set([
+  "flow_floor",
+  "market_cap_floor",
+  "pool_fees_below_min",
+  "fee_vol_ratio_below_min",
+  "fee_yield_below_floor",
+  "pool_vol_below_floor",
+]);
+
+/** Stage values plan() can build for a first (anchor) entry. */
+const ANCHOR_COMPATIBLE_STAGES: ReadonlySet<LayaStage> = new Set(["anchor", "tight", "breakout"]);
+
+/**
+ * Single source of truth for stage compatibility, shared by the modelGate veto
+ * and the selection override. The 2026-09-25 probe relaxed anchor entries to
+ * tight/breakout (168/215 historical mismatches were those two) and left
+ * dump-bonus vetoed: it is the one shape plan() cannot build for a first entry.
+ */
+function stageMismatchFor(
+  proposalStage: string,
+  modelStage: LayaStage | null | undefined,
+): boolean {
+  if (modelStage == null) return false;
+  const expected = proposalStage === "token" ? "breakout" : proposalStage;
+  return proposalStage === "anchor"
+    ? !ANCHOR_COMPATIBLE_STAGES.has(modelStage)
+    : modelStage !== expected;
+}
+
+/** Per-discovery-run consult budget. 0/absent = selection stays rule-based. */
+function selectionAuthorityBudget(): number {
+  const value = config().laya?.selection_authority;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.trunc(value)
+    : 0;
+}
+
+/**
+ * The metric that failed and the limit it missed, mirroring evaluateEys()
+ * expression-for-expression so Laya judges the same numbers the rule did.
+ */
+function selectionGateContext(
+  reason: string,
+  candidate: Candidate,
+  evidence: StrategyEvidence,
+): Record<string, unknown> {
+  const cfg = settings();
+  const pool = candidate.pool;
+  const feesUsd24h = (pool.tvlUsd * pool.feeTvl24hPct) / 100;
+  const observed: Record<string, { observed: number | null; limit: number }> = {
+    flow_floor: { observed: evidence.flowUsdPerMin, limit: cfg.flow_floor_usd },
+    market_cap_floor: { observed: pool.marketCapUsd, limit: cfg.market_cap_floor_usd },
+    pool_fees_below_min: { observed: feesUsd24h, limit: cfg.min_pool_fees_usd },
+    fee_vol_ratio_below_min: {
+      observed: pool.vol24hUsd > 0 ? feesUsd24h / pool.vol24hUsd : null,
+      limit: cfg.min_fee_vol_ratio,
+    },
+    fee_yield_below_floor: { observed: pool.feeTvl30mPct * 48, limit: cfg.min_fee_yield_daily_pct },
+    pool_vol_below_floor: { observed: pool.vol30mUsd, limit: cfg.min_pool_vol_30m_usd },
+  };
+  return { overruledGate: reason, ...(observed[reason] ?? {}) };
+}
+
+/** Why we did (or did not) put a rule-rejected candidate in front of Laya. */
+interface SelectionOverrideOutcome {
+  consulted: boolean;
+  proposal: StrategyProposal | null;
+  detail: {
+    gate: string;
+    atMs: number;
+    approved: boolean;
+    approvalProbability: number | null;
+    modelStage: string | null;
+    layaReason: string | null;
+    latencyMs: number | null;
+    error?: string;
+  };
+}
+
+/**
+ * Discovery-phase picture of a rule-rejected candidate.
+ *
+ * Vet, blended score, bankroll and range are all built AFTER discovery, so
+ * those sections say so instead of carrying placeholder numbers the model
+ * could mistake for measurements. Field layout mirrors modelSnapshot() so the
+ * override consult and the later modelGate consult ask about the same shape.
+ *
+ * Return type is structural rather than LayaRequestSnapshot: that interface
+ * omits `proposal`, yet modelSnapshot has always sent it and the model reads
+ * stage/fundingSide/shape from state.proposal.
+ */
+function selectionSnapshot(input: {
+  candidate: Candidate;
+  proposal: StrategyProposal;
+  reason: string;
+  evidence: StrategyEvidence;
+}) {
+  return {
+    strategy: "eys" as const,
+    discovery: {
+      phase: "selection_override",
+      ...selectionGateContext(input.reason, input.candidate, input.evidence),
+      note: "Rule gates rejected this candidate on selection taste alone. Vetting, entry score, sizing and the exit ladder still apply if you approve.",
+    },
+    candidate: asRecord({
+      mint: input.candidate.tokenMint,
+      symbol: input.candidate.symbol,
+      score: input.candidate.score,
+      scoreParts: input.candidate.scoreParts,
+      pool: input.candidate.pool,
+    }),
+    proposal: {
+      stage: input.proposal.stage,
+      fundingSide: input.proposal.fundingSide,
+      shape: input.proposal.shape,
+    },
+    evidence: asRecord(input.evidence),
+    hardGates: {
+      candidateGateFailures: input.candidate.gateFailures,
+      vetting: { phase: "not_run_yet" },
+    },
+    risk: {
+      score: input.candidate.score,
+      requestedSizeSol: input.proposal.requestedSizeSol,
+      bankroll: { phase: "not_run_yet" },
+      positionContext: {},
+    },
+    range: { plan: { phase: "not_run_yet" }, quote: {}, rent: {} },
+  };
+}
+
+/**
+ * Ask Laya to overrule a rule-based selection rejection.
+ *
+ * Consults are bounded twice: by the per-run budget and by a 5-minute
+ * mint:pool dedupe, so one persistent reject cannot burn the scan on repeated
+ * 1-9s round trips. Any non-consult path returns `consulted: false` and the
+ * caller falls back to the ordinary rule-based rejection. Approval still has
+ * to survive vetting, entry score, sizing and the exit ladder downstream —
+ * this widens WHO GETS JUDGED, not what has to be safe.
+ */
+async function selectionOverride(input: {
+  candidate: Candidate;
+  evidence: StrategyEvidence;
+  stage: EysStage;
+  reason: string;
+  proposal: StrategyProposal;
+  budget: { left: number };
+}): Promise<SelectionOverrideOutcome> {
+  const decline = (detail: Partial<SelectionOverrideOutcome["detail"]>): SelectionOverrideOutcome => ({
+    consulted: false,
+    proposal: null,
+    detail: { gate: input.reason, atMs: Date.now(), approved: false,
+      approvalProbability: null, modelStage: null, layaReason: null, latencyMs: null, ...detail },
+  });
+
+  const mode = layaMode();
+  if (mode !== "gate") return decline({ layaReason: "mode_not_gate" });
+  if (!SELECTION_OVERRIDABLE.has(input.reason)) return decline({ layaReason: "gate_not_overridable" });
+  if (selectionAuthorityBudget() <= 0) return decline({ layaReason: "budget_disabled" });
+  if (input.budget.left <= 0) return decline({ layaReason: "budget_exhausted" });
+
+  // Same mint:pool consulted recently? Skip the model, keep the rule verdict.
+  const dedupeKey = `${input.candidate.tokenMint}:${input.candidate.pool.address}`;
+  const nowMs = Date.now();
+  const previous = selectionOverrideConsultedAt.get(dedupeKey);
+  if (previous !== undefined && nowMs - previous < EYS_REJECTION_DEDUPE_MS) {
+    return decline({ layaReason: "recently_consulted" });
+  }
+  selectionOverrideConsultedAt.set(dedupeKey, nowMs);
+  if (selectionOverrideConsultedAt.size > 4096) {
+    for (const [key, ts] of selectionOverrideConsultedAt) {
+      if (nowMs - ts >= EYS_REJECTION_DEDUPE_MS) selectionOverrideConsultedAt.delete(key);
+    }
+  }
+  input.budget.left -= 1;
+
+  const snapshot = selectionSnapshot({
+    candidate: input.candidate,
+    proposal: input.proposal,
+    reason: input.reason,
+    evidence: input.evidence,
+  });
+
+  const cfg = config().laya;
+  const evaluation = await requestLaya(snapshot);
+  const gate = decideLayaGate(mode, evaluation.result, cfg.min_approval_probability);
+  const modelStage = evaluation.result.stage ?? null;
+  const mismatch = stageMismatchFor(input.stage, modelStage);
+  const approved = gate.accepted && !mismatch;
+
+  const detail: SelectionOverrideOutcome["detail"] = {
+    gate: input.reason,
+    atMs: nowMs,
+    approved,
+    approvalProbability: evaluation.result.approvalProbability ?? null,
+    modelStage,
+    layaReason: approved ? null : (gate.reason ?? (mismatch ? "laya_stage_mismatch" : "laya_rejected")),
+    latencyMs: evaluation.latencyMs,
+    ...(evaluation.error ? { error: evaluation.error } : {}),
+  };
+
+  if (!approved) return { consulted: true, proposal: null, detail };
+
+  return {
+    consulted: true,
+    proposal: {
+      ...input.proposal,
+      evidence: { ...input.evidence, layaSelectionOverride: detail },
+    },
+    detail,
+  };
 }
 
 function modelSnapshot(input: StrategyModelInput) {
@@ -476,6 +703,9 @@ export const eysPlugin: StrategyPlugin = {
       }
     }
     const gmgnByMint = mergeGmgnPresenceMaps(context.gmgnByMint, direct);
+    // One consult budget per discovery run: bounds scan latency (each Laya call
+    // costs 1-9s) and how many rule verdicts a single cycle may hand over.
+    const selectionBudget = { left: selectionAuthorityBudget() };
     const evaluated = await mapLimit(context.candidates, async (candidate): Promise<StrategyProposal | null> => {
       const presence = gmgnByMint.get(candidate.tokenMint);
       const flow = gmgnOneMinuteFlow(presence, Date.now(), GMGN_ONE_MINUTE_FRESHNESS_MS);
@@ -524,6 +754,37 @@ export const eysPlugin: StrategyPlugin = {
         // logs reported `flow-qualified mints 2-3`/cycle while the ledger showed
         // 0 eys_flow_floor rows, hiding the actual bottleneck (fresh flow below
         // the floor) behind an apparently clean "0 past flow".
+        const reason = decision.reason ?? "rejected";
+        const override = await selectionOverride({
+          candidate,
+          evidence,
+          stage,
+          reason,
+          proposal: {
+            strategyId: "eys",
+            candidate,
+            stage,
+            fundingSide: "sol",
+            shape: "spot",
+            requestedSizeSol: cfg.entry_sol,
+            evidence,
+          },
+          budget: selectionBudget,
+        });
+        if (override.proposal) return override.proposal;
+        if (override.consulted) {
+          // The model saw it and declined to overrule: the rule's rejection
+          // stands, recorded with the consult outcome for measurement.
+          recordDecision(
+            candidate.tokenMint,
+            candidate.pool.address,
+            "skipped",
+            `eys_${reason}`,
+            candidate.score,
+            { strategy: "eys", symbol: candidate.symbol, evidence, layaSelectionOverride: override.detail },
+          );
+          return null;
+        }
         recordEysRejection(candidate, decision.reason, evidence);
         return null;
       }
@@ -553,7 +814,8 @@ export const eysPlugin: StrategyPlugin = {
     const evaluation = await requestLaya(snapshot);
     const gate = decideLayaGate(mode, evaluation.result, config().laya.min_approval_probability);
     const expectedStage = input.proposal.stage === "token" ? "breakout" : input.proposal.stage;
-    // Relaxed stage compatibility (source-grounded): his first entry on a
+    // Stage compatibility lives in stageMismatchFor() (shared with the
+    // selection override). Source-grounded relaxation: his first entry on a
     // fresh token is the default SOL anchor regardless of the token's recent
     // motion — tight / breakout label upward motion he ENTERS on ("strong
     // upward spikes"), not a different geometry. Only dump-bonus implies a
@@ -561,12 +823,8 @@ export const eysPlugin: StrategyPlugin = {
     // near ATH), so it alone remains a mismatch. Probe: 168/215 historical
     // laya_stage_mismatch rows were tight/breakout and now clear; 47
     // dump-bonus rows stay vetoed.
-    const anchorCompatibleStages: ReadonlySet<LayaStage> = new Set(["anchor", "tight", "breakout"]);
     const modelStage = evaluation.result.stage;
-    const stageMismatch = modelStage != null &&
-      (input.proposal.stage === "anchor"
-        ? !anchorCompatibleStages.has(modelStage)
-        : modelStage !== expectedStage);
+    const stageMismatch = stageMismatchFor(input.proposal.stage, modelStage);
     const detail = {
       mode,
       attempted: evaluation.attempted,
@@ -606,4 +864,5 @@ export const eysPlugin: StrategyPlugin = {
 
 export function _resetEysRuntimeForTests(): void {
   resetEysObservationStoreForTests();
+  selectionOverrideConsultedAt.clear();
 }

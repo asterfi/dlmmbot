@@ -108,6 +108,13 @@ export interface LayaConfig {
   base_url: string;
   timeout_ms: number;
   min_approval_probability: number;
+  /**
+   * Per-discovery-run budget of rule-rejected candidates Laya may be shown and
+   * allowed to overrule. Selection taste gates only (flow floor, fee/vol/mcap
+   * floors) — vetting, entry score, sizing and the exit ladder are untouched.
+   * 0 or absent keeps selection rule-based, which is the historical behavior.
+   */
+  selection_authority?: number;
 }
 
 export interface Config {
