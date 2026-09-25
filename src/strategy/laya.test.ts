@@ -88,12 +88,19 @@ describe("Laya decision boundary", () => {
 });
 
 describe("Laya timeout budget", () => {
-  it("honours configured latency up to the 6s real-payload ceiling", () => {
+  it("honours configured latency up to the 9s real-payload ceiling", () => {
     // Measured 2026-09-23: full modelSnapshot on the int8 sidecar answers in
     // 4.7-5.1s; the old 2s hard cap aborted every real proposal fail-closed
     // (3x strategy_laya_unavailable, sidecar never got to answer).
+    //
+    // Re-measured 2026-09-25 over 423 decisions: p50 5412ms, p90 6001ms,
+    // p95 6003ms, 47 decisions at >=6000ms. The model outgrew the 6s ceiling
+    // it was raised to cover, so 11% of decisions finished within 15ms of the
+    // abort timer — survived only by event-loop jitter, with zero headroom.
+    // Cap moves 6s -> 9s; failure path stays fail-closed either way.
+    expect(layaTimeoutMs(9_000)).toBe(9_000);
+    expect(layaTimeoutMs(12_000)).toBe(9_000);
     expect(layaTimeoutMs(6_000)).toBe(6_000);
-    expect(layaTimeoutMs(9_999)).toBe(6_000);
     expect(layaTimeoutMs(3_000)).toBe(3_000);
   });
 

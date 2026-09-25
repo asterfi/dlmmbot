@@ -140,10 +140,19 @@ export function buildLayaRequest(snapshot: LayaRequestSnapshot): Record<string, 
  * 4.7-5.1s on the int8 ONNX sidecar, so the old 2s hard cap aborted every
  * real proposal fail-closed (3x strategy_laya_unavailable) before the model
  * could answer. Default stays 750ms; floor stays 50ms.
+ *
+ * Ceiling raised 6s -> 9s (2026-09-25): re-measured over 423 live decisions
+ * the model had outgrown the 6s it was raised to cover — p50 5412ms, p90
+ * 6001ms, p95 6003ms, with 47 decisions landing at >=6000ms. `latencyMs` is
+ * stamped at return while the abort timer starts at function entry, so those
+ * 47 cleared the bar only because Node delivered the timer a few ms late;
+ * one scheduling tick the other way and they record `laya_unavailable` and
+ * the entry is dropped fail-closed. The cost of the extra 3s is paid only on
+ * a path that already fails, so it buys real headroom for nothing.
  */
 export function layaTimeoutMs(configured: unknown): number {
   return typeof configured === "number" && Number.isFinite(configured)
-    ? Math.min(6_000, Math.max(50, configured))
+    ? Math.min(9_000, Math.max(50, configured))
     : 750;
 }
 
