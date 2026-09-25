@@ -11,6 +11,12 @@ coverage/
 HALT
 PAUSE
 secrets/
+# Live credential material and editor/tool backups — never committable.
+# credentials/ holds live.env; *.bak* are pre-change safety copies.
+credentials/
+*.bak
+*.bak-*
+run-service.sh
 .claude/
 tmp-*
 
