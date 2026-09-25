@@ -1603,8 +1603,12 @@ export class LiveExecutor implements Executor {
    * zap-outs are best-effort — a failed swap strands tokens in the wallet with
    * nothing else ever looking at them again. Runs from the manager loop (same
    * single-threaded tick as closes, so it cannot race an in-flight exit).
-   * Unknown mints (airdrop spam) are never touched; dust below `minSol` is
-   * left alone so tx fees don't eat the proceeds.
+   * A NON-zero balance in an unknown mint (airdrop spam) is never touched;
+   * dust below `minSol` is left alone so tx fees don't eat the proceeds.
+   * An EMPTY account is different: it holds only rent, so it is reclaimed for
+   * any mint, not just traded ones — an exit swap routed through an untraded
+   * hop mint used to strand that rent forever, paid out of the swap's own
+   * proceeds (the exit then read -88% against a quote the chain paid in full).
    */
   async sweepResiduals(minSol: number): Promise<Array<{ mint: string; symbol: string; soldSol: number; positionId: number | null }>> {
     const db = getDb();
@@ -1630,19 +1634,25 @@ export class LiveExecutor implements Executor {
       const accs = await this.connection.getParsedTokenAccountsByOwner(this.wallet.publicKey, { programId });
       for (const acc of accs.value) {
         const info = acc.account.data.parsed.info as { mint: string; tokenAmount: { amount: string } };
-        if (!known.has(info.mint)) continue;
         // An emptied account still holds its 0.00204 SOL of rent, and nothing
         // in this codebase ever reclaimed it. The signature is exact in our own
         // ledger: a flat round trip on a NEW mint measured -0.00212 (Bark pos#13,
         // entry price == exit price) while a flat round trip reusing an existing
         // account measured -0.00005 (BUTTHOLE pos#20). The rent WAS the loss.
         if (info.tokenAmount.amount === "0") {
-          if (this.mintIsIdle(info.mint)) {
+          // wSOL is exempt: unwrapWsol() drains it but leaves the ATA standing,
+          // and the next zap-path swap recreates it — closing it would re-pay
+          // this rent out of that swap's proceeds on every sweep.
+          if (info.mint !== SOL_MINT && this.mintIsIdle(info.mint)) {
             const { symbol } = symFor(info.mint);
             closable.push({ pubkey: acc.pubkey, programId, mint: info.mint, symbol });
           }
           continue;
         }
+        // Only now gate the SELL: a non-zero balance in an untraded mint is
+        // airdrop spam, so it is never swapped — but its rent, if any, was
+        // already handled by the empty branch above.
+        if (!known.has(info.mint)) continue;
         const raw = BigInt(info.tokenAmount.amount);
         const quoted = await quoteToSolLamports(info.mint, raw);
         if (quoted === null || quoted < minSol * 1e9) continue;
