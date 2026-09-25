@@ -329,6 +329,15 @@ async function selectionOverride(input: {
     ...(evaluation.error ? { error: evaluation.error } : {}),
   };
 
+  // The only line that makes this authority measurable: approvals never write
+  // a decisions row (a proposal that proceeds isn't a skip), so grep this.
+  console.log(
+    `[laya] selection_override consult gate=${input.reason} approved=${approved}` +
+      ` p=${detail.approvalProbability ?? "na"} stage=${modelStage ?? "na"}` +
+      ` reason=${detail.layaReason ?? "-"} latency=${evaluation.latencyMs}ms` +
+      ` mint=${input.candidate.tokenMint.slice(0, 8)} budget_left=${input.budget.left}`,
+  );
+
   if (!approved) return { consulted: true, proposal: null, detail };
 
   return {
