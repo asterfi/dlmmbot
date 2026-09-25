@@ -40,6 +40,7 @@ Datapi sweep; it does not alter core mode or bypass any safety/execution gate.
 | `gmgn_pool_resolution_max_mints` | `12` | Maximum fresh flow-qualified GMGN mints resolved through Datapi per scan; Eys `1m` intake also uses bounded market-cap slices including `$1M–$2M`; failed/malformed lookups are omitted |
 | `min_pool_fees_usd` | `1700` | Eys fee floor: ≥10 SOL/day in pool fees (~$1,700) |
 | `min_fee_vol_ratio` | `0.0005` | Eys fake-volume check: minimum 24h fees ÷ 24h volume (rejects `fee_vol_ratio_below_min`). At p01 of fee-floor passers, trims only the degenerate tail; `vol24h = 0` skips the check — unknown is never treated as fake |
+| `min_pool_vol_30m_usd` | `5000` | Eys pool-volume floor (rejects `pool_vol_below_floor`). Self-consistency with the P2 rotation exit, which leaves a meme position once pool `vol30m` drops under `rotation_vol_30m_min_usd`: an entry already under that floor is born exit-eligible and churns out minutes later having paid rent plus transaction fees for nothing. Keep equal to `[manage] rotation_vol_30m_min_usd` |
 
 ## `[discovery]` — optional exact-pool event intake
 

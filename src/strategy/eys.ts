@@ -47,6 +47,11 @@ const DEFAULT_EYS = {
   min_fee_vol_ratio: 0.0005,
   // Entry floor == meme rotation exit floor: feeTvl30m × 48 ≥ 5%/d.
   min_fee_yield_daily_pct: 5,
+  // Entry floor == meme rotation exit floor [manage] rotation_vol_30m_min_usd.
+  // Never admit a pool whose 30m volume is already under the floor the P2
+  // rotation exit uses: that position is born exit-eligible and churns out
+  // minutes later having paid rent plus two transaction fees for nothing.
+  min_pool_vol_30m_usd: 5_000,
 };
 
 function finiteAtLeast(value: unknown, fallback: number, minimum: number): number {
@@ -92,6 +97,7 @@ function settings() {
     min_pool_fees_usd: finiteAtLeast(raw.min_pool_fees_usd, DEFAULT_EYS.min_pool_fees_usd, 0),
     min_fee_vol_ratio: finiteAtLeast(raw.min_fee_vol_ratio, DEFAULT_EYS.min_fee_vol_ratio, 0),
     min_fee_yield_daily_pct: finiteAtLeast(raw.min_fee_yield_daily_pct, DEFAULT_EYS.min_fee_yield_daily_pct, 0),
+    min_pool_vol_30m_usd: finiteAtLeast(raw.min_pool_vol_30m_usd, DEFAULT_EYS.min_pool_vol_30m_usd, 0),
     entry_sol: finiteAtLeast(raw.entry_sol, DEFAULT_EYS.entry_sol, 0.000001),
     anchor_range_below_pct: finiteAtLeast(raw.anchor_range_below_pct, DEFAULT_EYS.anchor_range_below_pct, 0),
     tight_price_change_pct: finiteAtLeast(raw.tight_price_change_pct, DEFAULT_EYS.tight_price_change_pct, 0),
@@ -253,6 +259,12 @@ export function evaluateEys(
   if (vol24hUsd > 0 && !(feesUsd24h / vol24hUsd >= cfg.min_fee_vol_ratio)) return { accepted: false, reason: "fee_vol_ratio_below_min" };
   const feeYieldDailyPct = candidate.pool.feeTvl30mPct * 48;
   if (!(feeYieldDailyPct >= cfg.min_fee_yield_daily_pct)) return { accepted: false, reason: "fee_yield_below_floor" };
+  // Self-consistency with the exit ladder, same argument as the fee-yield
+  // floor above: P2 rotation exits once pool vol30m drops under $5,000 (3
+  // consecutive polls), so admitting under that floor opens a position that is
+  // already exit-eligible. Measured on the first 30 live entries, 8 entered
+  // with vol30m under the floor and 6 of those churned out inside 5 minutes.
+  if (!(candidate.pool.vol30mUsd >= cfg.min_pool_vol_30m_usd)) return { accepted: false, reason: "pool_vol_below_floor" };
   if (stage !== "anchor") return { accepted: false, reason: "child_stage_unsupported" };
   return { accepted: true };
 }

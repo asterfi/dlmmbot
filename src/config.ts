@@ -88,6 +88,14 @@ export interface EysConfig {
    */
   min_fee_yield_daily_pct?: number;
   /**
+   * Self-consistency with the P2 rotation exit: never enter a pool whose 30m
+   * volume is already under [manage] rotation_vol_30m_min_usd (5000), because
+   * that position is born exit-eligible and churns out minutes later paying
+   * rent plus two transaction fees. 8 of the first 30 live entries did this;
+   * 6 exited under 5 minutes.
+   */
+  min_pool_vol_30m_usd?: number;
+  /**
    * "Profit is profit": close once MTM (incl. unclaimed fees) reaches
    * entry × (1 + pct/100). 0 disables; applies only to strategy mode "eys".
    */

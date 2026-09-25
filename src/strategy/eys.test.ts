@@ -236,6 +236,27 @@ describe("hosted Eys strategy boundary", () => {
     expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "fee_yield_below_floor" });
   });
 
+  it("never enters a pool whose 30m volume is already under the rotation exit floor", () => {
+    // Self-consistency, the same argument as min_fee_yield_daily_pct: P2
+    // rotation exits when pool vol30m drops under $5,000 after 3 polls, so
+    // admitting under that floor opens a position that is born exit-eligible.
+    // Measured on the first 30 live entries: 8 entered with vol30m under the
+    // floor and 6 of those churned out inside 5 minutes, paying rent plus two
+    // transaction fees for nothing (combined −0.00333 SOL).
+    const pool = makePool({ vol30mUsd: 3_000 });
+    const candidate: Candidate = { pool, tokenMint: pool.mintX, symbol: "TST", score: 90, scoreParts: {}, gateFailures: [] };
+    const evidence = {
+      exactPool: pool.address,
+      flowUsdPerMin: 110_000,
+      flowObservedAtMs: Date.now(),
+      flowSource: "gmgn-market-trending" as const,
+      flowCadence: "1m" as const,
+      gmgnIntervals: ["1m"],
+      priceChangePct1h: 2,
+    };
+    expect(evaluateEys(candidate, evidence, "anchor")).toEqual({ accepted: false, reason: "pool_vol_below_floor" });
+  });
+
   it("rejects a pool whose fees are negligible against 24h volume — Eys' fake-volume ratio check", () => {
     // Eys: "check fees against volume to detect fake volume." $2,000 fees on
     // $10M 24h volume = ratio 0.0002 — busy volume, no real fee take. Probe of

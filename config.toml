@@ -23,6 +23,12 @@ gmgn_pool_resolution_max_mints = 12
 min_pool_fees_usd = 1700
 min_fee_vol_ratio = 0.0005
 min_fee_yield_daily_pct = 5
+# Volume half of the same "never enter below the exit floor" rule: P2 rotation
+# exits a meme position once pool vol30m < $5,000 (3 consecutive polls), so an
+# entry already under that floor is born exit-eligible and churns out minutes
+# later having paid rent plus two transaction fees. Keep equal to [manage]
+# rotation_vol_30m_min_usd.
+min_pool_vol_30m_usd = 5000
 # "Profit is profit": close an Eys position at +2.5% MTM (covers ~1.1% measured
 # round-trip friction). 0 disables.
 green_take_profit_pct = 2.5
