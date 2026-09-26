@@ -106,6 +106,20 @@ const DEFAULT_BAN_MS = 300_000;
 /** Rolling cap — optional/heavy routes shed first (two bots on one key need headroom). */
 const SPEND_WINDOW_MS = 60_000;
 export const SPEND_WINDOW_MAX = 36;
+/**
+ * Reserved floor for the trending lane in each spend window. Non-trending
+ * routes (token info refreshes, security/trader enrichment, track, holder
+ * polls) may spend at most `budget - TRENDING_RESERVE_WEIGHT` per window, so
+ * the discovery heartbeat cannot be starved by re-validation traffic — the
+ * measured failure mode: direct-info calls filled the window and the next
+ * `market trending` batch answered "gmgn budget exhausted", dropping whole
+ * mcap bands and with them the presence map every flow gate reads.
+ * 16 = two weight-1 batches (6 mcap bands + 5m + 1h = 8 calls each) — one at
+ * scan start, one from the manage-path cache miss — the measured bunching
+ * bound. token_info is allowed to starve; trending is not. SPEND_WINDOW_MAX is
+ * untouched: this reorders the existing budget, it never adds traffic.
+ */
+export const TRENDING_RESERVE_WEIGHT = 16;
 /** Start below full bucket so a cold boot cannot burst 20 weight-1 calls. */
 const BUCKET_START_TOKENS = 8;
 
@@ -124,6 +138,7 @@ const THROTTLE_DECAY_MS = 15 * 60_000;
 let banLoggedUntil = 0;
 let spendWindowStart = 0;
 let spendWindowWeight = 0;
+let spendWindowRestWeight = 0;
 let throttleLevel = 0;
 let throttleUpdatedAt = 0;
 let stateLoaded = false;
@@ -216,6 +231,13 @@ export function gmgnBucketId(args: string[]): GmgnBucketId {
   return "track";
 }
 
+/** Trending discovery is the only lane with a reserved budget floor (see TRENDING_RESERVE_WEIGHT). */
+export type GmgnSpendLane = "trending" | "rest";
+
+export function gmgnSpendLane(args: string[]): GmgnSpendLane {
+  return args[0] === "market" && args[1] === "trending" ? "trending" : "rest";
+}
+
 function getBucket(id: GmgnBucketId): BucketState {
   let b = buckets.get(id);
   if (!b) {
@@ -228,16 +250,24 @@ function getBucket(id: GmgnBucketId): BucketState {
 function resetSpendWindow(now = Date.now()): void {
   spendWindowStart = now;
   spendWindowWeight = 0;
+  spendWindowRestWeight = 0;
 }
 
-function spendWindowOk(weight: number, now = Date.now()): boolean {
+/** What non-trending routes may spend per window; the remainder is the trending floor. */
+function restSpendCap(): number {
+  return Math.max(0, gmgnSpendBudget() - TRENDING_RESERVE_WEIGHT);
+}
+
+function spendWindowOk(weight: number, lane: GmgnSpendLane, now = Date.now()): boolean {
   if (now - spendWindowStart > SPEND_WINDOW_MS) resetSpendWindow(now);
-  return spendWindowWeight + weight <= gmgnSpendBudget();
+  if (spendWindowWeight + weight > gmgnSpendBudget()) return false;
+  return lane !== "rest" || spendWindowRestWeight + weight <= restSpendCap();
 }
 
-function recordSpend(weight: number, now = Date.now()): void {
+function recordSpend(weight: number, lane: GmgnSpendLane, now = Date.now()): void {
   if (now - spendWindowStart > SPEND_WINDOW_MS) resetSpendWindow(now);
   spendWindowWeight += weight;
+  if (lane === "rest") spendWindowRestWeight += weight;
 }
 
 const BAN_ERR = "gmgn cooling down after 429";
@@ -276,7 +306,9 @@ export function gmgnSpendOk(
   opts: { optional?: boolean } = {},
 ): boolean {
   if (gmgnIsBanned()) return false;
-  if (!spendWindowOk(weight)) return !opts.optional;
+  // Every pre-flighting caller is a rest-lane route; runOne derives the true
+  // lane from the args and holds the enforcement.
+  if (!spendWindowOk(weight, "rest")) return !opts.optional;
   refillBucket(bucketId);
   const pending = queue.filter((j) => gmgnBucketId(j.args) === bucketId);
   const pendingWeight = pending.reduce((n, j) => n + gmgnRouteWeight(j.args), 0);
@@ -378,9 +410,10 @@ async function waitForBucketTokens(id: GmgnBucketId, weight: number): Promise<vo
 async function runOne(args: string[]): Promise<string> {
   const bucketId = gmgnBucketId(args);
   const weight = gmgnRouteWeight(args);
+  const lane = gmgnSpendLane(args);
   if (gmgnIsBanned()) throw new Error(BAN_ERR);
 
-  while (!spendWindowOk(weight)) {
+  while (!spendWindowOk(weight, lane)) {
     const wait = spendWindowStart + SPEND_WINDOW_MS - Date.now() + 50;
     if (wait > 8_000) throw new Error("gmgn budget exhausted");
     await sleep(Math.max(50, wait));
@@ -408,7 +441,7 @@ async function runOne(args: string[]): Promise<string> {
       enterBan(parseGmgnResetMs(combined) ?? Date.now() + DEFAULT_BAN_MS);
       throw new Error("gmgn 429");
     }
-    recordSpend(weight);
+    recordSpend(weight, lane);
     return stdout;
   } catch (e) {
     const err = e as { stderr?: string; stdout?: string; message?: string };
@@ -480,6 +513,7 @@ export function _resetGmgnPaceForTests(): void {
   banLoggedUntil = 0;
   spendWindowStart = 0;
   spendWindowWeight = 0;
+  spendWindowRestWeight = 0;
   throttleLevel = 0;
   throttleUpdatedAt = 0;
   stateLoaded = true;   // tests never read or write the persisted pace file
@@ -895,6 +929,21 @@ export async function tokenInfoByMint(mints: readonly string[]): Promise<Map<str
     let fetchedAtMs = cachedFresh ? cached!.at : 0;
     if (!token) {
       if (fetchedCount >= MAX_DIRECT_INFO_CALLS) continue;
+      // Starvable by design: once the rest lane's share of the window is
+      // spent, shed before enqueueing — runOne could only answer with "gmgn
+      // budget exhausted" (an 8s stall plus one error row per mint). The
+      // trending floor keeps discovery whole; re-validation yields to it.
+      if (!gmgnSpendOk(1, "token", { optional: true })) {
+        logError({
+          source: "gmgn",
+          code: "gmgn_shed",
+          level: "warn",
+          message: "direct token info shed: spend window floor reserved for trending",
+          dedupeSec: 300,
+          detail: { route: "token info", lane: "rest" },
+        });
+        continue;
+      }
       fetchedCount++;
       try {
         const raw = await cli(["token", "info", "--chain", "sol", "--address", mint, "--raw"]);
