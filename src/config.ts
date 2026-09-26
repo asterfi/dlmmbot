@@ -115,6 +115,15 @@ export interface LayaConfig {
    * 0 or absent keeps selection rule-based, which is the historical behavior.
    */
   selection_authority?: number;
+  /**
+   * Exit-side authority: when > 0, Laya may REQUEST a close of an open
+   * position through the strategy's manage() hook. The core mark/safety
+   * pipeline still performs the close itself — a plugin may ask for a close,
+   * it never executes one, and a failed/timeout/invalid consult falls back to
+   * fully rule-based exits (fail-closed to "hold").
+   * 0 or absent keeps exits rule-based, which is the historical behavior.
+   */
+  exit_authority?: number;
 }
 
 export interface Config {

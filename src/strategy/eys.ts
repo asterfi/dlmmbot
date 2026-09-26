@@ -9,6 +9,7 @@ import type { Candidate } from "../types.js";
 import { binArraysSpanned, binIdToPrice, priceToBinId } from "../ranges/planner.js";
 import type {
   EysStage,
+  ExitIntent,
   StrategyDecision,
   StrategyDiscoveryContext,
   StrategyModelInput,
@@ -19,7 +20,18 @@ import type {
   StrategyPlugin,
   StrategyProposal,
 } from "./plugin.js";
-import { buildLayaRequest, decideLayaGate, layaMode, requestLaya, type LayaStage } from "./laya.js";
+import {
+  buildLayaRequest,
+  decideLayaExit,
+  decideLayaGate,
+  exitAuthorityEnabled,
+  layaMode,
+  requestLaya,
+  requestLayaExit,
+  type LayaStage,
+} from "./laya.js";
+import { sleeveAtEntry, type Sleeve } from "../risk/sleeve.js";
+import { manageForSleeve } from "../risk/majorsManage.js";
 
 export interface FlowObservation {
   poolAddress: string;
@@ -67,6 +79,15 @@ const EYS_REJECTION_DEDUPE_MS = 5 * 60_000;
 const eysRejectionLoggedAt = new Map<string, number>();
 /** mint:pool -> last selection-override consult, so one reject can't burn a scan. */
 const selectionOverrideConsultedAt = new Map<string, number>();
+
+/**
+ * Exit-side consult budget: at most one Laya exit consult per position per
+ * window. `manage()` runs every tick for every open position, and one consult
+ * costs ~5s p50 on the int8 sidecar, so without this the exit lane would
+ * monopolise the single-flight sidecar and stall the entry lane behind it.
+ */
+const EXIT_CONSULT_DEDUPE_MS = 10 * 60 * 1000;
+const exitConsultAt = new Map<number, number>();
 
 function recordEysRejection(candidate: Candidate, reason: string | undefined, evidence: unknown): void {
   const gate = `eys_${reason ?? "rejected"}`;
@@ -866,8 +887,113 @@ export const eysPlugin: StrategyPlugin = {
     return buildSpotRange(input);
   },
 
-  manage(_input: StrategyMarkInput): null {
-    return null;
+  /**
+   * Exit-side hook. Called every tick for every open position, BEFORE the core
+   * exit ladder.
+   *
+   * Three properties, in order of importance:
+   *
+   * 1. FAIL-CLOSED TO TODAY'S BEHAVIOR. With `[laya] exit_authority` absent or
+   *    0 — the default, and what we ship — this returns null after logging, so
+   *    the rule-based ladder stays the only thing that can close a position.
+   *    A timeout, invalid JSON or malformed answer also returns null. Nothing
+   *    about enabling the log path can move money.
+   * 2. BOUNDED COST. Consulted only when the core P2 rotation condition
+   *    (fee dead OR volume dead on meme, AND on majors) is actually present,
+   *    and at most once per position per 10 minutes, because one consult is
+   *    ~5s p50 on the single-flight sidecar.
+   * 3. THE PLUGIN NEVER EXECUTES A CLOSE. Returning an ExitIntent only asks;
+   *    loop.ts performs the close through the same core path every other exit
+   *    uses (see "A plugin may request a close, but it never performs the
+   *    close itself").
+   *
+   * Semantics when authority IS enabled: Laya may ask for the close as soon as
+   * decay is present, i.e. faster than the core's `rotation_polls` streak —
+   * that is the point of the feature (rotate out the moment decay looks real
+   * instead of waiting out the streak). It can never prevent a core exit, since
+   * advice to "hold" simply leaves the ladder in charge.
+   */
+  async manage({ position, mark }: StrategyMarkInput): Promise<ExitIntent | null> {
+    const mode = layaMode();
+    if (mode === "off") return null;
+
+    // --- 1. Is there a rotation-shaped decision to make at all? ------------
+    const sleeve = sleeveAtEntry(position);
+    const pm = manageForSleeve(sleeve);
+    const feeDaily = mark.feeTvl30mPct * 48;
+    const feeDead = feeDaily < pm.rotation_fee_daily_min_pct;
+    const volDead = mark.vol30mUsd < pm.rotation_vol_30m_min_usd;
+    // Expression mirrors loop.ts P2 exactly so the model judges the same
+    // condition the rule would act on.
+    const decayed = sleeve === "majors" ? feeDead && volDead : feeDead || volDead;
+    if (!decayed) return null;
+
+    // --- 2. Budget: one consult per position per window --------------------
+    const nowMs = Date.now();
+    const last = exitConsultAt.get(position.id);
+    if (last !== undefined && nowMs - last < EXIT_CONSULT_DEDUPE_MS) return null;
+    exitConsultAt.set(position.id, nowMs);
+
+    // --- 3. Ask with the full live context -------------------------------
+    const ageMin = Math.round((nowMs / 1000 - position.entryTs) / 60);
+    const entrySol = position.entrySol;
+    const state: Record<string, unknown> = {
+      strategy: "eys",
+      phase: "exit_review",
+      position: {
+        id: position.id,
+        symbol: position.symbol,
+        mint: position.tokenMint,
+        pool: position.poolAddress,
+        ageMin,
+        entrySol,
+        valueSol: mark.valueSol,
+        valueFrac: entrySol > 0 ? mark.valueSol / entrySol : 1,
+        price: mark.price,
+        inRange: mark.inRange,
+        aboveRange: mark.aboveRange,
+        belowRange: mark.belowRange,
+      },
+      poolHealth: {
+        sleeve,
+        feeDailyPct: feeDaily,
+        feeDead,
+        vol30mUsd: mark.vol30mUsd,
+        volDead,
+        decayed,
+        tvlUsd: mark.tvlUsd,
+        unclaimedFeesSol: mark.unclaimedFeesSol,
+      },
+      thresholds: {
+        rotation_fee_daily_min_pct: pm.rotation_fee_daily_min_pct,
+        rotation_vol_30m_min_usd: pm.rotation_vol_30m_min_usd,
+        rotation_polls: pm.rotation_polls,
+        max_age_h: pm.max_age_h,
+      },
+      note: "The rule-based exit ladder stays in charge unless [laya] exit_authority > 0.",
+    };
+
+    const evaluation = await requestLayaExit(state);
+    const advice = evaluation.advice;
+    const authority = exitAuthorityEnabled();
+    console.log(
+      `[laya] exit_advice pos#${position.id} ${position.symbol} sleeve=${sleeve} ` +
+      `action=${advice.action ?? "na"} p=${advice.probability ?? "na"} ` +
+      `conf=${advice.confidence ?? "na"} latency=${evaluation.latencyMs ?? "n/a"}ms ` +
+      `authority=${authority ? 1 : 0} reason=${advice.reason ?? "-"} ` +
+      `feeDaily=${feeDaily.toFixed(3)}% vol30m=$${mark.vol30mUsd.toFixed(0)} ageMin=${ageMin.toFixed(0)}`,
+    );
+
+    const decision = decideLayaExit(mode, authority, advice);
+    if (!decision.act) return null;
+
+    return {
+      reason: "P2_rotation",
+      code: "laya_exit",
+      detail:
+        `Laya exit advice: fee ${feeDaily.toFixed(3)}%/d, vol30m $${mark.vol30mUsd.toFixed(0)}, ` +
+        `age ${ageMin.toFixed(0)}m (p=${advice.probability ?? "na"})`,
+    };
   },
 };
 

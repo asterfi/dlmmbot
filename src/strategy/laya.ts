@@ -105,6 +105,22 @@ export function layaMode(): LayaMode {
   return mode === "shadow" || mode === "gate" ? mode : "off";
 }
 
+/** Exit-side advisory. `shouldExit` is false on every parse failure path. */
+export interface LayaExitAdvice {
+  shouldExit: boolean;
+  probability?: number;
+  confidence?: number;
+  action?: "rotate" | "hold";
+  reason?: string;
+  model?: string;
+}
+
+/** Exit-side consult budget flag. 0/absent keeps exits rule-based. */
+export function exitAuthorityEnabled(): boolean {
+  const value = config().laya?.exit_authority;
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
 export function buildLayaRequest(snapshot: LayaRequestSnapshot): Record<string, unknown> {
   return {
     model: "laya-typed-decisions",
@@ -221,6 +237,146 @@ export async function requestLaya(snapshot: LayaRequestSnapshot): Promise<LayaEv
       attempted: true,
       latencyMs: Date.now() - started,
       result: { approved: false, reason: "laya_unavailable" },
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Exit-side request: "rotate now, or hold?" instead of the entry question.
+ * Answers are keyed by question name, so this is additive to the entry path —
+ * the sidecar contract (`{model, state, questions}` -> `answers.<key>`) does
+ * not care which keys we ask for.
+ */
+export function buildExitLayaRequest(state: Record<string, unknown>): Record<string, unknown> {
+  return {
+    model: "laya-typed-decisions",
+    state,
+    questions: {
+      exit: {
+        type: "noul",
+        instructions:
+          "Given this live open position and its pool-health snapshot, is rotating out now better than holding?",
+        criteria: {
+          true: "The fee/volume decay is persistent, and holding is expected to give back principal or unclaimed fees.",
+          false: "The decay looks transient, or the position still has range and fee life worth keeping.",
+        },
+      },
+      action: {
+        type: "choice",
+        instructions: "What should happen to this open position right now?",
+        criteria: {
+          rotate: "Close it now; the decay is real and further holding is expected to lose value.",
+          hold: "Keep it open and leave the rule-based exit ladder in charge.",
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Exit-side response contract. Fail-closed by construction: every malformed,
+ * missing or ambiguous field returns `shouldExit: false`, which reads as
+ * "hold" — i.e. exactly the rule-based behavior we have today. A broken model
+ * can therefore never cause a close it did not actually ask for.
+ */
+export function parseLayaExitResponse(value: unknown): LayaExitAdvice {
+  const envelope = objectRecord(value);
+  const answers = objectRecord(envelope?.answers);
+  if (!envelope || !answers) return { shouldExit: false, reason: "laya_response_invalid_envelope" };
+
+  const exitAnswer = objectRecord(answers.exit);
+  if (!exitAnswer || exitAnswer.type !== "noul") {
+    return { shouldExit: false, reason: "laya_response_missing_exit_answer" };
+  }
+  const probability = exitAnswer.noul;
+  if (!finiteProbability(probability)) {
+    return { shouldExit: false, reason: "laya_response_invalid_exit_probability" };
+  }
+
+  const actionAnswer = objectRecord(answers.action);
+  if (!actionAnswer || actionAnswer.type !== "choice" ||
+      (actionAnswer.choice !== "rotate" && actionAnswer.choice !== "hold")) {
+    return { shouldExit: false, reason: "laya_response_missing_action_answer" };
+  }
+  const confidence = actionAnswer.confidence;
+  if (confidence !== undefined && !finiteProbability(confidence)) {
+    return { shouldExit: false, reason: "laya_response_invalid_action_confidence" };
+  }
+
+  return {
+    shouldExit: actionAnswer.choice === "rotate" && probability >= 0.5,
+    probability,
+    confidence: typeof confidence === "number" ? confidence : undefined,
+    action: actionAnswer.choice,
+    model: typeof envelope.model === "string" ? envelope.model : undefined,
+  };
+}
+
+/**
+ * Pure gate for the exit hook — deliberately mirrors `decideLayaGate`.
+ * Authority is checked independently of the model's answer so that turning
+ * `exit_authority` off is a complete, immediate rollback regardless of what
+ * the model returns.
+ */
+export function decideLayaExit(
+  mode: LayaMode,
+  exitAuthority: boolean,
+  advice: LayaExitAdvice,
+): { act: boolean; reason: string } {
+  if (mode === "off") return { act: false, reason: "laya_disabled" };
+  if (!exitAuthority) return { act: false, reason: "exit_authority_disabled" };
+  if (!advice.shouldExit) return { act: false, reason: advice.reason ?? "laya_hold" };
+  return { act: true, reason: "laya_exit_advised" };
+}
+
+export async function requestLayaExit(
+  state: Record<string, unknown>,
+): Promise<{ attempted: boolean; latencyMs: number | null; advice: LayaExitAdvice; error?: string }> {
+  const mode = layaMode();
+  if (mode === "off") {
+    return { attempted: false, latencyMs: null, advice: { shouldExit: false, reason: "laya_disabled" } };
+  }
+
+  const started = Date.now();
+  const controller = new AbortController();
+  const timeoutMs = layaTimeoutMs(config().laya?.timeout_ms);
+  const baseUrl = localSidecarBaseUrl(config().laya?.base_url);
+  if (!baseUrl) {
+    return { attempted: false, latencyMs: 0, advice: { shouldExit: false, reason: "laya_invalid_local_url" } };
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${baseUrl}/v1/systemone`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildExitLayaRequest(state)),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return {
+        attempted: true,
+        latencyMs: Date.now() - started,
+        advice: { shouldExit: false, reason: "laya_http_error" },
+        error: `HTTP ${response.status}`,
+      };
+    }
+    let body: unknown;
+    try {
+      const text = await response.text();
+      if (text.length > 128 * 1024) throw new Error("response_too_large");
+      body = JSON.parse(text) as unknown;
+    } catch {
+      return { attempted: true, latencyMs: Date.now() - started, advice: { shouldExit: false, reason: "laya_invalid_json" } };
+    }
+    return { attempted: true, latencyMs: Date.now() - started, advice: parseLayaExitResponse(body) };
+  } catch (error) {
+    return {
+      attempted: true,
+      latencyMs: Date.now() - started,
+      advice: { shouldExit: false, reason: "laya_unavailable" },
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
