@@ -78,8 +78,15 @@ export function computeBankroll(walletSol: number): Bankroll {
     "SELECT COALESCE(SUM(CASE kind WHEN 'bank' THEN sol ELSE -sol END), 0) AS b FROM ledger"
   ).get() as { b: number }).b;
 
+  // Deployed capital is the MEASURED cost, not the entry mark: the wallet also
+  // pays a fixed entry-side rent bundle on open (open_cost_sol - entry_sol =
+  // 0.04343 on live pos#68, 0.04340 on pos#69). Summing only entry_sol made
+  // equity read low while positions were open, which shrank reserve and
+  // INFLATED deployable — i.e. entries ~8% larger than the config intended.
+  // open_cost_sol is written at open (live.ts/paper.ts insert) and coalesces to
+  // entry_sol for adopted legacy rows, so this is safe on every book.
   const deployed = (db.prepare(
-    "SELECT COALESCE(SUM(entry_sol), 0) AS d FROM positions WHERE state IN ('pending','open','closing') AND mode = ?"
+    "SELECT COALESCE(SUM(COALESCE(open_cost_sol, entry_sol)), 0) AS d FROM positions WHERE state IN ('pending','open','closing') AND mode = ?"
   ).get(currentMode()) as { d: number }).d;
 
   // Normalize to total equity: LiveExecutor.walletSol() is the FREE native

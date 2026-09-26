@@ -5,7 +5,7 @@ import {
   flatCounterfactualSol,
 } from "./limits.js";
 import { installConfig, restoreConfig } from "../test/config.js";
-import { useMemoryDb, resetTestDb, insertClosedPosition } from "../test/db.js";
+import { useMemoryDb, resetTestDb, insertClosedPosition, insertOpenPosition } from "../test/db.js";
 import { getDb, now, STRANDED_GRACE_S } from "../db/db.js";
 import { config } from "../config.js";
 import { majorsPositionSize } from "./majors.js";
@@ -406,6 +406,38 @@ describe("bankroll-scaled floors", () => {
     expect(br.deployableSol).toBeCloseTo(0.65);
     expect(br.effectiveSlots).toBe(5);
     expect(positionSize(br, 75)).toBeGreaterThan(0);
+  });
+
+  // 2026-09-26: `deployed` summed only `entry_sol`, but the wallet also pays a
+  // fixed entry-side rent bundle — measured 0.04343 on live pos#68 COLLECT and
+  // 0.04340 on pos#69 FLAME (open_cost_sol - entry_sol). Understating deployed
+  // understates equity and therefore reserve while positions are open, which
+  // INFLATES deployable: sizing reads ~8% larger than intended. Size is the
+  // risk control here, so the bankroll must be measured, not marked.
+  it("counts deployed capital at full measured cost, not just the entry mark", () => {
+    insertOpenPosition({ entrySol: 0.3, mode: "paper" }); // helper writes open_cost_sol = 0.31
+    const br = computeBankroll(1);
+    expect(br.deployedSol).toBeCloseTo(0.31);
+    // equity 1.00 - reserve 0.35 - deployed 0.31 = 0.34 (old math said 0.35)
+    expect(br.deployableSol).toBeCloseTo(0.34);
+  });
+
+  it("normalizes live equity with the full deployed cost so reserve stays exact", () => {
+    const prev = process.env.FARMER_MODE;
+    process.env.FARMER_MODE = "live";
+    installConfig((c) => { c.exec.mode = "live"; });
+    try {
+      insertOpenPosition({ entrySol: 0.3, mode: "live" }); // open_cost_sol = 0.31
+      const br = computeBankroll(1);   // FREE wallet is 1.0; capital already left it
+      expect(br.walletSol).toBeCloseTo(1.31);              // equity = free + deployed
+      expect(br.deployedSol).toBeCloseTo(0.31);
+      const reserve = Math.min(1.0, 1.31 * 0.25) + 1.31 * 0.10;
+      expect(br.deployableSol).toBeCloseTo(1.31 - reserve - 0.31);
+    } finally {
+      if (prev === undefined) delete process.env.FARMER_MODE;
+      else process.env.FARMER_MODE = prev;
+      restoreConfig();
+    }
   });
 
   it("sizes a small wallet proportionally instead of blowing past the wallet cap", () => {
