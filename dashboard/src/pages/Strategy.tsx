@@ -92,7 +92,7 @@ function playRules(play: ComboPlay, combo: StrategyConfig["combo"], jev: Strateg
   const rangeUp = num(combo, "ape_range_up_pct");
   const live = bool(combo, "ape_live_enabled");
   return [
-    "Token-sided ape into Stonks Launchpad graduates paying SOL-only fees.",
+    "Token-sided ape on fresh coins (<= 48h, >= $100k mcap, >= 10 SOL fees) in pools paying fees in SOL — from the whole Meteora sweep, Stonks Launchpad coins get priority.",
     sol != null ? `Fixed ${sol} SOL ticket — not a % of the active budget.` : "Fixed-size ticket.",
     feeMin != null ? `Fallback fee-flow floor: >= ${feeMin} SOL when the pool's fee mode can't be detected.` : null,
     rangeUp != null ? `Token-sided range up to +${rangeUp}% above price.` : null,
@@ -299,7 +299,7 @@ export function StrategyPage({ watch }: { watch: LiveWatch | null }) {
           thresholds live in code, never in the model. A red flag noul at or above{" "}
           {config ? (num(config.jev, "redflag_veto") ?? "—") : "—"} vetoes an entry outright; a composite
           score between {config ? (num(config.jev, "uncertain_low") ?? "—") : "—"} and{" "}
-          {config ? (num(config.jev, "uncertain_high") ?? "—") : "—"} is treated as genuinely uncertain and skipped.
+          {config ? (num(config.jev, "uncertain_high") ?? "—") : "—"} is treated as uncertain: SOL-side plays (molu, Danko, Eys seat) then follow their own rules and enter; Eys ape skips.
         </p>
       </Panel>
 
