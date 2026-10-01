@@ -87,6 +87,44 @@ describe("combo exclusivity — entry pipeline", () => {
   });
 });
 
+describe("combo sizing seed — upstream cold-start size never pre-empts combo", () => {
+  let exec: FakeExecutor;
+
+  beforeEach(() => {
+    useMemoryDb();
+    installConfig((c) => {
+      // Kelly cold start that sizes far under the floor — the live 2026-10-01
+      // failure: 3% of a 0.34 SOL wallet = 0.01 SOL < 0.05 floor -> size_zero.
+      c.sizing.kelly_enabled = true;
+      c.sizing.kelly_cold_start_frac = 0.0001;
+      c.sizing.max_positions = 5;
+      c.entry.tranche_enabled = false;
+      c.entry.max_quote_drift_bins = 0;
+      c.majors.enabled = false;
+      c.gates.min_entry_score = 60;
+      c.combo!.enabled = true;
+      c.combo!.canary_mode = true;
+    });
+    exec = new FakeExecutor("paper");
+  });
+
+  afterEach(() => {
+    resetTestDb();
+    restoreConfig();
+    vi.clearAllMocks();
+  });
+
+  it("a gate-passing candidate reaches combo classification instead of dying as size_zero", async () => {
+    vi.mocked(scan).mockResolvedValue({ candidates: [unclassifiableCandidate()], rejected: [], sweptPools: 1 });
+
+    await enterNewPositions(exec);
+
+    const gates = skipped().map((d) => d.failed_gate);
+    expect(gates).not.toContain("size_zero");
+    expect(gates).toContain("combo_no_play");
+  });
+});
+
 describe("combo exclusivity — follow chain never arms", () => {
   let exec: FakeExecutor;
 

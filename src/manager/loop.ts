@@ -1842,6 +1842,20 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
 
     const kelly = kellyStats();
     let size = positionSize(bankroll, score, isMicro ? "micro" : "core");
+    // Combo plays size themselves (strategy/combo/sizing.ts -> comboSize, applied
+    // below). Upstream's Kelly cold start (kelly_cold_start_frac of the wallet)
+    // sizes a small account under its own floor, so `size` came back 0 and
+    // every candidate died here as size_zero before combo could classify it
+    // (observed live 2026-10-01: three gate-passing pools, scores 76-87).
+    // Seed `size` with the combo's prospective size instead, so the shared
+    // gates below (floor, risk cuts, pool-share and exposure caps) judge a
+    // realistic position; combo replaces it with the exact per-play size.
+    const comboSeed = config().combo;
+    if (comboSeed?.enabled) {
+      size = comboSeed.canary_mode
+        ? comboSeed.canary_position_sol
+        : bankroll.walletSol * (comboSeed.active_budget_pct / 100) * (comboSeed.molu_share_pct / 100);
+    }
     if (size <= 0) {
       const gate = sizingMode() === "kelly" && kelly.regime === "negative_edge" ? "kelly_negative_edge" : "size_zero";
       if (sizingMode() === "kelly" && kelly.regime === "negative_edge")
@@ -1929,7 +1943,9 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     const sizeFloor = priorEntries24h > 0
       ? minReentrySol(bankroll.walletSol)
       : minPositionSol(bankroll.walletSol);
-    if (size < sizeFloor) {
+    // Combo enforces its own floor + affordability (combo.min_floor_sol, sizing.ts),
+    // so upstream's equity-scaled floor must not pre-empt a combo candidate.
+    if (size < sizeFloor && !comboSeed?.enabled) {
       recordSkip(cand.tokenMint, cand.pool.address, "ladder_below_min", score, { priorEntries24h, size, sizeFloor, young: young.young });
       continue;
     }
@@ -1970,7 +1986,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     if (whale.verdict === "cut" && !riskCut) {
       size = applyRiskCut(size, microCut);
       riskCut = true;
-      if (size < sizeFloor) {
+      if (size < sizeFloor && !comboSeed?.enabled) {
         recordSkip(cand.tokenMint, cand.pool.address, "risk_cut_below_min", score, { size, sizeFloor, whale, young });
         continue;
       }
