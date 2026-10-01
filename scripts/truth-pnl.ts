@@ -23,7 +23,7 @@ import {
   PublicKey,
   type ParsedTransactionWithMeta,
 } from "@solana/web3.js";
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, NATIVE_MINT } from "@solana/spl-token";
 import { env, SOL_MINT } from "../src/config.js";
 import { quoteToSolLamports } from "../src/executor/jupiter.js";
 import { alert } from "../src/alerts.js";
@@ -166,6 +166,11 @@ async function externalFlowsSol(
       const accs = await connection.getParsedTokenAccountsByOwner(owner, { programId });
       for (const a of accs.value) ownAtas.add(a.pubkey.toBase58());
     } catch { /* best effort */ }
+  }
+  // wSOL wrap/unwrap targets are deterministic ATAs that may already be closed,
+  // so derive them rather than relying on the live token-account list.
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    ownAtas.add(getAssociatedTokenAddressSync(NATIVE_MINT, owner, false, programId).toBase58());
   }
   const ownerStr = owner.toBase58();
   const isOwn = (addr: string) => addr === ownerStr || ownAtas.has(addr);

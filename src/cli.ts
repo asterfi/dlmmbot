@@ -247,10 +247,10 @@ async function main(): Promise<void> {
       if (!ids.length) { console.error("usage: npm run repair-close -- <id> [more ids…] [--apply]"); process.exit(1); }
       const { findUnbookedExitLegs } = await import("./ops/repairClose.js");
       const { makeConnection } = await import("./rpc.js");
-      const { loadKeypair } = await import("./executor/wallet.js");
+      const { loadSigner } = await import("./executor/wallet.js");
       const { env } = await import("./config.js");
       const conn = makeConnection({ commitment: "confirmed" });
-      const wallet = loadKeypair(env().walletPrivateKey, env().walletKeypairPath).publicKey;
+      const wallet = loadSigner(env()).publicKey;
       const db = getDb();
       for (const id of ids) {
         const row = db.prepare(
