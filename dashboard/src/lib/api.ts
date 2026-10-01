@@ -1,4 +1,7 @@
-import type { HistorySnap, LiveWatch, RangeKey } from "./types";
+import type {
+  HistorySnap, LiveWatch, RangeKey,
+  StrategyConfig, PlayStats, JevDecisionRow, StrategyTruth,
+} from "./types";
 import { tokenFromUrl } from "./utils";
 
 const WATCH_KEY = "dlmm_dash_watch";
@@ -737,6 +740,45 @@ export async function fetchProfileSnapshot(name?: string): Promise<{
     },
     slug: data.slug ?? "my-profile",
   };
+}
+
+/** Read-only Strategy page — combo/jev config, decision log, per-play stats, truth P&L. */
+export async function fetchStrategyConfig(): Promise<StrategyConfig> {
+  const t = tokenFromUrl();
+  const q = t ? `?token=${encodeURIComponent(t)}` : "";
+  const res = await fetch(`/api/strategy/config${q}`, { headers: authHeaders() });
+  const data = await res.json() as StrategyConfig & { error?: string };
+  if (!res.ok) throw new Error((data as { error?: string }).error ?? `strategy config ${res.status}`);
+  return { combo: data.combo ?? {}, jev: data.jev ?? {} };
+}
+
+export async function fetchStrategyJev(limit = 100): Promise<JevDecisionRow[]> {
+  const t = tokenFromUrl();
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (t) params.set("token", t);
+  const res = await fetch(`/api/strategy/jev?${params}`, { headers: authHeaders() });
+  const data = await res.json() as { decisions?: JevDecisionRow[]; error?: string };
+  if (!res.ok) throw new Error(data.error ?? `strategy jev ${res.status}`);
+  return data.decisions ?? [];
+}
+
+export async function fetchStrategyPlays(): Promise<PlayStats[]> {
+  const t = tokenFromUrl();
+  const q = t ? `?token=${encodeURIComponent(t)}` : "";
+  const res = await fetch(`/api/strategy/plays${q}`, { headers: authHeaders() });
+  const data = await res.json() as { plays?: PlayStats[]; error?: string };
+  if (!res.ok) throw new Error(data.error ?? `strategy plays ${res.status}`);
+  return data.plays ?? [];
+}
+
+export async function fetchStrategyTruth(limit = 500): Promise<StrategyTruth> {
+  const t = tokenFromUrl();
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (t) params.set("token", t);
+  const res = await fetch(`/api/strategy/truth?${params}`, { headers: authHeaders() });
+  const data = await res.json() as StrategyTruth & { error?: string };
+  if (!res.ok) throw new Error((data as { error?: string }).error ?? `strategy truth ${res.status}`);
+  return { rows: data.rows ?? [], latest: data.latest ?? null };
 }
 
 export type LiveStatus = "connecting" | "open" | "closed";

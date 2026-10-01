@@ -13,7 +13,7 @@ import {
 import type { LiveWatch } from "@/lib/types";
 import { cn, fmtRet, fmtSol, fmtUsdCompact, shortTime } from "@/lib/utils";
 import { TokenSymbol } from "@/components/TokenSymbol";
-import { RangeBar, SleeveBadge, StatusBadge, TrancheBadge, type RangeStatus } from "@/components/RangeBar";
+import { PlayBadge, RangeBar, SleeveBadge, StatusBadge, TrancheBadge, type RangeStatus } from "@/components/RangeBar";
 import { LiveNum } from "@/components/LiveNum";
 import { ClosePositionButton } from "@/components/ClosePositionButton";
 
@@ -68,6 +68,7 @@ export function OpenPositionCard({ p, live = false }: { p: OpenPos; live?: boole
             <span className="text-[11px] text-accent" title="Position id">#{p.id}</span>
             <TokenSymbol symbol={p.symbol} mint={p.mint} name={p.name} iconUrl={p.icon_url} />
             <SleeveBadge sleeve={p.sleeve} follow={p.follow} />
+            <PlayBadge play={p.play} />
             <TrancheBadge id={p.id} trancheOf={p.tranche_of} openTranches={p.open_tranches} />
             <StatusBadge status={status} />
             {underwater && (

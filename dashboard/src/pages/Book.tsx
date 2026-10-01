@@ -2,6 +2,7 @@ import type { HistorySnap, LiveWatch, RangeKey } from "@/lib/types";
 import { exitLabel, shortTime, slotsSummary } from "@/lib/utils";
 import { Badge, Panel, RangeTabs } from "@/components/ui";
 import { TokenSymbol } from "@/components/TokenSymbol";
+import { PlayBadge } from "@/components/RangeBar";
 import { ClosePnlCell, OpenPositionCard } from "@/components/OpenPositionCard";
 
 export function BookPage({
@@ -56,7 +57,12 @@ export function BookPage({
                   {hist.ladder.slice(0, 20).map((r) => (
                     <tr key={r.id} className="border-t border-grid align-top">
                       <td className="py-1.5 pr-2 text-muted whitespace-nowrap">{shortTime(r.at)}</td>
-                      <td className="py-1.5 pr-2"><TokenSymbol symbol={r.symbol} mint={r.mint} /></td>
+                      <td className="py-1.5 pr-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <TokenSymbol symbol={r.symbol} mint={r.mint} />
+                          <PlayBadge play={r.play} />
+                        </div>
+                      </td>
                       <td className="py-1.5 pr-2 text-muted">{exitLabel(r.exit_reason)}</td>
                       <ClosePnlCell
                         pnl={r.pnl}

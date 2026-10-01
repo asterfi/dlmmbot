@@ -49,6 +49,9 @@ import { clearBlacklist, listBlacklist } from "./lib/blacklist.mjs";
 import { diskRescue } from "./lib/disk-rescue.mjs";
 import { requestPause, clearPause, readPauseState } from "./lib/pause.mjs";
 import { searchMajorsSymbols } from "./lib/majors-search.mjs";
+import {
+  getStrategyConfig, getJevDecisions, getPlayStats, getTruthPnl,
+} from "./lib/strategy-snapshot.mjs";
 import { execFileSync } from "node:child_process";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -270,6 +273,47 @@ const server = createServer(async (req, res) => {
         env,
         setup: setupStatus(env),
       });
+    } catch (e) {
+      sendJson(res, 500, { error: e.message ?? String(e) });
+    }
+    return;
+  }
+
+  // Read-only "Strategy" page: combo/jev running config + jev decision log +
+  // per-play stats + truth-pnl history. GET-only, same dash-token bar as
+  // everything under /api/ (checked above) — never writes anything.
+  if (url.pathname === "/api/strategy/config" && req.method === "GET") {
+    try {
+      sendJson(res, 200, getStrategyConfig(root));
+    } catch (e) {
+      sendJson(res, 500, { error: e.message ?? String(e) });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/strategy/jev" && req.method === "GET") {
+    try {
+      const limit = Number(url.searchParams.get("limit") ?? 100);
+      sendJson(res, 200, { decisions: getJevDecisions(root, limit) });
+    } catch (e) {
+      sendJson(res, 500, { error: e.message ?? String(e) });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/strategy/plays" && req.method === "GET") {
+    try {
+      sendJson(res, 200, { plays: getPlayStats(root) });
+    } catch (e) {
+      sendJson(res, 500, { error: e.message ?? String(e) });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/strategy/truth" && req.method === "GET") {
+    try {
+      const limit = Number(url.searchParams.get("limit") ?? 500);
+      sendJson(res, 200, getTruthPnl(root, limit));
     } catch (e) {
       sendJson(res, 500, { error: e.message ?? String(e) });
     }

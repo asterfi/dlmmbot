@@ -502,7 +502,7 @@ export function buildLiveBookSnapshot(root) {
 
     const open = db.prepare(
       `SELECT p.id, p.symbol, p.token_mint AS mint, p.mode, p.state, p.pool,
-              p.entry_ts, p.follow_chain_id,
+              p.entry_ts, p.follow_chain_id, p.play,
               round(p.entry_sol,4) entry_sol, round(p.entry_price,12) entry_price,
               round(p.open_cost_sol,6) open_cost_sol,
               p.min_bin_id, p.max_bin_id,
@@ -608,6 +608,8 @@ export function buildLiveBookSnapshot(root) {
         mode: r.mode,
         state: r.state,
         sleeve,
+        /** Combo strategy play (molu_ladder | danko_trap | eys_seat | eys_ape), null outside combo. */
+        play: r.play ?? null,
         follow: r.follow_chain_id != null,
         entry_sol: entry,
         entry_price: r.entry_price,

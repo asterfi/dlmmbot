@@ -109,6 +109,7 @@ export function buildHistorySnapshot(root, range = "30d") {
       `SELECT id,
               COALESCE(NULLIF(symbol,''), '?') AS symbol,
               token_mint AS mint,
+              play,
               exit_reason,
               datetime(exit_ts,'unixepoch') AS at,
               exit_ts,

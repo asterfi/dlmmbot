@@ -11,6 +11,7 @@ import { ToastHost } from "@/components/ToastHost";
 import { OverviewPage } from "@/pages/Overview";
 import { BookPage } from "@/pages/Book";
 import { AnalyticsPage } from "@/pages/Analytics";
+import { StrategyPage } from "@/pages/Strategy";
 import { ActivityPage } from "@/pages/Activity";
 import { SmartFlowPage } from "@/pages/SmartFlow";
 import { ErrorsPage } from "@/pages/Errors";
@@ -183,6 +184,7 @@ export default function App() {
         {tab === "analytics" && (
           <AnalyticsPage watch={watch} hist={hist} range={range} onRange={setRange} />
         )}
+        {tab === "strategy" && <StrategyPage watch={watch} />}
         {tab === "activity" && <ActivityPage watch={watch} />}
         {tab === "smartflow" && <SmartFlowPage watch={watch} />}
         {tab === "errors" && <ErrorsPage watch={watch} />}

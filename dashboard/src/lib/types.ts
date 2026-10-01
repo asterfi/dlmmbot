@@ -88,6 +88,8 @@ export interface LiveWatch {
     id: number; symbol: string; mint?: string; mode: string; state: string;
     /** meme | micro | majors */
     sleeve?: string | null;
+    /** Combo strategy play (molu_ladder | danko_trap | eys_seat | eys_ape), null outside combo. */
+    play?: string | null;
     follow?: boolean;
     name?: string | null;
     icon_url?: string | null;
@@ -353,6 +355,8 @@ export interface HistorySnap {
   ladder: Array<{
     id: number; symbol: string; mint?: string; exit_reason: string; at: string;
     exit_ts: number; pnl: number; entry_sol: number; pct?: number | null;
+    /** Combo strategy play (molu_ladder | danko_trap | eys_seat | eys_ape), null outside combo. */
+    play?: string | null;
     open_cost_sol?: number | null;
     close_return_sol?: number | null;
     fees_sol?: number | null;
@@ -425,4 +429,81 @@ export interface AnalyticsStats {
       id: number; symbol: string; mint?: string; reason: string; pnl: number; at: string;
     }>;
   };
+}
+
+/** Combo plays the Strategy page knows about — keep in sync with [combo] in config.toml. */
+export type ComboPlay = "molu_ladder" | "danko_trap" | "eys_seat" | "eys_ape";
+
+/** GET /api/strategy/config — the [combo] and [jev] sections of the running config, read-only. */
+export interface StrategyConfig {
+  combo: Record<string, string | number | boolean | null>;
+  jev: Record<string, string | number | boolean | null>;
+}
+
+/** GET /api/strategy/plays — per-play counts + realized SOL (REALIZED_PNL truth-math). */
+export interface PlayStats {
+  play: ComboPlay;
+  open: number;
+  closed: number;
+  wins: number;
+  realized_sol: number;
+}
+
+/** GET /api/strategy/jev — one jev_decisions row joined to its position (if any). */
+export interface JevDecisionRow {
+  id: number;
+  ts: number;
+  at: string;
+  lane: "enter" | "exit";
+  play: string | null;
+  mint: string | null;
+  pool: string | null;
+  symbol: string | null;
+  position_id: number | null;
+  verdict: "yes" | "no";
+  fallback: boolean;
+  /** Derived from (fallback, outcome, lane, verdict) — see strategy-snapshot.mjs. */
+  outcome: "enter" | "skip" | "exit" | "hold" | "uncertain" | "fallback" | string;
+  latency_ms: number | null;
+  model: string | null;
+  red_flags: {
+    wash_volume: number | null;
+    security: number | null;
+    exhausted_spike: number | null;
+    insider_dumping: number | null;
+  } | null;
+  composite_score: number | null;
+  chosen_play: string | null;
+  chosen_play_probability: number | null;
+  exit: {
+    thesis_broken: number | null;
+    flow_dead: number | null;
+    action_choice: string | null;
+    action_confidence: number | null;
+  } | null;
+  /** Realized SOL from the linked position, once it has closed. */
+  position_realized_sol: number | null;
+}
+
+/** GET /api/strategy/truth — one appended truth-pnl.jsonl line (scripts/truth-pnl.ts). */
+export interface TruthPnlRow {
+  ts: string;
+  address?: string | null;
+  sol_balance?: number;
+  wsol_balance?: number;
+  other_tokens_sol?: number;
+  open_positions_sol?: number;
+  equity_sol: number;
+  deposits_sol?: number;
+  cold_withdrawals_sol?: number;
+  net_deposits_sol: number;
+  unexplained_outflow_sol: number;
+  pnl_sol: number;
+  pnl_pct: number;
+  txs_scanned?: number;
+}
+
+export interface StrategyTruth {
+  rows: TruthPnlRow[];
+  latest: TruthPnlRow | null;
 }

@@ -199,6 +199,33 @@ export function SleeveBadge({
   );
 }
 
+const PLAY_LABEL: Record<string, string> = {
+  molu_ladder: "molu ladder",
+  danko_trap: "danko trap",
+  eys_seat: "eys seat",
+  eys_ape: "eys ape",
+};
+
+const PLAY_TIP: Record<string, string> = {
+  molu_ladder: "molu_ladder — dip-and-bounce entry on an established (mcap >= $1M, age < 48h) token",
+  danko_trap: "danko_trap — deep one-sided bid 85-90% below price on a proven (mcap >= $1M, age >= 48h) token",
+  eys_seat: "eys_seat — fast narrow-range spot entry on high fee/volume pools",
+  eys_ape: "eys_ape — fixed-ticket token-sided ape into Stonks Launchpad graduates",
+};
+
+/** Combo strategy play badge (molu_ladder / danko_trap / eys_seat / eys_ape). */
+export function PlayBadge({ play }: { play?: string | null }) {
+  if (!play) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-1 border border-accent/70 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-accent"
+      title={PLAY_TIP[play] ?? play}
+    >
+      {PLAY_LABEL[play] ?? play}
+    </span>
+  );
+}
+
 export function GmgnLink({ mint }: { mint?: string | null }) {
   const url = gmgnUrl(mint);
   if (!url) return null;
