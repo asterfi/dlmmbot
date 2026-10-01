@@ -73,6 +73,15 @@ export interface VetResult {
     jupLiquidityUsd?: number | null;       // token-wide liquidity, all pools (whale-overhang denominator)
     /** Jupiter's own "stable" tag (2026-10-02 stablecoin/majors backstop) — null when unknown. */
     jupIsStableTag?: boolean | null;
+    /**
+     * True when vetToken let this candidate through the age_min hard-fail
+     * ONLY because it's old enough for combo.eys_age_min_minutes but still
+     * under vetting.age_min_minutes (owner, 2026-10-02: GMGN's hot tokens run
+     * 6-36min old; the 45min floor rejected real Eys setups before combo ever
+     * saw them). manager/loop.ts enforces that only eys_seat/eys_ape may use
+     * this age band — anything else still gets skipped with gate "age_min".
+     */
+    ageEysOnly?: boolean;
   };
 }
 

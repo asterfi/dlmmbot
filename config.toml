@@ -769,6 +769,15 @@ eys_flow_usd_per_min_min = 100000   # Eys threshold, mapped to vol30mUsd/30 abov
 eys_reject_mcap_lo_usd = 500000     # reject the 500k-1M mcap band when fees earned < the floor above (fake volume)
 eys_reject_mcap_hi_usd = 1000000
 eys_tp_pct = 2                      # exit at +1-3% green (configurable), default 2%, or flow death
+# Eys-only young-age carve-out (owner, 2026-10-02): live GMGN 5m trending right
+# now shows hot tokens 6-36min old; upstream's age_min_minutes=45 (above)
+# rejects them before combo classification ever runs, so real Eys setups
+# ("watch 1-2 min, then ape") can never fire. A candidate aged in
+# [eys_age_min_minutes, age_min_minutes) is let through vetToken's age_min
+# gate ONLY to be considered for eys_seat/eys_ape -- molu_ladder/danko_trap
+# still require the full 45min floor, and under 10min is still an
+# unconditional hard fail. Unknown age is unaffected (still fails closed).
+eys_age_min_minutes = 10
 
 # danko_trap (deep): mcap >= $1M AND token age >= 48h (a proven floor — both
 # required, not either/or). One-sided SOL bid-ask from current price down to

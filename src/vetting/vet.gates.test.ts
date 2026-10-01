@@ -136,6 +136,34 @@ describe("vetToken fail-closed gates", () => {
     expect(r.verdict).toBe("fail");
   });
 
+  // Eys-only young-age carve-out (owner, 2026-10-02): a candidate aged in
+  // [eys_age_min_minutes, age_min_minutes) is let through — facts.ageEysOnly
+  // marks it for manager/loop.ts to restrict to eys_seat/eys_ape only.
+  it("lets a candidate in [eys_age_min_minutes, age_min_minutes) through, flagged ageEysOnly", async () => {
+    installConfig((c) => { c.combo!.eys_age_min_minutes = 10; });
+    reportMock.mockResolvedValue(rugReport({ detectedAt: new Date(Date.now() - 20 * 60_000).toISOString() }));
+    const r = await vetToken(MINT, null);
+    expect(gatesOf(r)).not.toContain("age_min");
+    expect(r.verdict).toBe("pass");
+    expect(r.facts.ageEysOnly).toBe(true);
+  });
+
+  it("still hard-fails age_min below eys_age_min_minutes even with the carve-out configured", async () => {
+    installConfig((c) => { c.combo!.eys_age_min_minutes = 10; });
+    reportMock.mockResolvedValue(rugReport({ detectedAt: new Date(Date.now() - 5 * 60_000).toISOString() }));
+    const r = await vetToken(MINT, null);
+    expect(gatesOf(r)).toContain("age_min");
+    expect(r.verdict).toBe("fail");
+  });
+
+  it("does not set ageEysOnly when the carve-out isn't configured (unaffected by default)", async () => {
+    installConfig((c) => { c.combo!.eys_age_min_minutes = undefined; });
+    reportMock.mockResolvedValue(rugReport({ detectedAt: new Date(Date.now() - 20 * 60_000).toISOString() }));
+    const r = await vetToken(MINT, null);
+    expect(gatesOf(r)).toContain("age_min");
+    expect(r.facts.ageEysOnly).toBeFalsy();
+  });
+
   it("skips age_unknown only when BOTH age gates are disabled", async () => {
     reportMock.mockResolvedValue(rugReport({ detectedAt: null }));
     // Sets BOTH preconditions explicitly: age_max ships disabled, so relying on

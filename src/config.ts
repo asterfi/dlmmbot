@@ -371,6 +371,16 @@ export interface Config {
     molu_tp_pct_top_tier: number;
     molu_top_tier_sol: number;
     eys_mcap_min_usd: number;
+    /**
+     * Eys-only young-age carve-out (owner, 2026-10-02): upstream's
+     * vetting.age_min_minutes (45) rejects candidates before combo
+     * classification ever runs, but GMGN's hot tokens right now run 6-36min
+     * old and real Eys setups need to fire in that window. A candidate aged
+     * in [eys_age_min_minutes, age_min_minutes) is let through vetToken ONLY
+     * to be considered for eys_seat/eys_ape — molu_ladder/danko_trap still
+     * require the full 45min floor. See vetting/vet.ts's age_min check.
+     */
+    eys_age_min_minutes?: number;
     eys_fees_earned_min_sol: number;
     eys_flow_usd_per_min_min: number;
     eys_reject_mcap_lo_usd: number;

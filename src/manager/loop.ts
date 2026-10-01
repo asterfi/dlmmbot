@@ -2358,6 +2358,17 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           }
         }
       }
+      // Young-but-Eys-eligible (owner, 2026-10-02): vetToken let this
+      // candidate past the age_min hard-fail ONLY because it might be
+      // eys_seat/eys_ape — if it classified as anything else (or nothing),
+      // it must still be rejected, with the SAME age_min gate name vetToken
+      // itself would have used.
+      if (vet.facts.ageEysOnly && classified?.play !== "eys_seat" && classified?.play !== "eys_ape") {
+        recordSkip(cand.tokenMint, cand.pool.address, "age_min", score, {
+          symbol: cand.symbol, tokenAgeMinutes: ageMin, play: classified?.play ?? null,
+        });
+        continue;
+      }
       if (classified) {
         const counts = comboOpenCounts();
         const canaryCfg: CanarySizingConfig = {
@@ -2439,6 +2450,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             name_or_socials: null as string | null, // not tracked by the scanner today
             mcap_usd: cand.pool.marketCapUsd,
             age_hours: features.tokenAgeMinutes !== null ? features.tokenAgeMinutes / 60 : null,
+            token_age_minutes: features.tokenAgeMinutes,
             source: apeSource ?? "meteora", // discovery source for post-hoc comparison (stonks vs meteora sweep)
           },
           pool: {

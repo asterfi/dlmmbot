@@ -274,8 +274,23 @@ async function vetTokenUncached(mint: string, poolCreatedAtMs: number | null): P
   if (created != null) {
     const ageMin = (Date.now() - created.ms) / 60_000;
     facts.tokenAgeMinutes = Math.round(ageMin);
-    if (v.age_min_enabled !== false && ageMin < v.age_min_minutes)
-      fail("age_min", `${ageMin.toFixed(0)}m`, `${v.age_min_minutes}m`);
+    if (v.age_min_enabled !== false && ageMin < v.age_min_minutes) {
+      // Eys-only young-age carve-out (owner, 2026-10-02): GMGN's hot tokens
+      // right now run 6-36min old; the 45min floor rejected real Eys setups
+      // ("watch 1-2 min, then ape") before combo classification ever ran.
+      // Below eys_age_min_minutes this is still an unconditional hard fail —
+      // only the band [eys_age_min_minutes, age_min_minutes) is let through,
+      // and ONLY for eys_seat/eys_ape to actually use (manager/loop.ts
+      // rejects it with this SAME "age_min" gate if it classifies as anything
+      // else, or no play at all). Unknown age (the `else` branch below) is
+      // unaffected — it still fails closed as young, per upstream rules.
+      const eysFloor = config().combo?.eys_age_min_minutes;
+      if (eysFloor !== undefined && ageMin >= eysFloor) {
+        facts.ageEysOnly = true;
+      } else {
+        fail("age_min", `${ageMin.toFixed(0)}m`, `${v.age_min_minutes}m`);
+      }
+    }
     if (v.age_max_enabled !== false && ageMin > v.age_max_days * 1440)
       fail("age_max", `${(ageMin / 1440).toFixed(1)}d`, `${v.age_max_days}d`);
   } else if (v.age_min_enabled !== false || v.age_max_enabled !== false) {
