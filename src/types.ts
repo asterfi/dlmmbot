@@ -93,7 +93,10 @@ export type PositionState =
   | "closed_win" | "closed_missed" | "closed_stop" | "closed_safety"
   | "closed_rotation" | "closed_below" | "closed_manual";
 
-export type ExitReason = "P0_safety" | "P1_stop" | "P2_rotation" | "P3_above" | "P5_below" | "give_back" | "escape" | "manual";
+export type ExitReason = "P0_safety" | "P1_stop" | "P2_rotation" | "P3_above" | "P5_below" | "give_back" | "escape" | "manual" | "combo_exit";
+
+/** Combo strategy play tag (owner's Eys+molu+Danko combo, with Typesafe Jev as master gate). */
+export type Play = "molu_ladder" | "eys_seat" | "danko_trap" | "eys_ape";
 
 export interface Position {
   id: number;
@@ -118,6 +121,10 @@ export interface Position {
   followChainId?: number | null;
   /** Operator asked the dashboard to close this position; unix seconds. */
   closeRequestedAt?: number | null;
+  /** Combo strategy play tag; null for positions opened outside the combo pipeline. */
+  play?: Play | null;
+  /** Reused from upstream's escape-hatch tracking: has the position ever fallen deep below range? Combo's danko_trap exit uses this as its "after a bounce" signal. */
+  fellDeep?: boolean;
 }
 
 export type EventType =

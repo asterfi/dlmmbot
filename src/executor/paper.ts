@@ -46,13 +46,14 @@ export class PaperExecutor implements Executor {
     const db = getDb();
     const res = db.prepare(
       `INSERT INTO positions (mode, pool, token_mint, symbol, tranche_of, entry_ts, entry_price, entry_sol,
-        min_bin_id, max_bin_id, state, rent_paid_sol, open_cost_sol)
-       VALUES ('paper', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`
+        min_bin_id, max_bin_id, state, rent_paid_sol, open_cost_sol, play)
+       VALUES ('paper', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`
     ).run(
       params.poolAddress, params.tokenMint, params.symbol, params.trancheOf ?? null,
       now(), params.entryPrice, params.sizeSol,
       params.range.minBinId, params.range.maxBinId, params.range.estBinRentSol,
-      params.sizeSol + PAPER_TX_COST_SOL
+      params.sizeSol + PAPER_TX_COST_SOL,
+      params.play ?? null,
     );
     const id = Number(res.lastInsertRowid);
     this.rangeShapeByPos.set(id, params.range.shape ?? "bidask");
@@ -74,6 +75,7 @@ export class PaperExecutor implements Executor {
       rentPaidSol: params.range.estBinRentSol,
       profitLockFires: 0,
       exitTs: null, exitSol: null, exitReason: null,
+      play: (params.play as Position["play"]) ?? null,
     };
   }
 
@@ -94,7 +96,12 @@ export class PaperExecutor implements Executor {
 
     // Simulated value: SOL still in untouched bins + token accumulated in
     // touched bins valued at current price. Simplified linear bid-ask model.
-    const value = this.simulateValue(position, pool.price, pool.binStep, pool.decimalsX);
+    // eys_ape is token-sided (above price) — a materially different shape,
+    // so it gets its own simplified simulator (simulateApeValue) rather than
+    // overloading the SOL-side one; see its own comment for the approximation.
+    const value = position.play === "eys_ape"
+      ? this.simulateApeValue(position, pool.price, pool.binStep, pool.decimalsX)
+      : this.simulateValue(position, pool.price, pool.binStep, pool.decimalsX);
     const fees = await this.simulateFees(position, pool);
     return {
       valueSol: value + fees,
@@ -128,6 +135,40 @@ export class PaperExecutor implements Executor {
         value += (solInBin / binPrice) * price;
       } else {
         value += solInBin;
+      }
+    }
+    return value;
+  }
+
+  /**
+   * eys_ape paper approximation (owner addition, 2026-10-01): the position is
+   * TOKEN-sided, range ABOVE entry price. `entrySol / entryPrice` approximates
+   * the token quantity bought at open; the same triangular BidAsk weighting as
+   * the SOL-side model is mirrored bin-by-bin. A bin at or below the current
+   * active bin has been "sold through" (price ran past it) — its token is
+   * valued as the SOL it would have fetched AT THAT BIN'S price (fixed, not
+   * revalued further); a bin still above the active bin remains token, valued
+   * at the current price. This ignores per-bin fee capture nuance (handled
+   * generically by simulateFees/accrueFees) and intra-bin partial fills —
+   * documented as a simplification distinct from the mature SOL-side model.
+   */
+  private simulateApeValue(position: Position, price: number, binStep: number, decimalsX: number): number {
+    const { minBinId, maxBinId, entrySol, entryPrice } = position;
+    const n = maxBinId - minBinId + 1;
+    if (n <= 0 || entryPrice <= 0) return entrySol;
+    const tokenQtyTotal = entrySol / entryPrice;
+    const activeBinId = priceToBinId(price, binStep, decimalsX);
+    const totalW = (n * (n + 1)) / 2;
+    let value = 0;
+    for (let i = 0; i < n; i++) {
+      const binId = minBinId + i;
+      const w = (i + 1) / totalW;
+      const tokenInBin = tokenQtyTotal * w;
+      if (binId <= activeBinId) {
+        const binPrice = binIdToPrice(binId, binStep, decimalsX);
+        value += tokenInBin * binPrice;
+      } else {
+        value += tokenInBin * price;
       }
     }
     return value;
@@ -206,7 +247,7 @@ export class PaperExecutor implements Executor {
     const mark = await this.mark(position);
     const stateByReason: Record<ExitReason, string> = {
       P0_safety: "closed_safety", P1_stop: "closed_stop", P2_rotation: "closed_rotation",
-      P3_above: "closed_win", P5_below: "closed_below", give_back: "closed_giveback", escape: "closed_escape", manual: "closed_manual",
+      P3_above: "closed_win", P5_below: "closed_below", give_back: "closed_giveback", escape: "closed_escape", manual: "closed_manual", combo_exit: "closed_rotation",
     };
     getDb().prepare(
       `UPDATE positions SET state = ?, exit_ts = ?, exit_sol = ?, exit_reason = ?, close_return_sol = ? WHERE id = ?`

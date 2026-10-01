@@ -11,6 +11,20 @@ export interface OpenParams {
   range: RangePlan;
   entryPrice: number;
   trancheOf?: number;
+  /** Combo strategy play tag (molu_ladder | eys_seat | danko_trap); omitted for non-combo entries. */
+  play?: string;
+  /**
+   * "sol" (default): one-sided SOL deposit (totalXAmount=0), the bot's normal
+   * shape. "token": one-sided TOKEN deposit above price (eys_ape only, owner
+   * addition 2026-10-01) — swap sizeSol of SOL into the token, deposit 100%
+   * token-side. LiveExecutor currently REFUSES "token" (throws) rather than
+   * attempt an unverified on-chain sequence: the Privy wallet policy's
+   * allowed-instruction set was not something this change could confirm from
+   * the repo (it is configured server-side at Privy), so ape is paper-only
+   * until that is verified. See the final report for what to check before
+   * enabling it live.
+   */
+  side?: "sol" | "token";
   /**
    * "active" (default): the range top re-anchors to the live active bin,
    * width preserved — the primary's rule. "planned": open exactly the planned

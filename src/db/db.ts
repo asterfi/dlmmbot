@@ -409,6 +409,50 @@ CREATE INDEX IF NOT EXISTS idx_error_log_ts ON error_log(ts DESC);
     database.exec("CREATE INDEX IF NOT EXISTS idx_error_log_active ON error_log(dismissed, ts DESC)");
   } catch { /* */ }
 
+  // Combo strategy (Eys + molu + Danko, Jev master gate): the play a position
+  // was classified into, recorded at entry so it is visible in the DB and in
+  // every log line that reads the position (2026-10-01).
+  try {
+    database.exec("ALTER TABLE positions ADD COLUMN play TEXT");
+  } catch { /* column already exists */ }
+  try {
+    database.exec("CREATE INDEX IF NOT EXISTS idx_positions_play ON positions(play)");
+  } catch { /* */ }
+
+  // jev_decisions: every Jev consult (enter/exit), linked to position_id so
+  // Jev's yes/no can later be compared against real P&L. Logged on every
+  // consult including fallbacks (jev.enabled=false, no API key, timeout,
+  // 401/422, malformed response) — `fallback` and `outcome` distinguish a
+  // real Jev answer from a fail-open default.
+  database.exec(`
+CREATE TABLE IF NOT EXISTS jev_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  position_id INTEGER,
+  lane TEXT NOT NULL,            -- 'enter' | 'exit'
+  play TEXT,
+  mint TEXT,
+  pool TEXT,
+  question TEXT NOT NULL,
+  inputs_json TEXT NOT NULL,
+  verdict TEXT NOT NULL,         -- 'yes' | 'no'
+  fallback INTEGER NOT NULL DEFAULT 0,
+  outcome TEXT NOT NULL,         -- ok | disabled | no_api_key | timeout | 401 | 422 | http_error | parse_error | rate_capped | uncertain
+  latency_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_jev_decisions_position ON jev_decisions(position_id);
+CREATE INDEX IF NOT EXISTS idx_jev_decisions_ts ON jev_decisions(ts DESC);
+`);
+  // Calibration columns (2026-10-01, Typesafe docs composite-scoring pattern):
+  // full raw answers + model/usage/state hash, so thresholds/weights can later
+  // be tuned against realized P&L (joined via position_id).
+  for (const col of [
+    "model TEXT", "input_tokens INTEGER", "output_tokens INTEGER",
+    "answers_json TEXT", "state_hash TEXT",
+  ]) {
+    try { database.exec(`ALTER TABLE jev_decisions ADD COLUMN ${col}`); } catch { /* column already exists */ }
+  }
+
   const cols = new Set(
     (database.prepare("PRAGMA table_info(positions)").all() as Array<{ name: string }>).map((c) => c.name)
   );

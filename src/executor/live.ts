@@ -764,6 +764,20 @@ export class LiveExecutor implements Executor {
   }
 
   async open(params: OpenParams): Promise<Position> {
+    // eys_ape (owner addition, 2026-10-01) is token-sided: swap SOL into the
+    // token, deposit the token side above price. That sequence was not
+    // something this change could verify against the Privy wallet's
+    // server-side policy (program/instruction allowlist) from this repo —
+    // see the combo report for exactly what to check before enabling it.
+    // Refuse loudly rather than attempt an unverified on-chain sequence;
+    // paper mode (PaperExecutor) fully supports it for observation.
+    if (params.side === "token") {
+      throw new Error(
+        "LiveExecutor: token-sided open (eys_ape) is not implemented for live trading — " +
+        "Privy wallet policy for the swap-then-token-deposit sequence has not been verified. " +
+        "Paper mode only until confirmed."
+      );
+    }
     const pool = await this.pool(params.poolAddress);
     const activeBin = await pool.getActiveBin();
     const shape = params.range.shape ?? "bidask";
@@ -884,11 +898,12 @@ export class LiveExecutor implements Executor {
     const db = getDb();
     const res = db.prepare(
       `INSERT INTO positions (mode, pool, token_mint, symbol, tranche_of, entry_ts, entry_price, entry_sol,
-        min_bin_id, max_bin_id, state, rent_paid_sol, open_cost_sol)
-       VALUES ('live', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`
+        min_bin_id, max_bin_id, state, rent_paid_sol, open_cost_sol, play)
+       VALUES ('live', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`
     ).run(
       params.poolAddress, params.tokenMint, params.symbol, params.trancheOf ?? null,
-      now(), liveEntryPrice, params.sizeSol, minBin, maxBin, params.range.estBinRentSol, openCostSol
+      now(), liveEntryPrice, params.sizeSol, minBin, maxBin, params.range.estBinRentSol, openCostSol,
+      params.play ?? null,
     );
     const id = Number(res.lastInsertRowid);
     for (const a of accountRows)
@@ -923,6 +938,7 @@ export class LiveExecutor implements Executor {
       maxBinId: maxBin, state: "open", feesClaimedSol: 0,
       rentPaidSol: params.range.estBinRentSol, profitLockFires: 0,
       exitTs: null, exitSol: null, exitReason: null,
+      play: (params.play as Position["play"]) ?? null,
     };
   }
 
@@ -1240,7 +1256,7 @@ export class LiveExecutor implements Executor {
 
     const stateByReason: Record<ExitReason, string> = {
       P0_safety: "closed_safety", P1_stop: "closed_stop", P2_rotation: "closed_rotation",
-      P3_above: "closed_win", P5_below: "closed_below", give_back: "closed_giveback", escape: "closed_escape", manual: "closed_manual",
+      P3_above: "closed_win", P5_below: "closed_below", give_back: "closed_giveback", escape: "closed_escape", manual: "closed_manual", combo_exit: "closed_rotation",
     };
     // Actual wallet credit for this close (exit value + rent refunds - tx fees).
     const closeReturnSol = sigs.length ? await this.walletDelta(sigs) : 0;
