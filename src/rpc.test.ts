@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeConnection } from "./rpc.js";
+import { makeConnection, parseRetryAfterMs, sendWithBackoff } from "./rpc.js";
 
 const PRIMARY = "http://primary.test";
 const BACKUP = "http://backup.test";
@@ -83,5 +83,77 @@ describe("makeConnection RPC failover", () => {
     }));
 
     await expect(makeConnection().getSlot()).rejects.toThrow(/primary is down/);
+  });
+});
+
+describe("parseRetryAfterMs", () => {
+  it("parses an integer-seconds Retry-After", () => {
+    const res = new Response(null, { status: 429, headers: { "retry-after": "2" } });
+    expect(parseRetryAfterMs(res)).toBe(2000);
+  });
+
+  it("parses an HTTP-date Retry-After", () => {
+    const future = new Date(Date.now() + 5000).toUTCString();
+    const res = new Response(null, { status: 429, headers: { "retry-after": future } });
+    const ms = parseRetryAfterMs(res)!;
+    expect(ms).toBeGreaterThan(3000);
+    expect(ms).toBeLessThanOrEqual(5100);
+  });
+
+  it("returns null when the header is absent", () => {
+    expect(parseRetryAfterMs(new Response(null, { status: 429 }))).toBeNull();
+  });
+});
+
+describe("sendWithBackoff", () => {
+  it("returns immediately on a non-429 response, no backoff", async () => {
+    const attempt = vi.fn(async () => new Response("ok", { status: 200 }));
+    const res = await sendWithBackoff(attempt);
+    expect(res.status).toBe(200);
+    expect(attempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors Retry-After between attempts", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const attempt = vi.fn(async () => {
+      calls++;
+      if (calls === 1) return new Response("slow down", { status: 429, headers: { "retry-after": "1" } });
+      return new Response("ok", { status: 200 });
+    });
+    const p = sendWithBackoff(attempt);
+    await vi.advanceTimersByTimeAsync(1300); // retry-after (1s) + max jitter (250ms) + margin
+    const res = await p;
+    expect(res.status).toBe(200);
+    expect(attempt).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("falls back to jittered exponential backoff with no Retry-After header", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const attempt = vi.fn(async () => {
+      calls++;
+      if (calls < 3) return new Response("slow down", { status: 429 });
+      return new Response("ok", { status: 200 });
+    });
+    const p = sendWithBackoff(attempt);
+    await vi.advanceTimersByTimeAsync(400 + 250);   // attempt 2 backoff
+    await vi.advanceTimersByTimeAsync(800 + 250);   // attempt 3 backoff
+    const res = await p;
+    expect(res.status).toBe(200);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it("gives up after maxAttempts and returns the last 429 rather than retrying forever", async () => {
+    vi.useFakeTimers();
+    const attempt = vi.fn(async () => new Response("still slow", { status: 429 }));
+    const p = sendWithBackoff(attempt, 3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const res = await p;
+    expect(res.status).toBe(429);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
   });
 });

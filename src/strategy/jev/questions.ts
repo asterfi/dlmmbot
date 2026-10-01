@@ -53,6 +53,17 @@ const ENTRY: Record<string, JevQuestion> = {
       false: "No such signal, or holders are accumulating/holding.",
     },
   },
+  redflag_stablecoin_major: {
+    type: "noul",
+    instructions: {
+      question: "Is `candidate` actually a stablecoin, a wrapped major asset (wrapped BTC/ETH), or a liquid-staking/major token (e.g. SOL itself, mSOL, jitoSOL) — NOT a memecoin or a new launch?",
+      focus: "Judge from `candidate.symbol`, `candidate.mcap_usd`, and `candidate.age_hours` as a whole: an old, enormous-mcap, well-known asset is a major, not a launch, regardless of how its other numbers look.",
+    },
+    criteria: {
+      true: "This is a stablecoin, wrapped major, or liquid-staking/major token — not a memecoin.",
+      false: "This is a genuine memecoin or new token launch.",
+    },
+  },
   positive_fresh_flow: {
     type: "noul",
     instructions: "Does `flow` show genuine, fresh buying interest behind `candidate` right now — not a stale or finished spike?",

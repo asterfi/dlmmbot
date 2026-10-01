@@ -28,6 +28,8 @@ export interface JupAssetSnapshot {
   symbol: string | null;
   name: string | null;
   icon: string | null;
+  /** Jupiter's own "stable" tag (2026-10-02 stablecoin/majors backstop) — null when the field is absent, not false. */
+  isStableTag: boolean | null;
 }
 
 const CACHE_MS = 55_000;       // one scan cycle — never re-hit a mint within a sweep
@@ -109,6 +111,7 @@ async function fetchAsset(mint: string): Promise<JupAssetSnapshot | null> {
       symbol,
       name,
       icon,
+      isStableTag: Array.isArray(a.tags) ? a.tags.includes("stable") : null,
     };
   } catch {
     return bumpFailure();

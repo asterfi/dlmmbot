@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { vetToken } from "./vet.js";
+import { vetToken, _resetVetCacheForTests } from "./vet.js";
 import { fetchTokenFacts } from "./onchain.js";
 import { fetchReport } from "./rugcheck.js";
 import { tokenSecurity } from "../scanner/gmgn.js";
@@ -34,6 +34,7 @@ describe("vetToken external-call overlap", () => {
       c.vetting.gmgn_trader_tags_enabled = false;
       c.vetting.holder_gate_enabled = false;
     });
+    _resetVetCacheForTests();
     state.inFlight = 0;
     state.max = 0;
 

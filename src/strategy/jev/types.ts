@@ -45,7 +45,8 @@ export type JevOutcome =
   | "http_error"
   | "parse_error"
   | "rate_capped"
-  | "uncertain";
+  | "uncertain"
+  | "jev_uncertain_rules_enter";
 
 export interface JevRawAnswers {
   answers: Record<string, unknown>;

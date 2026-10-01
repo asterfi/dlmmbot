@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { poolGates, poolShareGate } from "./gates.js";
+import { poolGates, poolShareGate, isPeggedToDollar } from "./gates.js";
 import { feeMomentumPart, turnoverPart, structurePart, opportunityScore, timingPart } from "./score.js";
 import { installConfig, restoreConfig } from "../test/config.js";
 import { makePool } from "../test/pool.js";
@@ -52,5 +52,51 @@ describe("opportunityScore parts", () => {
       { timestamp: 4, open: 0.75, high: 0.75, low: 0.6, close: 0.65, volume: 10 },
     ];
     expect(timingPart(candles, 0.65)).toBeLessThan(0.5);
+  });
+});
+
+describe("poolGates — exclude_mints (stablecoins/majors, 2026-10-02)", () => {
+  beforeEach(() => installConfig((c) => {
+    c.scanner.exclude_mints = ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]; // USDC
+  }));
+  afterEach(() => restoreConfig());
+
+  it("rejects a base mint on the exclude list as excluded_mint, even though it clears every other gate", () => {
+    const usdcPool = makePool({ mintX: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", marketCapUsd: 7_894_739_873 });
+    const fails = poolGates(usdcPool).map((f) => f.gate);
+    expect(fails).toContain("excluded_mint");
+  });
+
+  it("does not flag a mint that is not on the list", () => {
+    const fails = poolGates(makePool()).map((f) => f.gate);
+    expect(fails).not.toContain("excluded_mint");
+  });
+
+  it("is a no-op when exclude_mints is unset", () => {
+    installConfig((c) => { delete (c.scanner as { exclude_mints?: string[] }).exclude_mints; });
+    expect(poolGates(makePool()).map((f) => f.gate)).not.toContain("excluded_mint");
+  });
+});
+
+describe("isPeggedToDollar", () => {
+  const c = (close: number) => ({ close });
+
+  it("flags a base token whose price never left a tight band around $1", () => {
+    // 0.0085 SOL * $117.65/SOL ~= $1.00
+    const candles = [c(0.0085), c(0.00852), c(0.00849), c(0.00851)];
+    expect(isPeggedToDollar(candles, 117.65, 0.01)).toBe(true);
+  });
+
+  it("does not flag a genuine memecoin whose price moves", () => {
+    const candles = [c(0.0085), c(0.009), c(0.0078), c(0.0095)];
+    expect(isPeggedToDollar(candles, 117.65, 0.01)).toBe(false);
+  });
+
+  it("returns false when the SOL/USD price is unavailable (fail open, not closed — this is a backstop, not the primary gate)", () => {
+    expect(isPeggedToDollar([c(0.0085), c(0.0085), c(0.0085)], null)).toBe(false);
+  });
+
+  it("returns false with too few candles to judge", () => {
+    expect(isPeggedToDollar([c(0.0085)], 117.65)).toBe(false);
   });
 });

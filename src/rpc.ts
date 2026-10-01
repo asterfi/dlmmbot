@@ -12,6 +12,57 @@ const RPC_TIMEOUT_MS = 20_000;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 /**
+ * Backoff for a RATE-LIMITED primary when there is NO fallback configured
+ * (2026-10-02). With no backup node, the old code just handed a bare 429
+ * straight through to @solana/web3.js's own internal retry — which has no
+ * jitter and no Retry-After awareness, and on this host's Helius plan that
+ * produced storms of 15-20+ consecutive "Server responded with 429... Retrying
+ * after Nms delay" log lines per vetted token (measured 2026-10-01, see the
+ * input-coverage report: 15 tokens took 3m10s to vet). The WITH-fallback path
+ * is untouched — falling over to a working backup immediately is strictly
+ * better than retrying a failing primary, and that behavior is tested.
+ */
+const BACKOFF_MAX_ATTEMPTS = 4;
+const BACKOFF_BASE_MS = 400;
+const BACKOFF_MAX_MS = 6_000;
+const BACKOFF_JITTER_MS = 250;
+
+/** `Retry-After` is seconds (an integer) or an HTTP-date; either form is legal. */
+export function parseRetryAfterMs(res: Response): number | null {
+  const h = res.headers.get("retry-after");
+  if (!h) return null;
+  const secs = Number(h);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const dateMs = Date.parse(h);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : null;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Retry a single host on 429 with jittered backoff, honoring `Retry-After`
+ * when the server sends one. Exported for tests (fetch is injected, no real
+ * network/timers needed).
+ */
+export async function sendWithBackoff(
+  attempt: () => Promise<Response>,
+  maxAttempts = BACKOFF_MAX_ATTEMPTS,
+): Promise<Response> {
+  let res: Response | null = null;
+  for (let i = 0; i < maxAttempts; i++) {
+    if (i > 0) {
+      const retryAfterMs = res ? parseRetryAfterMs(res) : null;
+      const backoff = retryAfterMs ?? Math.min(BACKOFF_BASE_MS * 2 ** (i - 1), BACKOFF_MAX_MS);
+      await sleep(backoff + Math.floor(Math.random() * BACKOFF_JITTER_MS));
+    }
+    if (res) void res.body?.cancel().catch(() => {});
+    res = await attempt();
+    if (res.status !== 429) return res;
+  }
+  return res!; // exhausted — hand the last 429 back to the caller rather than retry forever
+}
+
+/**
  * A Connection that actually honours RPC_URL_FALLBACK.
  *
  * The setting has been offered in the dashboard as "used if the primary RPC
@@ -40,7 +91,7 @@ export function makeConnection(config: ConnectionConfig = { commitment: "confirm
       // retry would fail instantly and the failover would be decorative.
       const send = (url: Parameters<typeof fetch>[0]) =>
         fetch(url, { ...init, signal: AbortSignal.timeout(RPC_TIMEOUT_MS) });
-      if (!rpcUrlFallback) return send(input);
+      if (!rpcUrlFallback) return sendWithBackoff(() => send(input));
       try {
         const res = await send(input);
         if (!RETRYABLE_STATUS.has(res.status)) return res;

@@ -61,7 +61,43 @@ export function resolveTokenCreatedAt(
   return null;
 }
 
+/**
+ * Per-mint vet cache (2026-10-02). vetToken is RPC-heavy (Helius holder/
+ * cluster lookups, RugCheck, GMGN, Jupiter) and scan() re-sweeps every 60s —
+ * without this, a token sitting on the board for 10 minutes got fully
+ * re-vetted 10 times over, hammering Helius hard enough to storm 429s
+ * (measured 2026-10-01: 15 tokens took 3m10s to vet). TTL default 600s
+ * (config().vetting.cache_ttl_s, 0 disables). In-memory only — a restart
+ * re-vets fresh, which is fine; what this damps is redundant work within a
+ * live session, not correctness.
+ */
+const VET_CACHE_DEFAULT_TTL_S = 600;
+const vetCache = new Map<string, { at: number; result: VetResult }>();
+
+/** Test-only: clear the in-memory vet cache between test files. */
+export function _resetVetCacheForTests(): void {
+  vetCache.clear();
+}
+
 export async function vetToken(mint: string, poolCreatedAtMs: number | null): Promise<VetResult> {
+  const ttlS = config().vetting.cache_ttl_s ?? VET_CACHE_DEFAULT_TTL_S;
+  if (ttlS > 0) {
+    const hit = vetCache.get(mint);
+    if (hit && now() - hit.at < ttlS) return hit.result;
+  }
+  const result = await vetTokenUncached(mint, poolCreatedAtMs);
+  if (ttlS > 0) {
+    vetCache.set(mint, { at: now(), result });
+    // Bound memory on a long-running process rather than letting it grow
+    // forever — same prune-on-grow shape jupdata.ts already uses.
+    if (vetCache.size > 1000) {
+      for (const [k, v] of vetCache) if (now() - v.at >= ttlS) vetCache.delete(k);
+    }
+  }
+  return result;
+}
+
+async function vetTokenUncached(mint: string, poolCreatedAtMs: number | null): Promise<VetResult> {
   const v = config().vetting;
   const hard: GateFailure[] = [];
   const fail = (gate: string, value: unknown, limit: unknown) =>
@@ -222,6 +258,7 @@ export async function vetToken(mint: string, poolCreatedAtMs: number | null): Pr
   facts.jupTopHoldersPct = jup?.topHoldersPct ?? null;
   facts.jupOrganicVolShare24h = null;
   facts.jupLiquidityUsd = jup?.liquidityUsd ?? null;
+  facts.jupIsStableTag = jup?.isStableTag ?? null;
   if (jup) {
     const totalVol = (jup.buyVol24h ?? 0) + (jup.sellVol24h ?? 0);
     const organicVol = (jup.organicBuyVol24h ?? 0) + (jup.organicSellVol24h ?? 0);

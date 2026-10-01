@@ -1,7 +1,8 @@
 import { config, SOL_MINT } from "../config.js";
 import { getDb, isBlacklisted, now, recordSkip } from "../db/db.js";
 import type { Candidate } from "../types.js";
-import { poolGates } from "./gates.js";
+import { poolGates, isPeggedToDollar } from "./gates.js";
+import { solUsdPrice } from "../market.js";
 import { priceDivergenceGate } from "./priceGate.js";
 import { trendingByMint } from "./gmgn.js";
 import { sweepPools } from "./meteora.js";
@@ -147,6 +148,9 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
 
   const candidates: Candidate[] = [];
   const rejected: Candidate[] = [];
+  // One SOL/USD read for the whole sweep (the pegged-to-$1 heuristic below
+  // needs it) — not per pool.
+  const solUsd = await solUsdPrice().catch(() => null);
 
   for (const p of bestPool.values()) {
     const gateFailures = poolGates(p);
@@ -163,7 +167,15 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
     let timing = 0.5;
     if (gateFailures.length === 0 && opts.withTiming !== false) {
       try {
-        timing = timingPart(await fetchCandlesDeep(p.address, "5m"), p.price);
+        const candles = await fetchCandlesDeep(p.address, "5m");
+        timing = timingPart(candles, p.price);
+        // Stablecoin/major backstop (2026-10-02): a base token whose price
+        // never left a tight band around $1 across the whole window is a
+        // stable we don't have a mint address for yet, not a flat memecoin.
+        // Reuses the candles already fetched for timing — no extra call.
+        if (isPeggedToDollar(candles, solUsd)) {
+          gateFailures.push({ gate: "excluded_mint", value: p.mintX, limit: "price pegged to $1 across the candle window" });
+        }
       } catch {
         timing = 0.5;
       }

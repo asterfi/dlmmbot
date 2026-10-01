@@ -1065,12 +1065,12 @@ export class LiveExecutor implements Executor {
     const db = getDb();
     const res = db.prepare(
       `INSERT INTO positions (mode, pool, token_mint, symbol, tranche_of, entry_ts, entry_price, entry_sol,
-        min_bin_id, max_bin_id, state, rent_paid_sol, open_cost_sol, play)
-       VALUES ('live', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`
+        min_bin_id, max_bin_id, state, rent_paid_sol, open_cost_sol, play, source)
+       VALUES ('live', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)`
     ).run(
       params.poolAddress, params.tokenMint, params.symbol, params.trancheOf ?? null,
       now(), executedPrice, entrySol, minBinId, maxBinId, params.range.estBinRentSol, entrySol,
-      params.play ?? null,
+      params.play ?? null, params.source ?? null,
     );
     const id = Number(res.lastInsertRowid);
     db.prepare("INSERT INTO position_accounts (position_id, pubkey, min_bin_id, max_bin_id) VALUES (?, ?, ?, ?)")

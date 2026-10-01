@@ -17,14 +17,13 @@ export interface OpenParams {
    * "sol" (default): one-sided SOL deposit (totalXAmount=0), the bot's normal
    * shape. "token": one-sided TOKEN deposit above price (eys_ape only, owner
    * addition 2026-10-01) — swap sizeSol of SOL into the token, deposit 100%
-   * token-side. LiveExecutor currently REFUSES "token" (throws) rather than
-   * attempt an unverified on-chain sequence: the Privy wallet policy's
-   * allowed-instruction set was not something this change could confirm from
-   * the repo (it is configured server-side at Privy), so ape is paper-only
-   * until that is verified. See the final report for what to check before
-   * enabling it live.
+   * token-side. Sign-only Privy policy smoke-tested ALLOW for both the swap
+   * and the deposit (scripts/policy-smoke-real.ts) — live since 2026-10-01,
+   * gated by config combo.ape_live_enabled.
    */
   side?: "sol" | "token";
+  /** eys_ape discovery source (2026-10-02 widening) — "stonks" | "meteora", for later comparison. */
+  source?: string;
   /**
    * "active" (default): the range top re-anchors to the live active bin,
    * width preserved — the primary's rule. "planned": open exactly the planned

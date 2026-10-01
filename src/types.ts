@@ -71,6 +71,8 @@ export interface VetResult {
     jupTopHoldersPct?: number | null;
     jupOrganicVolShare24h?: number | null; // organic / total 24h volume, 0-1
     jupLiquidityUsd?: number | null;       // token-wide liquidity, all pools (whale-overhang denominator)
+    /** Jupiter's own "stable" tag (2026-10-02 stablecoin/majors backstop) — null when unknown. */
+    jupIsStableTag?: boolean | null;
   };
 }
 

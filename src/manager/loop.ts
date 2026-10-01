@@ -34,7 +34,7 @@ import { sleeveAtEntry } from "../risk/sleeve.js";
 import type { Position } from "../types.js";
 import { vetToken } from "../vetting/vet.js";
 import { classifyPlay, detectDipBounce, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
-import { classifyApe, type ApeCandidateFeatures } from "../strategy/combo/ape.js";
+import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
 import { sizeComboPlay, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
 import { comboExitCheck } from "../strategy/combo/exits.js";
 import { planDankoRange } from "../strategy/combo/dankoRange.js";
@@ -1682,11 +1682,15 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     return;
   }
 
-  // eys_ape discovery (owner addition, 2026-10-01): Stonks Launchpad graduates
-  // ONLY where that mint also cleared our own DLMM scanner sweep above — see
-  // the [combo] ape_* comment in config.toml for why no separate mint->pool
-  // resolver is built. fetchStonkTokens has its own TTL/fail-open cache, so
-  // this is cheap to call every tick.
+  // eys_ape discovery (owner addition, 2026-10-01; widened 2026-10-02): per a
+  // re-read of Eys's own article, he found candidates by watching GMGN +
+  // Meteora directly (clicking every coin posted in a DLMM Discord channel) —
+  // Stonks was a bonus ("fees can get huge there"), never a requirement. So
+  // eligibility is now ANY candidate from the main sweep (already cleared
+  // upstream's gates + vetting + exclude_mints), with Stonks-listed mints
+  // additionally getting a ranking boost (ape_stonks_priority) since Eys
+  // called their fee flow out specifically. fetchStonkTokens has its own
+  // TTL/fail-open cache, so this is cheap to call every tick.
   const comboCfgTick = config().combo;
   let apeStonkMints: Set<string> | null = null;
   if (comboCfgTick?.enabled && comboCfgTick.ape_enabled !== false) {
@@ -1695,6 +1699,20 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       apeStonkMints = new Set(stonkRows.map((r) => r.mint));
     } catch (e) {
       console.error("[combo] stonkfun list fetch threw (ape discovery idles this tick):", (e as Error).message);
+    }
+    // Stonks ranking boost (2026-10-02): nudge Stonks-listed candidates ahead
+    // in THIS tick's iteration order so they get first crack at the single ape
+    // slot, without vetting every candidate up front just to compare them
+    // (that would undo the RPC-load fix above). Only reorders when at least
+    // one Stonks mint is actually present this sweep; otherwise the existing
+    // score ordering is untouched for every other play.
+    if (comboCfgTick.ape_stonks_priority !== false && apeStonkMints && apeStonkMints.size > 0) {
+      const stonkSet = apeStonkMints;
+      candidates = [...candidates].sort((a, b) => {
+        const as = stonkSet.has(a.tokenMint) ? 1 : 0;
+        const bs = stonkSet.has(b.tokenMint) ? 1 : 0;
+        return as !== bs ? bs - as : b.score - a.score;
+      });
     }
   }
   // Gates below re-run on every tick for the same candidate, so they write one
@@ -1738,6 +1756,15 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     }
     if (vet.verdict !== "pass") {
       recordSkip(cand.tokenMint, cand.pool.address, vet.hardFailures[0]?.gate ?? "vet", cand.score, { vet, cand });
+      continue;
+    }
+    // Stablecoin/majors backstop (2026-10-02): the exclude_mints list +
+    // candle-pegged heuristic in scan.ts/gates.ts already keep these off the
+    // board; this is a second, independent signal (Jupiter's own "stable"
+    // tag) checked universally, not just for combo — a pair that isn't a
+    // launch/memecoin at all shouldn't reach any sizing path.
+    if (vet.facts.jupIsStableTag) {
+      recordSkip(cand.tokenMint, cand.pool.address, "excluded_mint", cand.score, { symbol: cand.symbol, reason: "jupIsStableTag" });
       continue;
     }
 
@@ -2063,6 +2090,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // vetting gate. A candidate that fits no play falls through unchanged to
     // the normal Kelly-sized entry below.
     let play: Play | null = null;
+    let apeSource: ApeSource | null = null;
     const comboCfgEntry = config().combo;
     if (comboCfgEntry?.enabled) {
       const cc = comboCfgEntry;
@@ -2095,20 +2123,29 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         oneSidedFeasible: reach.ok,
       };
       let classified = classifyPlay(features, cc);
-      // eys_ape: only for Stonks-listed mints that also cleared our own DLMM
-      // sweep (apeStonkMints), and only when no SOL-side play already fit —
-      // the rule-priority order stays danko > molu > eys_seat > eys_ape.
-      if (!classified && cc.ape_enabled !== false && apeStonkMints?.has(cand.tokenMint)) {
+      // eys_ape (widened 2026-10-02): ANY candidate from the main sweep is
+      // eligible now, not just Stonks mints — only when no SOL-side play
+      // already fit (rule-priority order stays danko > molu > eys_seat >
+      // eys_ape). Stonks-listed mints are tagged source="stonks" and get the
+      // ranking boost applied via the candidates re-sort above; everything
+      // else is source="meteora".
+      if (!classified && cc.ape_enabled !== false) {
+        const source: ApeSource = apeStonkMints?.has(cand.tokenMint) ? "stonks" : "meteora";
         const apeFeatures: ApeCandidateFeatures = {
+          mcapUsd: cand.pool.marketCapUsd,
+          tokenAgeMinutes: ageMin,
           // feesBothTokens is always known for a DLMM pool our own scanner fetched.
           feeModeKnown: true,
           quoteOnlyFee: cand.pool.feesBothTokens === false,
           feesEarnedPoolSol: features.feesEarnedPoolSol,
+          flowUsdPerMin: features.flowUsdPerMin,
           oneSidedFeasible: reach.ok, // approximation: symmetric bin-count feasibility, up vs down
+          source,
         };
         const apeClassified = classifyApe(apeFeatures, cc);
         if (apeClassified) {
           classified = { play: "eys_ape", reasons: apeClassified.reasons };
+          apeSource = apeClassified.source;
           if (apeClassified.feeModeUnknown) {
             recordDecision(cand.tokenMint, cand.pool.address, "skipped", "fee_mode_unknown", score, { apeFeatures, symbol: cand.symbol });
           }
@@ -2195,6 +2232,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             name_or_socials: null as string | null, // not tracked by the scanner today
             mcap_usd: cand.pool.marketCapUsd,
             age_hours: features.tokenAgeMinutes !== null ? features.tokenAgeMinutes / 60 : null,
+            source: apeSource ?? "meteora", // discovery source for post-hoc comparison (stonks vs meteora sweep)
           },
           pool: {
             bin_step: cand.pool.binStep,
@@ -2220,7 +2258,27 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             freeze_authority_revoked: vet.facts.freezeAuthority === null,
             creator_rug_count: vet.facts.creatorRugCount,
           },
-          flow: flow ? { smart_wallets: flow.smartWallets, new_joiners: flow.newJoiners, net_usd: flow.netUsd, kol_count: flow.kolNames.length } : null,
+          // Flow (2026-10-02 fix): GMGN's global smart-money/KOL track feed is
+          // a thin, random sample (~100 trades/2min across the WHOLE market),
+          // so it rarely covers any one scanned candidate — flowFor() being
+          // null is normal, not broken. Jev must never read that null as "no
+          // buying": `smart_money_available` says explicitly whether the
+          // smart-money fields below are real, and the datapi-derived volume
+          // proxies (always available — no extra network call) give Jev a
+          // flow signal either way. traderSmartCount is the on-demand,
+          // per-mint, budget/pace-respecting GMGN signal (vetting.ts's own
+          // tokenTraderTags call, reused here, not a new fetch).
+          flow: {
+            smart_money_available: flow !== null,
+            smart_wallets: flow?.smartWallets ?? null,
+            new_joiners: flow?.newJoiners ?? null,
+            net_usd: flow?.netUsd ?? null,
+            kol_count: flow?.kolNames.length ?? null,
+            smart_traders_in_top20: vet.facts.traderSmartCount ?? null,
+            vol_30m_usd: cand.pool.vol30mUsd,
+            vol_1h_usd: cand.pool.vol1hUsd,
+            volume_trend_1h_vs_avg: cand.pool.vol24hUsd > 0 ? cand.pool.vol1hUsd / (cand.pool.vol24hUsd / 24) : null,
+          },
           account: {
             equity_sol: bankroll.walletSol, deployable_sol: bankroll.deployableSol,
             open_combo_positions: counts,
@@ -2256,7 +2314,10 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
 
         console.log(
           `[jev] enter ${cand.symbol} (${classified.play}): ${jevResult.verdict}` +
-          `${jevResult.fallback ? ` [jev_fallback: ${jevResult.outcome}]` : jevResult.outcome === "uncertain" ? " [uncertain]" : ""} ` +
+          `${jevResult.fallback ? ` [jev_fallback: ${jevResult.outcome}]`
+            : jevResult.outcome === "uncertain" ? " [uncertain->skip]"
+            : jevResult.outcome === "jev_uncertain_rules_enter" ? " [uncertain->rules]"
+            : ""} ` +
           `(${jevResult.latencyMs}ms${jevResult.playChoice ? `, jev_play=${jevResult.playChoice}` : ""})`
         );
         if (jevResult.verdict === "no") {
@@ -2304,6 +2365,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         entryPrice,
         play: play ?? undefined,
         side: play === "eys_ape" ? "token" : undefined,
+        source: play === "eys_ape" ? (apeSource ?? "meteora") : undefined,
       }));
     } catch (e) {
       const err = e as Error & { code?: string; logs?: string[] };

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { vetToken } from "./vet.js";
+import { vetToken, _resetVetCacheForTests } from "./vet.js";
 import { fetchReport, type RugcheckReport } from "./rugcheck.js";
 import { fetchTokenFacts } from "./onchain.js";
 import { installConfig, restoreConfig } from "../test/config.js";
@@ -71,6 +71,7 @@ describe("vetToken fail-closed gates", () => {
   beforeEach(() => {
     useMemoryDb();
     installConfig();
+    _resetVetCacheForTests(); // every test reuses MINT with different mocks/config — the cache must not leak between them
     factsMock.mockReset().mockResolvedValue(onchainFacts());
     reportMock.mockReset().mockResolvedValue(null);
   });
@@ -148,6 +149,10 @@ describe("vetToken fail-closed gates", () => {
       c.vetting.age_min_enabled = false;
       c.vetting.age_max_enabled = false;
     });
+    // The per-mint vet cache (2026-10-02) stores the full gate-evaluated
+    // result, so a config change alone won't be reflected for this mint until
+    // the TTL expires — reset it here the same way a real cache-expiry would.
+    _resetVetCacheForTests();
     expect(gatesOf(await vetToken(MINT, null))).not.toContain("age_unknown");
   });
 

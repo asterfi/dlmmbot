@@ -418,6 +418,11 @@ CREATE INDEX IF NOT EXISTS idx_error_log_ts ON error_log(ts DESC);
   try {
     database.exec("CREATE INDEX IF NOT EXISTS idx_positions_play ON positions(play)");
   } catch { /* */ }
+  // eys_ape discovery source (2026-10-02 widening): "stonks" | "meteora", so
+  // the two sources can be compared against real P&L once there's a sample.
+  try {
+    database.exec("ALTER TABLE positions ADD COLUMN source TEXT");
+  } catch { /* column already exists */ }
 
   // jev_decisions: every Jev consult (enter/exit), linked to position_id so
   // Jev's yes/no can later be compared against real P&L. Logged on every

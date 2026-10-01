@@ -59,6 +59,8 @@ export interface Config {
     retain_snapshots_days?: number;
     /** Hard ceiling on the SQLite file in MB. Above it, skipped decisions and snapshots are trimmed oldest-first regardless of age. */
     db_max_mb?: number;
+    /** Base mints (mintX) rejected outright regardless of everything else — stablecoins/majors/wrapped assets, not memecoins. Optional: empty in code if unset. */
+    exclude_mints?: string[];
   };
   gates: {
     tvl_min_usd: number; tvl_max_usd: number; mcap_min_usd: number;
@@ -114,6 +116,8 @@ export interface Config {
     insider_cluster_max_pct: number; rugcheck_veto_normalised: number;
     age_min_minutes: number; age_max_days: number;
     allow_token2022_extensions: string[];
+    /** vetToken() result cache TTL, seconds. 0 disables. Optional: defaults in code (600s). */
+    cache_ttl_s?: number;
   };
   timing: { freefall_15m_max_pct: number; ath_proximity_pct: number; vol_spike_ratio: number; vol_spike_bonus: number };
   score_caps: { bonus_cap_total: number };
@@ -386,6 +390,11 @@ export interface Config {
     ape_sol: number;
     ape_fee_min_sol: number;
     ape_range_up_pct: number;
+    /** Widened discovery (2026-10-02): any main-sweep candidate is ape-eligible, not just Stonks mints. */
+    ape_age_max_h: number;
+    ape_mcap_min_usd: number;
+    /** Stonks-listed mints get a ranking boost for the single ape slot. Default true. */
+    ape_stonks_priority?: boolean;
     /** Kill switch for eys_ape's LIVE execution path (owner's decision, 2026-10-01: live from day one). Default true (missing key = enabled, matching the owner's decision); set false to force paper-only again. */
     ape_live_enabled?: boolean;
     /** eys_seat cost-skip: expected win must clear the estimated round-trip cost. */
@@ -422,6 +431,9 @@ export interface Config {
     entry_threshold_danko_trap?: number;
     entry_threshold_eys_seat?: number;
     entry_threshold_eys_ape?: number;
+    /** Owner's decision 2026-10-02: an uncertain composite on entry defers to the play's own rules ("rules", default) rather than skipping ("skip"). Per-play override below for eys_ape. */
+    uncertain_entry?: "rules" | "skip";
+    ape_uncertain_entry?: "rules" | "skip";
   };
 }
 

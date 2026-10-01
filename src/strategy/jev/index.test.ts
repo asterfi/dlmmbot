@@ -24,6 +24,7 @@ const GOOD_ENTRY_ANSWERS = {
   redflag_security: { type: "noul", noul: 0.1 },
   redflag_exhausted_spike: { type: "noul", noul: 0.1 },
   redflag_insider_dumping: { type: "noul", noul: 0.1 },
+  redflag_stablecoin_major: { type: "noul", noul: 0.05 },
   positive_fresh_flow: { type: "noul", noul: 0.9 },
   positive_fee_generation_sol: { type: "noul", noul: 0.9 },
   positive_bounce_confirmed: { type: "noul", noul: 0.9 },
@@ -174,7 +175,11 @@ describe("jevConsult — entry policy (composite scoring)", () => {
     expect(r.reason).toMatch(/play_mismatch/);
   });
 
-  it("is uncertain when the composite score lands in the uncertain band — verdict no, outcome uncertain, not a fallback", async () => {
+  it("with uncertain_entry=skip, an uncertain composite skips — verdict no, outcome uncertain, not a fallback", async () => {
+    // Owner's decision 2026-10-02 made "rules" (enter) the DEFAULT for SOL-side
+    // plays — see the dedicated "uncertain-entry policy" describe block below
+    // for that behavior. This test pins the explicit opt-in "skip" path.
+    installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "skip" } as any; });
     vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
     const answers = {
       ...GOOD_ENTRY_ANSWERS,
@@ -279,5 +284,70 @@ describe("jevConsult — bounded concurrency", () => {
     release();
     const firstResult = await first;
     expect(firstResult.consulted).toBe(true);
+  });
+});
+
+describe("jevConsult — uncertain-entry policy (owner's decision 2026-10-02: aggressive, not conservative)", () => {
+  const uncertainAnswers = {
+    ...GOOD_ENTRY_ANSWERS,
+    positive_fresh_flow: { type: "noul", noul: 0.5 },
+    positive_fee_generation_sol: { type: "noul", noul: 0.5 },
+    positive_bounce_confirmed: { type: "noul", noul: 0.5 },
+    positive_narrative_strength: { type: "noul", noul: 0.5 },
+    // High probability for every SOL-side play so this fixture works
+    // regardless of which rulePlay a given test asks about — only the
+    // composite-score uncertainty is under test here, not play agreement.
+    play: { type: "choice", choice: "molu_ladder", probabilities: { molu_ladder: 0.9, danko_trap: 0.9, eys_seat: 0.9 }, confidence: 0.9 },
+  };
+
+  it("defers to the play's own rules (enters) for a SOL-side play when uncertain_entry=rules (the default)", async () => {
+    installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "rules" } as any; });
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: uncertainAnswers, usage: {} })));
+    const r = await jevConsult(enterInput({ play: "molu_ladder" }));
+    expect(r.consulted).toBe(true);
+    expect(r.fallback).toBe(false);
+    expect(r.verdict).toBe("yes");
+    expect(r.outcome).toBe("jev_uncertain_rules_enter");
+  });
+
+  it("still skips for eys_ape even when uncertain_entry=rules globally (per-play override defaults to skip)", async () => {
+    installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "rules" } as any; });
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    const apeAnswers = { ...uncertainAnswers, play: { type: "choice", choice: "eys_ape", probabilities: { eys_ape: 0.9 }, confidence: 0.9 } };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: apeAnswers, usage: {} })));
+    const r = await jevConsult(enterInput({ play: "eys_ape", question: "enter with play eys_ape?" }));
+    expect(r.verdict).toBe("no");
+    expect(r.outcome).toBe("uncertain");
+  });
+
+  it("skips a SOL-side play too when uncertain_entry is explicitly set to skip", async () => {
+    installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "skip" } as any; });
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: uncertainAnswers, usage: {} })));
+    const r = await jevConsult(enterInput({ play: "danko_trap" }));
+    expect(r.verdict).toBe("no");
+    expect(r.outcome).toBe("uncertain");
+  });
+
+  it("red-flag vetoes still reject regardless of uncertain_entry=rules", async () => {
+    installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "rules" } as any; });
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    const vetoAnswers = { ...uncertainAnswers, redflag_security: { type: "noul", noul: 0.9 } };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: vetoAnswers, usage: {} })));
+    const r = await jevConsult(enterInput({ play: "molu_ladder" }));
+    expect(r.verdict).toBe("no");
+    expect(r.outcome).toBe("ok");
+    expect(r.reason).toMatch(/redflag_veto/);
+  });
+
+  it("ape_uncertain_entry can be overridden to rules explicitly", async () => {
+    installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "rules", ape_uncertain_entry: "rules" } as any; });
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    const apeAnswers = { ...uncertainAnswers, play: { type: "choice", choice: "eys_ape", probabilities: { eys_ape: 0.9 }, confidence: 0.9 } };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: apeAnswers, usage: {} })));
+    const r = await jevConsult(enterInput({ play: "eys_ape", question: "enter with play eys_ape?" }));
+    expect(r.verdict).toBe("yes");
+    expect(r.outcome).toBe("jev_uncertain_rules_enter");
   });
 });

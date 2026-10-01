@@ -205,7 +205,7 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
 
     if (input.lane === "enter") {
       const redflags: Record<string, number> = {};
-      for (const id of ["redflag_wash_volume", "redflag_security", "redflag_exhausted_spike", "redflag_insider_dumping"]) {
+      for (const id of ["redflag_wash_volume", "redflag_security", "redflag_exhausted_spike", "redflag_insider_dumping", "redflag_stablecoin_major"]) {
         redflags[id] = noul(res.answers, id);
       }
       const positives: Record<string, number> = {};
@@ -226,9 +226,23 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
           playChoice: answers.playChoice,
           reason: `approved (composite=${outcome.compositeScore.toFixed(3)}, model=${res.model ?? model}, ${res.latencyMs}ms)` };
       } else if (outcome.decision === "uncertain") {
-        result = { consulted: true, verdict: "no", fallback: false, outcome: "uncertain", latencyMs: res.latencyMs, slow, raw,
-          playChoice: answers.playChoice,
-          reason: `uncertain (composite=${outcome.compositeScore.toFixed(3)} in band) — entry skipped` };
+        // Owner's decision (2026-10-02): the strategy should be aggressive
+        // like the authors, not conservative. For SOL-side plays an uncertain
+        // composite defers to the play's own rules (enter) rather than
+        // skipping; eys_ape (token-sided, no stop-loss) keeps the
+        // conservative skip. Config-driven, per-play overridable.
+        const mode = input.play === "eys_ape"
+          ? (j.ape_uncertain_entry ?? "skip")
+          : (j.uncertain_entry ?? "rules");
+        if (mode === "rules") {
+          result = { consulted: true, verdict: "yes", fallback: false, outcome: "jev_uncertain_rules_enter", latencyMs: res.latencyMs, slow, raw,
+            playChoice: answers.playChoice,
+            reason: `uncertain (composite=${outcome.compositeScore.toFixed(3)} in band) — deferring to ${input.play}'s own rules (uncertain_entry=rules)` };
+        } else {
+          result = { consulted: true, verdict: "no", fallback: false, outcome: "uncertain", latencyMs: res.latencyMs, slow, raw,
+            playChoice: answers.playChoice,
+            reason: `uncertain (composite=${outcome.compositeScore.toFixed(3)} in band) — entry skipped (uncertain_entry=skip)` };
+        }
       } else {
         result = { consulted: true, verdict: "no", fallback: false, outcome: "ok", latencyMs: res.latencyMs, slow, raw,
           playChoice: answers.playChoice,

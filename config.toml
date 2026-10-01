@@ -5,6 +5,33 @@
 cards = true               # render Telegram alerts as dashboard-styled PNG cards (satori+resvg); false = plain text only
 
 [scanner]
+# Stablecoins/majors/wrapped assets (2026-10-02 fix — see the input-coverage
+# report): the base mint (mintX) is rejected outright ("excluded_mint") when
+# it's in this list, regardless of mcap/tvl/fee/volume — a USDC-SOL pool
+# cleared every other gate and combo's danko_trap classified it. Every address
+# below was verified against Jupiter's live token API (lite-api.jup.ag/tokens/v2,
+# tags include "stable"/"lst"/"major") on 2026-10-02, not guessed. Backed up by
+# a price-pegged-to-$1 heuristic (scanner/gates.ts isPeggedToDollar) and a Jev
+# red-flag question, for stables/wraps not yet added here by mint.
+exclude_mints = [
+  "So11111111111111111111111111111111111111112",  # SOL / wSOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+  "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",  # PYUSD
+  "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA",   # USDS
+  "DEkqHyPN7GMRJ5cArtQFAWefqbZb33Hyf6s5iCwjEonT",  # USDe
+  "9zNQRsGLjNKwCUU5Gq5LR8beUCPzQMVMqKAi3SSZh54u",  # FDUSD
+  "A1KLoBrKBde8Ty9qtNQUtq3C2ortoC3u7twggz7sEto6",  # USDY
+  "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",   # mSOL
+  "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",  # JitoSOL
+  "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",   # bSOL
+  "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v",   # JupSOL
+  "5oVNBeEEQvYi1cX3ir8Dx5n1P7pdxydbGF2X4TxVusJm",  # INF
+  "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",   # cbBTC
+  "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",  # WBTC (Portal/Wormhole)
+  "5XZw2LKTyrfvfiskJ78AMpackRjPcyCif1WhUsPDuVqQ",  # WBTC (Sollet)
+  "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  # whETH (Portal/Wormhole)
+]
 interval_s = 60
 pages = 3                  # datapi pages per sweep (100 pools/page)
 # Max datapi requests in flight. Sweep pages and the majors whitelist lookups are
@@ -80,7 +107,9 @@ whale_skip_liquidity_frac = 0.25  # SKIP: one fresh whale's holdings >= 25% of l
 whale_cut_fresh_overhang_frac = 0.25 # CUT (young sizing, no tranche): paper profit of wallets that bought
                                   # within whale_fresh_hold_min >= 25% of liquidity. Fresh only: all-holder
                                   # profit exceeded 30% of liquidity on 11/16 live tokens (2026-09-27).
-fee_tvl_24h_min_pct = 20         # %/day
+# 2026-10-02: 20->15, gate audit: 15-20%/day bucket 4/5 winners at 1h, <15%
+# ~0 winners; low-confidence sample, re-audit after 1-2 weeks of outcome_backfill.
+fee_tvl_24h_min_pct = 15         # %/day
 fee_tvl_30m_daily_min_pct = 10   # 30m ratio annualized to daily, %/day
 vol_30m_min_usd = 25000
 vol_trend_min = 0.8              # vol_1h / (vol_24h/24)
@@ -111,7 +140,14 @@ holder_gate_enabled = true       # block single-holder / top-10 concentration
 rugcheck_veto_enabled = true     # block high RugCheck score (rugged flag always on)
 creator_rug_enabled = true       # block creators with prior rug count
 gmgn_security_enabled = true     # block honeypot / sell-tax from GMGN
-gmgn_trader_tags_enabled = false   # weight-5 traders call — off by default (rate-limit headroom)
+# 2026-10-02: turned on as the on-demand per-candidate GMGN flow signal for
+# Jev (input-coverage audit found smart-money flow 0/15 populated — GMGN's
+# global track feed is too thin to cover scanned candidates). This call is
+# already budget/pace/ban-aware and cached per mint (gmgn.ts tokenTraderTags),
+# and the coverage run measured GMGN throttleLevel=0, never banned, well
+# inside budget even vetting 15 tokens — reusing it rather than building a
+# new fetch. Revert to false if GMGN budget pressure shows up later.
+gmgn_trader_tags_enabled = true   # weight-5 traders call
 single_holder_max_pct = 15
 top10_max_pct = 40
 insider_cluster_max_pct = 10
@@ -119,6 +155,12 @@ rugcheck_veto_normalised = 41
 age_min_minutes = 45
 age_max_days = 14                # only applies when age_max_enabled = true
 allow_token2022_extensions = ["metadata"]
+# vetToken() result cache (2026-10-02): scan() re-sweeps every 60s, and
+# vetToken is RPC-heavy (Helius holder/cluster lookups + RugCheck + GMGN +
+# Jupiter) — without this a token sitting on the board 10 minutes got
+# re-vetted 10 times, which is what was storming Helius with 429s (measured
+# 2026-10-01: 15 tokens took 3m10s). 0 disables (always re-vet fresh).
+cache_ttl_s = 600
 
 [timing]                   # STRATEGY.md §2.3 — soft, feeds score
 freefall_15m_max_pct = -20
@@ -740,19 +782,23 @@ danko_down_min_pct = 85
 danko_down_max_pct = 90
 danko_tp_pct = 17.5          # exit at break-even-or-better after a bounce, or +15-20% if it runs (midpoint default)
 
-# eys_ape (owner addition, 2026-10-01): token-sided ape into Stonks Launchpad
-# graduates paying SOL-only fees (Eys "0.1->10 SOL" $CTO article). Discovery
-# is restricted to Stonks mints that ALSO clear our own Meteora DLMM scanner
-# sweep (scan.ts) — that sweep already picks the deepest/best-fee pool per
-# token (STRATEGY.md §1 step 3), so no separate mint->pool resolver is built.
-# A Stonks token whose only venue is a DAMM v2 pool (no DLMM pool) is out of
-# scope: the bot only trades DLMM. Fixed ticket size, NOT a % of the active
-# budget. Max 1 concurrent regardless of canary_mode. Can go to zero; no stop
-# loss (owner's decision, same as every other play).
+# eys_ape (owner addition, 2026-10-01; widened 2026-10-02): token-sided ape,
+# range above price, SOL-fee pools (Eys "0.1->10 SOL" $CTO article). Re-read
+# 2026-10-02: Eys found candidates watching GMGN + Meteora directly (clicking
+# every coin posted in a DLMM Discord channel) — Stonks was a bonus ("fees can
+# get huge there"), never a requirement. Discovery is now ANY candidate from
+# the main Meteora sweep that already cleared upstream's gates + vetting +
+# exclude_mints, PLUS Stonks-feed mints as before; Stonks mints get a ranking
+# boost (ape_stonks_priority) for the single ape slot. Fixed ticket size, NOT
+# a % of the active budget. Max 1 concurrent regardless of canary_mode. Can go
+# to zero; no stop loss (owner's decision, same as every other play).
 ape_enabled = true
 ape_sol = 0.1                # fixed ape ticket (both canary and normal mode)
-ape_fee_min_sol = 10         # fallback fee-flow floor when the pool's fee-collection mode isn't detectable (fee_mode_unknown)
+ape_age_max_h = 48           # new coin only — a proven-floor token belongs to danko_trap/molu, not a token-sided no-stop-loss bet
+ape_mcap_min_usd = 100000    # same floor as eys_seat
+ape_fee_min_sol = 10         # lifetime fees earned in the pool — ALWAYS required now, not just the fee_mode_unknown fallback
 ape_range_up_pct = 50        # token-sided range above price, upper bound (bin/rent-capped like every other range)
+ape_stonks_priority = true   # Stonks-listed mints rank ahead of equal-score Meteora-only candidates for the single ape slot
 # LIVE from day one (owner's decision, 2026-10-01): the SOL->token swap and the
 # token-sided deposit were sign-only Privy policy smoke-tested ALLOW
 # (scripts/policy-smoke-real.ts); claim/close risk is identical across every
@@ -815,3 +861,13 @@ entry_threshold_molu_ladder = 0.60
 entry_threshold_danko_trap = 0.60
 entry_threshold_eys_seat = 0.55
 entry_threshold_eys_ape = 0.70
+
+# Owner's decision (2026-10-02): be aggressive like the authors, not
+# conservative. An uncertain composite (inside the uncertain band, above) on
+# a SOL-side play now defers to the PLAY'S OWN RULES rather than skipping —
+# the rule engine already classified it and gated it on real numbers; Jev's
+# job here is the red-flag veto, not an extra conservatism layer on a
+# genuinely ambiguous read. eys_ape (token-sided, no stop-loss) keeps the
+# conservative skip. Red-flag vetoes always reject regardless of this.
+uncertain_entry = "rules"        # molu_ladder / danko_trap / eys_seat
+ape_uncertain_entry = "skip"     # eys_ape override

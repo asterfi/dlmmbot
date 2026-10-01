@@ -9,9 +9,21 @@ const DAY_MS = 86_400_000;
 
 export function poolGates(p: PoolInfo & { extras: RawPoolExtras }): GateFailure[] {
   const g = config().gates;
+  const sc = config().scanner;
   const fails: GateFailure[] = [];
   const fail = (gate: string, value: unknown, limit: unknown) =>
     fails.push({ gate, value: String(value), limit: String(limit) });
+
+  // Stablecoins/majors/wrapped assets (2026-10-02): the USDC-SOL pool cleared
+  // every gate below (mcap, tvl, fee/vol, quote_mint=SOL) and scored as a real
+  // candidate — combo's danko_trap happily classified it ("mcap >= $1M AND
+  // age >= 48h"). Checked FIRST, before anything else, since nothing past
+  // this point is meaningful for a pair that isn't a launch/memecoin at all.
+  // Seeded list verified against Jupiter's live token API (tags include
+  // "stable"/"lst"/"major") — see config.toml [scanner] exclude_mints.
+  if (sc.exclude_mints?.includes(p.mintX)) {
+    fail("excluded_mint", p.mintX, "not a stablecoin/major/wrapped asset");
+  }
 
   if (p.tvlUsd < g.tvl_min_usd) fail("tvl_min", p.tvlUsd.toFixed(0), g.tvl_min_usd);
   if (p.tvlUsd > g.tvl_max_usd) fail("tvl_max", p.tvlUsd.toFixed(0), g.tvl_max_usd);
@@ -67,6 +79,26 @@ export function poolGates(p: PoolInfo & { extras: RawPoolExtras }): GateFailure[
     fail("freeze_authority_listing", "enabled", "disabled");
 
   return fails;
+}
+
+/**
+ * Heuristic backstop for the exclude_mints list (2026-10-02): a base token
+ * whose price never left a tight band around $1 over the whole candle window
+ * is a stablecoin we don't have a mint address for yet, not a memecoin that
+ * happens to be flat. Pure — candles are already fetched for gate-passers
+ * (scan.ts's timing block) and solUsdPrice is the live SOL/USD rate, so no
+ * extra network call is needed to run this.
+ */
+export function isPeggedToDollar(
+  candles: Array<{ close: number }>,
+  solUsdPrice: number | null,
+  toleranceFrac = 0.01,
+): boolean {
+  if (!solUsdPrice || solUsdPrice <= 0 || candles.length < 3) return false;
+  return candles.every((c) => {
+    const usd = c.close * solUsdPrice;
+    return usd > 0 && Math.abs(usd - 1) <= toleranceFrac;
+  });
 }
 
 /** §6: our position must not become a dominant share of the pool. */
