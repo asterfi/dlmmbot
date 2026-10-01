@@ -103,7 +103,14 @@ export function makeConnection(config: ConnectionConfig = { commitment: "confirm
         // endpoint the operator actually configured as primary.
         return send(rpcUrlFallback).catch(() => { throw e; });
       }
-      return send(rpcUrlFallback);
+      // Primary refused (429/5xx): try the backup. If the backup refuses too
+      // (e.g. a free-tier fallback that rate-limits getProgramAccounts), use
+      // the jittered, Retry-After-aware backoff on the primary rather than
+      // handing a bare 429 to the un-jittered web3.js retry storm.
+      const fb = await send(rpcUrlFallback).catch(() => null);
+      if (fb && !RETRYABLE_STATUS.has(fb.status)) return fb;
+      if (fb) void fb.body?.cancel().catch(() => {});
+      return sendWithBackoff(() => send(input));
     },
   });
 }

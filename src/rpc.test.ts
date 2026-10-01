@@ -58,6 +58,23 @@ describe("makeConnection RPC failover", () => {
     expect(seen.some((u) => u.includes("backup.test"))).toBe(true);
   });
 
+  it("backs off on the primary when the fallback is rate-limited too", async () => {
+    const seen: string[] = [];
+    let primaryCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+      const url = urlOf(input);
+      seen.push(url);
+      if (url.startsWith(BACKUP)) return slotReply(0, 429);
+      primaryCalls++;
+      // First primary attempt is rate-limited; the backoff retry succeeds.
+      return primaryCalls === 1 ? slotReply(0, 429) : slotReply(777);
+    }));
+    const slot = await makeConnection().getSlot();
+    expect(slot).toBe(777);
+    expect(seen.filter((u) => u.startsWith(BACKUP)).length).toBe(1);
+    expect(primaryCalls).toBeGreaterThanOrEqual(2);
+  });
+
   it("does not retry a primary response that simply is not retryable", async () => {
     const seen: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
