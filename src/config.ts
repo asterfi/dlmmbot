@@ -377,6 +377,8 @@ export interface Config {
     ape_sol: number;
     ape_fee_min_sol: number;
     ape_range_up_pct: number;
+    /** Kill switch for eys_ape's LIVE execution path (owner's decision, 2026-10-01: live from day one). Default true (missing key = enabled, matching the owner's decision); set false to force paper-only again. */
+    ape_live_enabled?: boolean;
     /** eys_seat cost-skip: expected win must clear the estimated round-trip cost. */
     eys_cost_tx_count: number;
     eys_cost_tx_sol: number;

@@ -15,11 +15,17 @@
  *   5. Jupiter swap token->SOL          (jupiter.ts buildSwapToSolTx — the build
  *                                        half swapToSol() already sends from;
  *                                        split out 2026-10-01 for this script)
- *   6. Jupiter swap SOL->token (ape)    (jupiter.ts buildSwapFromSolTx, already used
- *                                        by profitBurn.ts)
- *   7. Token-sided DLMM deposit (ape)   (DLMM SDK, mirrors shape 1 inverted)
+ *   6. Jupiter swap SOL->token (ape)    (jupiter.ts buildSwapFromSolTx, used by
+ *                                        LiveExecutor.openApe AND profitBurn.ts)
+ *   7. Token-sided DLMM deposit (ape)   (live.ts buildApeDepositTx — the EXACT
+ *                                        function LiveExecutor.openApe calls,
+ *                                        not a hand-rolled duplicate)
  *   8. profitBurn path                  (jupiter.ts buildSwapFromSolTx + Burn,
  *                                        same build executeProfitBurn() uses)
+ *
+ * 2026-10-01: shapes 6 and 7 both signed ALLOW (see the run recorded in the
+ * combo report) — eys_ape's live path (LiveExecutor.openApe) is live, gated
+ * by config `combo.ape_live_enabled` (default true).
  *
  * Shapes 3/4 need a REAL on-chain position: `removeLiquidity`/`claimAllSwapFee`/
  * `closePositionIfEmpty` (@meteora-ag/dlmm) all call
@@ -34,7 +40,9 @@
  * abandoned within this session — `program.coder.accounts.encode` overran
  * its buffer on the first attempt, and guessing at raw bytes for a
  * security-sensitive financial program is not something to half-finish. These
- * two shapes are reported NOT INDEPENDENTLY TESTED, never assumed ALLOW.
+ * two shapes are reported NOT INDEPENDENTLY TESTED, never assumed ALLOW. The
+ * owner's decision (2026-10-01) accepts this gap for eys_ape since it is
+ * identical across every play's close path and is backstopped off-box.
  *
  * Run as the dlmmbot user with the real env (same pattern as
  * scripts/privy-smoke.ts):
@@ -57,6 +65,7 @@ import type * as DLMMTypes from "@meteora-ag/dlmm";
 import { env } from "../src/config.js";
 import { loadSigner } from "../src/executor/wallet.js";
 import { buildSwapFromSolTx, buildSwapToSolTx } from "../src/executor/jupiter.js";
+import { buildApeDepositTx } from "../src/executor/live.js";
 import { PROFIT_BURN } from "../src/executor/profitBurn.js";
 
 // Same CJS import pattern as src/executor/live.ts (the SDK's ESM build
@@ -236,17 +245,12 @@ async function main(): Promise<void> {
   ));
 
   results.push(await runCase(
-    "7. Token-sided DLMM deposit (eys_ape, range ABOVE current price)",
+    "7. Token-sided DLMM deposit (eys_ape, range ABOVE current price) — via the REAL executor build (buildApeDepositTx)",
     async () => {
-      const positionKp = Keypair.generate();
       const tokenAmount = new BN(10).pow(new BN(decimalsX)); // 1 whole token, nominal
-      const tx: Transaction = await pool.initializePositionAndAddLiquidityByStrategy({
-        positionPubKey: positionKp.publicKey,
-        user: signer.publicKey,
-        totalXAmount: tokenAmount,
-        totalYAmount: new BN(0),
-        strategy: { minBinId: activeBin.binId, maxBinId: activeBin.binId + 50, strategyType: StrategyType.BidAsk },
-      });
+      const { tx, positionKp } = await buildApeDepositTx(
+        pool, signer.publicKey, BigInt(tokenAmount.toString()), activeBin.binId, activeBin.binId + 50,
+      );
       console.log("extra signer (position keypair):", positionKp.publicKey.toBase58());
       const instructions = await buildAndSignLegacy(tx, [positionKp]);
       return { instructions };

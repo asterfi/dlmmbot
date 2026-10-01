@@ -750,6 +750,12 @@ ape_enabled = true
 ape_sol = 0.1                # fixed ape ticket (both canary and normal mode)
 ape_fee_min_sol = 10         # fallback fee-flow floor when the pool's fee-collection mode isn't detectable (fee_mode_unknown)
 ape_range_up_pct = 50        # token-sided range above price, upper bound (bin/rent-capped like every other range)
+# LIVE from day one (owner's decision, 2026-10-01): the SOL->token swap and the
+# token-sided deposit were sign-only Privy policy smoke-tested ALLOW
+# (scripts/policy-smoke-real.ts); claim/close risk is identical across every
+# play and is accepted (backstopped off-box). Kill switch: set false to force
+# eys_ape back to paper-only without touching live.ts.
+ape_live_enabled = true
 
 # eys_seat cost-skip (owner addition, 2026-10-01): skip the play when its
 # expected win (eys_tp_pct x size) would not clear the estimated round-trip

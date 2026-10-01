@@ -17,7 +17,7 @@ import { fetchPool } from "../scanner/meteora.js";
 import type { ExitReason, Position } from "../types.js";
 import { classifyLeftover, RESIDUAL_SWEEP_MIN_SOL } from "./executor.js";
 import type { Executor, OpenParams, PositionMark } from "./executor.js";
-import { quoteToSolLamports, swapToSolEscalating } from "./jupiter.js";
+import { quoteToSolLamports, swapFromSol, swapToSol, swapToSolEscalating } from "./jupiter.js";
 
 /**
  * Leftover-token share of the close mark at or above which an under-filled
@@ -176,6 +176,33 @@ export function wealthDeltaLamports(
       .reduce((s, b) => s + Number(b.uiTokenAmount.amount), 0);
   lamports += sumWsol(meta.postTokenBalances ?? []) - sumWsol(meta.preTokenBalances ?? []);
   return lamports;
+}
+
+/**
+ * Build (never send) the token-sided add-liquidity tx for an eys_ape deposit.
+ * A free function (not a LiveExecutor method) so a sign-only Privy policy
+ * smoke test can call it directly against a real pool/wallet without
+ * instantiating LiveExecutor, whose constructor refuses outside live mode
+ * (scripts/policy-smoke-real.ts). LiveExecutor.openApe calls this same
+ * function, so the smoke test exercises the EXACT instruction the live path
+ * sends, not a hand-rolled duplicate.
+ */
+export async function buildApeDepositTx(
+  pool: DlmmPool,
+  user: PublicKey,
+  tokenAmountRaw: bigint,
+  minBinId: number,
+  maxBinId: number,
+): Promise<{ tx: Transaction; positionKp: Keypair }> {
+  const positionKp = Keypair.generate();
+  const tx: Transaction = await pool.initializePositionAndAddLiquidityByStrategy({
+    positionPubKey: positionKp.publicKey,
+    user,
+    totalXAmount: new BN(tokenAmountRaw.toString()),
+    totalYAmount: new BN(0),
+    strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk },
+  });
+  return { tx, positionKp };
 }
 
 function lbPositionEmpty(p: LbPosition): boolean {
@@ -765,18 +792,19 @@ export class LiveExecutor implements Executor {
 
   async open(params: OpenParams): Promise<Position> {
     // eys_ape (owner addition, 2026-10-01) is token-sided: swap SOL into the
-    // token, deposit the token side above price. That sequence was not
-    // something this change could verify against the Privy wallet's
-    // server-side policy (program/instruction allowlist) from this repo —
-    // see the combo report for exactly what to check before enabling it.
-    // Refuse loudly rather than attempt an unverified on-chain sequence;
-    // paper mode (PaperExecutor) fully supports it for observation.
+    // token, deposit the token side above price. Policy smoke-tested
+    // sign-only 2026-10-01 (scripts/policy-smoke-real.ts): both the SOL->token
+    // swap and the token-sided deposit ALLOW. claimAllSwapFee/removeLiquidity/
+    // closePositionIfEmpty could not be independently pre-verified (they need
+    // a real on-chain position this 0-balance wallet doesn't have) — that risk
+    // is identical across every play's close path and is accepted per the
+    // owner's decision (off-box emergency script, no on-box key). Gated by
+    // combo.ape_live_enabled as a kill switch.
     if (params.side === "token") {
-      throw new Error(
-        "LiveExecutor: token-sided open (eys_ape) is not implemented for live trading — " +
-        "Privy wallet policy for the swap-then-token-deposit sequence has not been verified. " +
-        "Paper mode only until confirmed."
-      );
+      if (config().combo?.ape_live_enabled === false) {
+        throw new Error("LiveExecutor: eys_ape live trading is disabled (combo.ape_live_enabled=false)");
+      }
+      return this.openApe(params);
     }
     const pool = await this.pool(params.poolAddress);
     const activeBin = await pool.getActiveBin();
@@ -937,6 +965,128 @@ export class LiveExecutor implements Executor {
       entryPrice: liveEntryPrice, entrySol: params.sizeSol, minBinId: minBin,
       maxBinId: maxBin, state: "open", feesClaimedSol: 0,
       rentPaidSol: params.range.estBinRentSol, profitLockFires: 0,
+      exitTs: null, exitSol: null, exitReason: null,
+      play: (params.play as Position["play"]) ?? null,
+    };
+  }
+
+  /**
+   * eys_ape open (owner addition, 2026-10-01): swap `params.sizeSol` SOL into
+   * the token via Jupiter, then deposit 100% token-side ABOVE current price
+   * (params.range, planned by strategy/combo/apeRange.ts and already
+   * rent-gated before this is called). Truth accounting throughout: the SOL
+   * actually spent (walletDelta on the swap signature) and the tokens
+   * actually received (wallet balance pinned to the swap signature's slot,
+   * the same `tokenBalanceAfter` technique close() already uses) — never the
+   * Jupiter quote. If the deposit fails after the swap has landed, the swap
+   * is NOT left stranded: this.send()'s own retry ladder (config().exec.tx_retries)
+   * gets first crack, and if that's exhausted the tokens are swapped straight
+   * back to SOL and the failed attempt (with its SOL cost) is logged before
+   * the open is reported as failed — mirrors how every other play's
+   * open_failed path behaves, just with an extra recovery leg.
+   */
+  private async openApe(params: OpenParams): Promise<Position> {
+    const slippageBps = config().exec.exit_slippage_bps;
+    const lamports = BigInt(Math.floor(params.sizeSol * 1e9));
+
+    const swapped = await swapFromSol(this.connection, this.wallet, params.tokenMint, lamports, slippageBps);
+    if (!swapped) {
+      throw new Error(`eys_ape: SOL->token swap for ${params.symbol} returned null (no Jupiter route right now)`);
+    }
+
+    // Truth, not the quote: wallet balance of the mint pinned to the swap's
+    // landed slot. The wallet is assumed to hold none of this mint before an
+    // ape entry (fresh candidate, max 1 concurrent ape) — same assumption
+    // close()'s post-remove balance read already makes for truth accounting.
+    const tokenRaw = await this.tokenBalanceAfter(params.tokenMint, swapped.signature);
+    if (tokenRaw <= 0n) {
+      throw new Error(
+        `eys_ape: swap ${swapped.signature} landed but no ${params.tokenMint} credit is visible — refusing to deposit blind`
+      );
+    }
+    const solDelta = await this.walletDelta([swapped.signature]);
+    const entrySol = solDelta === null ? params.sizeSol : Math.abs(solDelta);
+    const xDecimals = (await this.pool(params.poolAddress)).tokenX.mint.decimals;
+    const executedPrice = entrySol / (Number(tokenRaw) / 10 ** xDecimals);
+
+    const minBinId = params.range.minBinId;
+    const maxBinId = params.range.maxBinId;
+
+    let depositSig: string;
+    let positionKp: Keypair;
+    try {
+      const pool = await this.pool(params.poolAddress);
+      const built = await buildApeDepositTx(pool, this.wallet.publicKey, tokenRaw, minBinId, maxBinId);
+      positionKp = built.positionKp;
+      // this.send() already retries up to config().exec.tx_retries with fee
+      // escalation — the same ladder every other open/close uses.
+      depositSig = await this.send(built.tx, [positionKp]);
+    } catch (e) {
+      const depositErr = e as Error;
+      console.error(
+        `[live] eys_ape ${params.symbol}: deposit failed after the SOL->token swap landed (${swapped.signature}) — ` +
+        `swapping ${tokenRaw} raw back to SOL rather than stranding it:`,
+        depositErr.message.split("\n")[0],
+      );
+      let backSol: number | null = null;
+      let backErr: Error | null = null;
+      try {
+        const stillHeld = await this.tokenBalanceAfter(params.tokenMint, swapped.signature);
+        const sellAmount = stillHeld > 0n ? stillHeld : tokenRaw;
+        const back = await swapToSol(this.connection, this.wallet, params.tokenMint, sellAmount, slippageBps);
+        if (back) backSol = await this.walletDelta([back.signature]);
+      } catch (e2) {
+        backErr = e2 as Error;
+      }
+      if (backErr || backSol === null) {
+        logError({
+          source: "enter", code: "ape_stranded", level: "error",
+          message: `eys_ape ${params.symbol}: deposit failed (${depositErr.message.split("\n")[0]}) AND swap-back failed` +
+            (backErr ? ` (${backErr.message.split("\n")[0]})` : " (no swap route)") +
+            ` — ${tokenRaw} raw of ${params.tokenMint} may be stranded in the wallet`,
+          err: backErr ?? depositErr, mint: params.tokenMint, symbol: params.symbol,
+        });
+        throw Object.assign(
+          new Error(`eys_ape: deposit failed and swap-back failed — ${tokenRaw} raw of ${params.tokenMint} may be stranded, check the wallet`),
+          { code: "ape_stranded" },
+        );
+      }
+      logError({
+        source: "enter", code: "ape_deposit_failed", level: "error",
+        message: `eys_ape ${params.symbol}: deposit failed, swapped back to SOL — spent ${entrySol.toFixed(4)} SOL, recovered ${backSol.toFixed(4)} SOL (cost ${(entrySol - backSol).toFixed(4)} SOL)`,
+        err: depositErr, mint: params.tokenMint, symbol: params.symbol,
+      });
+      throw Object.assign(
+        new Error(`eys_ape: deposit failed after swap — recovered ${backSol.toFixed(4)} SOL of ${entrySol.toFixed(4)} spent (${depositErr.message.split("\n")[0]})`),
+        { code: "ape_deposit_failed" },
+      );
+    }
+
+    const db = getDb();
+    const res = db.prepare(
+      `INSERT INTO positions (mode, pool, token_mint, symbol, tranche_of, entry_ts, entry_price, entry_sol,
+        min_bin_id, max_bin_id, state, rent_paid_sol, open_cost_sol, play)
+       VALUES ('live', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`
+    ).run(
+      params.poolAddress, params.tokenMint, params.symbol, params.trancheOf ?? null,
+      now(), executedPrice, entrySol, minBinId, maxBinId, params.range.estBinRentSol, entrySol,
+      params.play ?? null,
+    );
+    const id = Number(res.lastInsertRowid);
+    db.prepare("INSERT INTO position_accounts (position_id, pubkey, min_bin_id, max_bin_id) VALUES (?, ?, ?, ?)")
+      .run(id, positionKp.publicKey.toBase58(), minBinId, maxBinId);
+    upsertTokenMeta(params.tokenMint, { symbol: params.symbol });
+    db.prepare(
+      "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, tx_cost_sol, detail_json) VALUES (?, ?, 'open', ?, ?, ?, ?)"
+    ).run(id, now(), depositSig, -entrySol, 0.0005 * 2, JSON.stringify({
+      swapSig: swapped.signature, depositSig, tokenRaw: tokenRaw.toString(), entrySol, minBinId, maxBinId, side: "token",
+    }));
+
+    return {
+      id, mode: "live", poolAddress: params.poolAddress, tokenMint: params.tokenMint,
+      symbol: params.symbol, trancheOf: params.trancheOf ?? null, entryTs: now(),
+      entryPrice: executedPrice, entrySol, minBinId, maxBinId, state: "open",
+      feesClaimedSol: 0, rentPaidSol: params.range.estBinRentSol, profitLockFires: 0,
       exitTs: null, exitSol: null, exitReason: null,
       play: (params.play as Position["play"]) ?? null,
     };
