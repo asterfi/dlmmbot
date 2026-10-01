@@ -1,6 +1,9 @@
 # meteora-farmer configuration.
 # Every value here maps to a [bracketed] default in STRATEGY.md. Hot-reloaded on change.
 
+[alerts]
+cards = true               # render Telegram alerts as dashboard-styled PNG cards (satori+resvg); false = plain text only
+
 [scanner]
 interval_s = 60
 pages = 3                  # datapi pages per sweep (100 pools/page)

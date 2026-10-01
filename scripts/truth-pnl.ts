@@ -16,7 +16,7 @@
  * sibling truth-pnl.jsonl; with --address (an ad-hoc check against some
  * other wallet) nothing is written to disk.
  */
-import { existsSync, appendFileSync } from "node:fs";
+import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   Connection,
@@ -26,7 +26,12 @@ import {
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, NATIVE_MINT } from "@solana/spl-token";
 import { env, SOL_MINT } from "../src/config.js";
 import { quoteToSolLamports } from "../src/executor/jupiter.js";
-import { alert } from "../src/alerts.js";
+import { alert, sendTelegram } from "../src/alerts.js";
+import { buildTruthPnlCard } from "../src/alerts/cards.js";
+import { buildCardNode } from "../src/alerts/layout.js";
+import { renderCardWithTimeout } from "../src/alerts/render.js";
+import { queuePhoto } from "../src/alerts/telegramPhoto.js";
+import { cardsEnabled } from "../src/alerts/send.js";
 
 interface Args {
   address?: string;
@@ -273,20 +278,59 @@ async function main(): Promise<void> {
 
   // Only the bot's own wallet's run gets logged — an --address sanity check
   // against some other wallet is a one-off query, not part of the ledger.
+  let jsonlPath: string | null = null;
   if (!args.address && process.env.FARMER_DB_PATH) {
-    const outPath = join(dirname(process.env.FARMER_DB_PATH), "truth-pnl.jsonl");
+    jsonlPath = join(dirname(process.env.FARMER_DB_PATH), "truth-pnl.jsonl");
     try {
-      appendFileSync(outPath, JSON.stringify(row) + "\n");
-      console.log(`[truth-pnl] appended to ${outPath}`);
+      appendFileSync(jsonlPath, JSON.stringify(row) + "\n");
+      console.log(`[truth-pnl] appended to ${jsonlPath}`);
     } catch (err) {
-      console.warn(`[truth-pnl] could not append to ${outPath}: ${(err as Error).message}`);
+      console.warn(`[truth-pnl] could not append to ${jsonlPath}: ${(err as Error).message}`);
     }
   }
 
   if (args.telegram) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
     const line = `equity ${equitySol.toFixed(4)} SOL | net deposits ${netDepositsSol.toFixed(4)} | pnl ${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(1)}%)`
       + (flows.unexplainedOutflowSol > 1e-6 ? ` | ⚠ unexplained outflow ${flows.unexplainedOutflowSol.toFixed(4)} SOL` : "");
-    await alert("info", `truth-pnl: ${line}`);
+    if (!token || !chatId) {
+      await alert("info", `truth-pnl: ${line}`);
+    } else if (!cardsEnabled()) {
+      await alert("info", `truth-pnl: ${line}`);
+    } else {
+      try {
+        const history = readEquityHistory(jsonlPath, equitySol);
+        const built = buildTruthPnlCard({
+          equitySol, netDepositsSol, pnlSol, pnlPct,
+          unexplainedOutflowSol: flows.unexplainedOutflowSol,
+          history,
+        });
+        const node = buildCardNode(built.spec);
+        const png = await renderCardWithTimeout(node, 3000);
+        if (!png) throw new Error("render timed out or failed");
+        queuePhoto(token, chatId, png, built.caption);
+      } catch (e) {
+        console.error("[truth-pnl] card render/send failed, falling back to text:", (e as Error).message);
+        await sendTelegram(token, chatId, `meteora-farmer\nℹ️ [info] truth-pnl: ${line}`).catch((e2) =>
+          console.error("[truth-pnl] text fallback also failed:", (e2 as Error).message));
+      }
+    }
+  }
+}
+
+/** Last ~14 equity points from truth-pnl.jsonl (oldest -> newest), today's row included. */
+function readEquityHistory(jsonlPath: string | null, currentEquitySol: number): number[] {
+  if (!jsonlPath || !existsSync(jsonlPath)) return [currentEquitySol];
+  try {
+    const lines = readFileSync(jsonlPath, "utf8").split("\n").filter(Boolean);
+    const values = lines.slice(-14).map((l) => {
+      const parsed = JSON.parse(l) as { equity_sol?: number };
+      return typeof parsed.equity_sol === "number" ? parsed.equity_sol : null;
+    }).filter((v): v is number => v != null);
+    return values.length > 1 ? values : [currentEquitySol];
+  } catch {
+    return [currentEquitySol];
   }
 }
 

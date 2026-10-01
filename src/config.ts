@@ -28,6 +28,15 @@ import { parse } from "smol-toml";
 
 // Typed mirror of config.toml. Sections/keys must match STRATEGY.md defaults.
 export interface Config {
+  /**
+   * Telegram image-card alerts (satori + resvg render of a dashboard-styled
+   * PNG, sent via sendPhoto). Optional: absent on installs predating this
+   * feature — code defaults to enabled. Disabling falls back to the original
+   * plain-text sendMessage path unconditionally.
+   */
+  alerts?: {
+    cards: boolean;
+  };
   scanner: {
     interval_s: number; pages: number; copycat_ignore_h: number;
     /**

@@ -2,6 +2,15 @@
 // TELEGRAM_CHAT_ID in .env; without them alerts degrade to console-only.
 // Used for events the operator must know about without watching a terminal:
 // P0 safety exits, stop losses, circuit breaker, watchdog, displacements.
+//
+// Image cards (src/alerts/*): each alert additionally tries to render a
+// dashboard-styled PNG card and send it via sendPhoto. That path is strictly
+// best-effort — it runs with its own 3s timeout, never throws, and on any
+// failure (render error, timeout, missing fonts, network) falls straight
+// back to the plain-text sendTelegram below, which is the only path this
+// module relies on actually working. Disable with `[alerts] cards = false`.
+
+import { cardsEnabled, trySendAlertCard } from "./alerts/send.js";
 
 export type AlertKind =
   | "safety_exit" | "stop_loss" | "below_cut" | "circuit_breaker"
@@ -23,7 +32,7 @@ const MIN_INTERVAL_MS = 3_000; // basic flood guard
 // silently dropping exactly the P0/stop alerts this module exists for.
 let sendChain: Promise<void> = Promise.resolve();
 
-async function sendTelegram(token: string, chatId: string, line: string): Promise<void> {
+export async function sendTelegram(token: string, chatId: string, line: string): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
@@ -52,9 +61,17 @@ export async function alert(kind: AlertKind, message: string): Promise<void> {
 
   // Fire-and-forget but serialized: callers never wait (Telegram RTT + flood
   // sleep used to stretch the manage tick past 60s position_marks gaps), while
-  // the chain spaces sends MIN_INTERVAL_MS apart in order.
+  // the chain spaces sends MIN_INTERVAL_MS apart in order. The card path (when
+  // enabled) replaces the plain sendMessage with a sendPhoto card; it falls
+  // back to sendTelegram internally on any failure, so this chain's shape
+  // (and its guarantee that callers never block) is unchanged either way.
   sendChain = sendChain
     .then(() => new Promise((r) => setTimeout(r, MIN_INTERVAL_MS)))
-    .then(() => sendTelegram(token, chatId, line))
+    .then(() => {
+      if (cardsEnabled()) {
+        return trySendAlertCard(kind, message, sendTelegram, token, chatId, line);
+      }
+      return sendTelegram(token, chatId, line);
+    })
     .catch((e) => console.error("[alert] telegram send failed:", (e as Error).message));
 }
