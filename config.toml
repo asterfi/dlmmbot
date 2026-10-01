@@ -814,6 +814,26 @@ eys_cost_tx_count = 4           # ~4 txs/round trip: open, claim/close, exit swa
 eys_cost_tx_sol = 0.0006        # estimated SOL cost per tx (priority fee + base fee; matches PAPER_TX_COST_SOL order of magnitude)
 eys_cost_slippage_bps = 50      # expected swap slippage on the exit leg
 
+# Live-churn fix (owner, 2026-10-02): positions 1-6 (danko_trap, COCKROACH/HOOKED)
+# each opened a SOL-side ladder below price, price ran away before the ladder
+# ever filled, upstream's generic P3_above "missed" case closed them at 0 fees
+# every ~18min, and the bot immediately re-opened the same token — 5 cycles,
+# -0.0085 SOL + 5 stranded empty token accounts. Combo positions are now
+# managed ONLY by comboExitCheck + P0 rug-safety; upstream P1/P2/P3/give_back/
+# escape/displacement never touch a position with play set (see loop.ts). A
+# ladder that never fills needs its own timeout, since nothing else will ever
+# close it — "never filled" = active bin has never gone strictly below the
+# ladder's top bin (ever_in_range is NOT this signal; it is trivially true
+# from bin 1 of entry for a below-price ladder).
+danko_idle_max_h = 6
+molu_idle_max_h = 2
+# Per-mint re-entry cooldown after a combo close that was near-breakeven
+# (+-0.5% of entry, walletDelta-based) or that never filled at all.
+reentry_cooldown_h = 3
+# Shorter cooldown after a genuine win/loss close, so the bot doesn't bounce
+# straight back into the same token on the very next sweep.
+reentry_cooldown_after_trade_min = 30
+
 # --- Jev: Typesafe System One decision layer (api.typesafe.ai/v1/systemone) ---
 # Per docs.typesafe.ai: ONE request per decision (speculative fan-out — all
 # questions in a battery are evaluated in parallel against one shared state),

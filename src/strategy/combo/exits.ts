@@ -29,6 +29,17 @@ export interface ComboExitInput {
    * below-range tracking), so no new per-tick state is introduced.
    */
   everDrawn: boolean;
+  /**
+   * True once the ladder has actually converted some SOL to token (owner's
+   * live-churn fix, 2026-10-02): a below-price BidAsk ladder's top bin IS the
+   * active bin at entry, so everDrawn/ever_in_range alone cannot tell "never
+   * filled" apart from "just opened". Sourced from active-bin-vs-top-bin
+   * tracking in loop.ts (`ever_filled`), not from everDrawn/ever_in_range.
+   * danko's break-even exit below REQUIRES this: a ladder that never filled
+   * never actually converted anything, so "break-even" on it is not a real
+   * trade outcome — it must instead time out (see combo.danko_idle_max_h).
+   */
+  everFilled: boolean;
   /** eys_ape only: has price run through the top of the token-sided range (fully converted to SOL)? Sourced from PositionMark.aboveRange — no new state. */
   aboveRange?: boolean;
 }
@@ -64,7 +75,7 @@ export function comboExitCheck(input: ComboExitInput, cfg: ComboExitConfig): Com
       if (input.pnlFrac >= tpFrac) {
         return { shouldExit: true, reason: `danko_trap: +${(input.pnlFrac * 100).toFixed(1)}% >= ${(tpFrac * 100).toFixed(1)}% runner target` };
       }
-      if (input.everDrawn && input.pnlFrac >= 0) {
+      if (input.everFilled && input.everDrawn && input.pnlFrac >= 0) {
         return { shouldExit: true, reason: `danko_trap: break-even-or-better (${(input.pnlFrac * 100).toFixed(1)}%) after a bounce` };
       }
       return { shouldExit: false, reason: "" };

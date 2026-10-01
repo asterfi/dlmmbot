@@ -31,7 +31,7 @@ import { applyRiskCut, classifyYoung, whaleCheck } from "../risk/entryRisk.js";
 import { enterMajorsPositions } from "./majorsEntry.js";
 import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
-import type { Position } from "../types.js";
+import type { ExitReason, Position } from "../types.js";
 import { vetToken } from "../vetting/vet.js";
 import { classifyPlay, detectDipBounce, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
@@ -142,6 +142,7 @@ const midBandLogged = new Set<number>();              // young-exit telemetry lo
 const rugcheckLastCheck = new Map<number, number>();  // P0 rugcheck-flip throttle
 const everInRange = new Set<number>();                // P3 win-vs-missed classification
 const fellDeep = new Set<number>();                   // escape hatch armed (also persisted)
+const everFilled = new Set<number>();                 // combo: has this ladder ever actually converted SOL->token? (also persisted)
 const peakPnl = new Map<number, number>();            // give-back telemetry: best fee-inclusive PnL (persisted)
 const giveBackLogged = new Set<number>();             // give-back counterfactual logged once (persisted)
 // Earliest next P4 claim attempt after one failed or claimed nothing. PUMP
@@ -237,6 +238,7 @@ export function resetManagerStateForTests(): void {
   rugcheckLastCheck.clear();
   everInRange.clear();
   fellDeep.clear();
+  everFilled.clear();
   peakPnl.clear();
   giveBackLogged.clear();
   claimRetryAfter.clear();
@@ -304,6 +306,7 @@ function clearRangeTimers(posId: number): void {
   rugcheckLastCheck.delete(posId);
   everInRange.delete(posId);
   fellDeep.delete(posId);
+  everFilled.delete(posId);
   clearHolderWatch(posId);
 }
 
@@ -940,6 +943,17 @@ export async function managePositions(exec: Executor): Promise<void> {
         everInRange.add(pos.id);
         getDb().prepare("UPDATE positions SET ever_in_range = 1 WHERE id = ?").run(pos.id);
       }
+      // Combo "has this ladder ever actually filled?" (owner's live-churn fix,
+      // 2026-10-02): ever_in_range is true from bin 1 of entry (the top bin IS
+      // the active bin at open) and so cannot distinguish "never touched" from
+      // "just opened" — danko_trap ladders that price ran away from forever
+      // read ever_in_range=1 at entry. activeBinId strictly below the
+      // position's own top bin means price has actually moved down through at
+      // least the top bin, converting some SOL to token — a real fill.
+      if (pos.play && mark.activeBinId < pos.maxBinId && !everFilled.has(pos.id)) {
+        everFilled.add(pos.id);
+        getDb().prepare("UPDATE positions SET ever_filled = 1 WHERE id = ?").run(pos.id);
+      }
       marked.push({ pos, mark });
     } catch (e) {
       marksFailed++;
@@ -1004,7 +1018,15 @@ export async function managePositions(exec: Executor): Promise<void> {
       // and majors are long-hold Spot positions the experiment never covered.
       // Deliberately NOT gated on giveBackLogged: a position that logged a
       // candidate under the old telemetry-only build must still close here.
-      if (gaveBack && m.give_back_enabled === true && sleeve !== "majors") {
+      // Combo exclusivity (owner's live-churn fix, 2026-10-02): a combo
+      // position (pos.play set) is managed ONLY by comboExitCheck + P0 rug
+      // safety — every other rule below (give_back, P1, P2, P3, escape,
+      // displacement-victim selection) must leave it alone. Observed bug:
+      // danko_trap ladders opened below price, price ran away without ever
+      // filling, P3_above's "missed" case closed them at 0 fees every ~18min,
+      // and the bot immediately re-entered the same token (5 cycles, -0.0085
+      // SOL + 5 stranded empty token accounts).
+      if (gaveBack && m.give_back_enabled === true && sleeve !== "majors" && !pos.play) {
         await closeAndReport(exec, pos, "give_back", config().exec.exit_slippage_bps, "close",
           `give-back stop: kept ${(peak > 0 ? (pnlNow / peak) * 100 : 0).toFixed(0)}% of a +${peak.toFixed(4)} SOL peak`);
         clearRangeTimers(pos.id);
@@ -1127,7 +1149,12 @@ export async function managePositions(exec: Executor): Promise<void> {
         const feeDaily = mark.feeTvl30mPct * 48;
         const flowDead = feeDaily < pm.rotation_fee_daily_min_pct || mark.vol30mUsd < pm.rotation_vol_30m_min_usd;
         const trig = comboExitCheck(
-          { play: pos.play, entrySol: pos.entrySol, pnlFrac, flowDead, everDrawn: !!pos.fellDeep, aboveRange: mark.aboveRange },
+          {
+            play: pos.play, entrySol: pos.entrySol, pnlFrac, flowDead, everDrawn: !!pos.fellDeep,
+            everFilled: everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
+              .get(pos.id) as { f: number } | undefined)?.f === 1,
+            aboveRange: mark.aboveRange,
+          },
           cc,
         );
         if (trig.shouldExit) {
@@ -1152,8 +1179,21 @@ export async function managePositions(exec: Executor): Promise<void> {
           if (jevResult.verdict === "yes") {
             await closeAndReport(exec, pos, "combo_exit", config().exec.exit_slippage_bps, "close", trig.reason);
             clearRangeTimers(pos.id);
+            // Per-token re-entry cooldown (owner's live-churn fix, 2026-10-02):
+            // a near-break-even result (within +-0.5% — approximated from the
+            // pre-close mark, since the measured walletDelta pnl is not
+            // returned by closeAndReport) gets the longer cooldown; a real
+            // win or loss still gets a short one so the bot doesn't bounce
+            // straight back into the same token on the next sweep.
+            const nearBreakeven = Math.abs(pnlFrac) <= 0.005;
+            const cooldownH = nearBreakeven
+              ? (comboCfgExit.reentry_cooldown_h ?? 3)
+              : (comboCfgExit.reentry_cooldown_after_trade_min ?? 30) / 60;
+            if (cooldownH > 0) {
+              blacklist(pos.tokenMint, "token", nearBreakeven ? "combo near-breakeven cooldown" : "combo post-trade cooldown", cooldownH);
+            }
             recordDecision(pos.tokenMint, pos.poolAddress, "exited", "combo_exit", null, {
-              play: pos.play, pnlFrac, flowDead, mark, jev: jevResult, reason: trig.reason,
+              play: pos.play, pnlFrac, flowDead, mark, jev: jevResult, reason: trig.reason, nearBreakeven, cooldownH,
             });
             continue;
           }
@@ -1161,6 +1201,39 @@ export async function managePositions(exec: Executor): Promise<void> {
             play: pos.play, pnlFrac, flowDead, mark, jev: jevResult, reason: trig.reason,
           });
         }
+      }
+
+      // --- COMBO IDLE TIMEOUT + exclusivity skip (owner's live-churn fix, 2026-10-02) ---
+      // A combo position is managed ONLY by comboExitCheck above + P0 safety —
+      // P1/P2/P3/P5/give_back/escape below must never touch it (that was the
+      // bug: danko_trap ladders that price ran away from, never filling, got
+      // closed by P3_above's "missed" case every ~18min then immediately
+      // re-opened on the same token). A ladder that never fills needs its OWN
+      // timeout instead, since nothing else will ever close it.
+      if (comboCfgExit?.enabled && pos.play) {
+        const idleMaxH = pos.play === "danko_trap" ? comboCfgExit.danko_idle_max_h
+          : pos.play === "molu_ladder" ? comboCfgExit.molu_idle_max_h
+          : null;
+        const filled = everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
+          .get(pos.id) as { f: number } | undefined)?.f === 1;
+        if (idleMaxH && !filled && ageH > idleMaxH) {
+          // Jev is NOT consulted for idle timeouts — there is nothing to judge
+          // (the ladder never earned a cent either way) and no reason to spend
+          // a consult on a mechanical housekeeping close.
+          await closeAndReport(exec, pos, "combo_idle_timeout" as ExitReason, config().exec.exit_slippage_bps, "close",
+            `combo idle timeout: ${pos.play} never filled in ${idleMaxH}h (age ${ageH.toFixed(1)}h)`);
+          clearRangeTimers(pos.id);
+          const cooldownH = comboCfgExit.reentry_cooldown_h ?? 3;
+          if (cooldownH > 0) blacklist(pos.tokenMint, "token", "combo idle timeout — never filled", cooldownH);
+          recordDecision(pos.tokenMint, pos.poolAddress, "exited", "combo_idle_timeout", null, {
+            play: pos.play, ageH, idleMaxH, mark,
+          });
+          continue;
+        }
+        // Not timed out (or already filled and waiting on comboExitCheck) —
+        // still a combo position, so skip the entire upstream P1-escape
+        // ladder below unconditionally.
+        continue;
       }
 
       // --- P1 STOP LOSS ---
@@ -2606,6 +2679,17 @@ export async function runLoop(): Promise<void> {
       }
     }
     console.log(`[farmer] reconcile: ${rec!.dbOpen} db-open, ${rec!.chainPositions} on-chain, ${rec!.orphanedInDb.length} orphaned, ${rec!.adopted.length} adopted`);
+    // One-time startup sweep of empty token accounts (owner's live-churn fix,
+    // 2026-10-02) — after reconcile, so currently-open positions' mints are
+    // already known and correctly excluded. Best-effort; never blocks boot.
+    if (live.cleanupEmptyTokenAccounts) {
+      try {
+        const reclaimed = await live.cleanupEmptyTokenAccounts();
+        if (reclaimed > 0) console.log(`[farmer] startup ATA cleanup reclaimed ${reclaimed.toFixed(6)} SOL`);
+      } catch (e) {
+        console.error("[farmer] startup ATA cleanup failed (non-blocking):", (e as Error).message);
+      }
+    }
     exec = live;
   } else {
     exec = new PaperExecutor();

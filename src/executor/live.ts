@@ -1407,6 +1407,7 @@ export class LiveExecutor implements Executor {
     const stateByReason: Record<ExitReason, string> = {
       P0_safety: "closed_safety", P1_stop: "closed_stop", P2_rotation: "closed_rotation",
       P3_above: "closed_win", P5_below: "closed_below", give_back: "closed_giveback", escape: "closed_escape", manual: "closed_manual", combo_exit: "closed_rotation",
+      combo_idle_timeout: "closed_rotation",
     };
     // Actual wallet credit for this close (exit value + rent refunds - tx fees).
     const closeReturnSol = sigs.length ? await this.walletDelta(sigs) : 0;
@@ -1527,7 +1528,93 @@ export class LiveExecutor implements Executor {
     // Hygiene, after all accounting is written: zap-path proceeds land as wSOL
     // (wealth-neutral for the delta above, invisible to walletSol/bankroll).
     await this.unwrapWsol();
+    // Live-churn fix (owner, 2026-10-02): every combo close left behind an
+    // empty token account (USDC/USDT/other Jupiter route intermediates) at
+    // ~0.0015 SOL rent apiece — 5 closes, 5 stranded accounts, ~0.0075 SOL.
+    // Best-effort, non-blocking: never let housekeeping fail a real exit.
+    if (position.play) {
+      try {
+        const reclaimed = await this.cleanupEmptyTokenAccounts();
+        if (reclaimed > 0) console.log(`[live] pos#${position.id}: post-close ATA cleanup reclaimed ${reclaimed.toFixed(6)} SOL`);
+      } catch (e) {
+        console.error(`[live] pos#${position.id}: post-close ATA cleanup failed (non-blocking):`, (e as Error).message.split("\n")[0]);
+      }
+    }
     return { exitSol: before.valueSol, txCostSol: 0.001 };
+  }
+
+  /**
+   * Close every zero-balance SPL Token / Token-2022 account the wallet owns,
+   * except the wSOL ATA (handled separately by unwrapWsol/in-flight swaps)
+   * and the mints of currently OPEN positions. CloseAccount destination is
+   * always the wallet itself — the only shape Privy's policy allows (proven
+   * sign-only, scripts/policy-smoke-real.ts).
+   *
+   * Root cause (owner's live-churn report, 2026-10-02): the 5 stranded USDC/
+   * USDT/other accounts were NOT created by our own code — they are Jupiter
+   * route intermediates. Jupiter's /swap-instructions `cleanupInstruction`
+   * only ever unwraps wSOL; it does not close other intermediate-hop ATAs
+   * (e.g. a SOL->token route quoted through USDC), so those persist at
+   * ~0.00203928 SOL rent each until something else closes them. There is no
+   * single creation call site to intercept — the route is chosen server-side
+   * by Jupiter per-quote — so a periodic sweep (here: after every combo close
+   * + once on startup) is the right fix rather than chasing it into jupiter.ts.
+   *
+   * Called after every combo-position close and once at startup. Best-effort:
+   * any account's close failing (e.g. a race with an in-flight swap still
+   * using it) is logged and skipped, never thrown.
+   */
+  async cleanupEmptyTokenAccounts(): Promise<number> {
+    const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+    const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    const wsolAta = getAssociatedTokenAddressSync(new PublicKey(SOL_MINT), this.wallet.publicKey).toBase58();
+    const openMints = new Set(
+      (getDb().prepare("SELECT DISTINCT token_mint AS m FROM positions WHERE state = 'open'").all() as { m: string }[])
+        .map((r) => r.m)
+    );
+    const candidates: { pubkey: PublicKey; programId: PublicKey; mint: string }[] = [];
+    for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      let accs;
+      try {
+        accs = await this.connection.getParsedTokenAccountsByOwner(this.wallet.publicKey, { programId });
+      } catch (e) {
+        console.error("[live] ATA cleanup: getParsedTokenAccountsByOwner failed:", (e as Error).message.split("\n")[0]);
+        continue;
+      }
+      for (const acc of accs.value) {
+        const info = acc.account.data.parsed.info as { mint: string; tokenAmount: { amount: string } };
+        if (BigInt(info.tokenAmount.amount) !== 0n) continue;             // only genuinely empty accounts
+        if (acc.pubkey.toBase58() === wsolAta) continue;                  // wSOL ATA: owned by unwrapWsol/in-flight swaps
+        if (openMints.has(info.mint)) continue;                           // mint of a currently open position
+        candidates.push({ pubkey: acc.pubkey, programId, mint: info.mint });
+      }
+    }
+    if (candidates.length === 0) return 0;
+
+    const BATCH = 8;
+    let totalReclaimed = 0;
+    for (let i = 0; i < candidates.length; i += BATCH) {
+      const batch = candidates.slice(i, i + BATCH);
+      const tx = new Transaction();
+      for (const c of batch) {
+        tx.add(createCloseAccountInstruction(c.pubkey, this.wallet.publicKey, this.wallet.publicKey, [], c.programId));
+      }
+      try {
+        const sig = await this.send(tx);
+        const delta = (await this.walletDelta([sig])) ?? 0;
+        totalReclaimed += delta;
+        getDb().prepare(
+          "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, tx_cost_sol, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        ).run(
+          null, now(), "ata_cleanup", sig, delta, 0.001,
+          JSON.stringify({ closed: batch.map((c) => ({ account: c.pubkey.toBase58(), mint: c.mint })) })
+        );
+        console.log(`[live] ATA cleanup: closed ${batch.length} empty account(s), reclaimed ${delta.toFixed(6)} SOL (${sig.slice(0, 8)}…)`);
+      } catch (e) {
+        console.error(`[live] ATA cleanup: batch of ${batch.length} failed (non-blocking):`, (e as Error).message.split("\n")[0]);
+      }
+    }
+    return totalReclaimed;
   }
 
   async walletSol(): Promise<number> {

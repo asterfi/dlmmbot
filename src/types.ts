@@ -95,7 +95,7 @@ export type PositionState =
   | "closed_win" | "closed_missed" | "closed_stop" | "closed_safety"
   | "closed_rotation" | "closed_below" | "closed_manual";
 
-export type ExitReason = "P0_safety" | "P1_stop" | "P2_rotation" | "P3_above" | "P5_below" | "give_back" | "escape" | "manual" | "combo_exit";
+export type ExitReason = "P0_safety" | "P1_stop" | "P2_rotation" | "P3_above" | "P5_below" | "give_back" | "escape" | "manual" | "combo_exit" | "combo_idle_timeout";
 
 /** Combo strategy play tag (owner's Eys+molu+Danko combo, with Typesafe Jev as master gate). */
 export type Play = "molu_ladder" | "eys_seat" | "danko_trap" | "eys_ape";

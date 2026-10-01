@@ -423,6 +423,12 @@ CREATE INDEX IF NOT EXISTS idx_error_log_ts ON error_log(ts DESC);
   try {
     database.exec("ALTER TABLE positions ADD COLUMN source TEXT");
   } catch { /* column already exists */ }
+  // Live-churn fix (2026-10-02): has this combo ladder ever actually
+  // converted SOL to token? See loop.ts for why ever_in_range cannot answer
+  // this (it is trivially true from bin 1 of entry for a below-price ladder).
+  try {
+    database.exec("ALTER TABLE positions ADD COLUMN ever_filled INTEGER NOT NULL DEFAULT 0");
+  } catch { /* column already exists */ }
 
   // jev_decisions: every Jev consult (enter/exit), linked to position_id so
   // Jev's yes/no can later be compared against real P&L. Logged on every

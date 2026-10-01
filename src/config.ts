@@ -401,6 +401,21 @@ export interface Config {
     eys_cost_tx_count: number;
     eys_cost_tx_sol: number;
     eys_cost_slippage_bps: number;
+    /**
+     * Live-churn fix (owner, 2026-10-02): danko_trap/molu_ladder ladders sit
+     * below price and can sit forever if price never dips into them. Upstream
+     * P1-P3/give_back/escape no longer touch combo positions at all (see
+     * loop.ts), so these are now the ONLY timeout for a ladder that never
+     * fills. "Never filled" = active bin has never gone strictly below the
+     * position's top bin (ever_in_range is NOT this signal — it is trivially
+     * true from bin 1 of entry).
+     */
+    danko_idle_max_h: number;
+    molu_idle_max_h: number;
+    /** Per-mint re-entry cooldown after a combo close that was near-breakeven (+-0.5%) or never filled. */
+    reentry_cooldown_h: number;
+    /** Shorter per-mint cooldown after a genuine win/loss close, in minutes. */
+    reentry_cooldown_after_trade_min: number;
   };
   /**
    * Jev — Typesafe System One decision layer for combo entries/exits.

@@ -74,6 +74,13 @@ export interface Executor {
   healthProbe(): Promise<number>;
   /** Live only: sell stranded token balances left by failed zap-out swaps. */
   sweepResiduals?(minSol: number): Promise<Array<{ mint: string; symbol: string; soldSol: number; positionId: number | null }>>;
+  /**
+   * Live only: close every zero-balance SPL Token/Token-2022 account the
+   * wallet owns, except the wSOL ATA and mints of currently open positions.
+   * Returns SOL reclaimed. Called after every combo-position close and once
+   * at startup (owner's live-churn fix, 2026-10-02).
+   */
+  cleanupEmptyTokenAccounts?(): Promise<number>;
 }
 
 /**
