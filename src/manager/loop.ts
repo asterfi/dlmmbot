@@ -1951,7 +1951,8 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     }
     if (isMicro) {
       const capSol = bankroll.walletSol * (g.micro_deploy_cap_pct / 100);
-      if (microExp!.deployedSol + size > capSol) {
+      // Combo's own slot/ticket rules replace upstream's wallet-% concentration caps.
+      if (microExp!.deployedSol + size > capSol && !comboSeed?.enabled) {
         recordSkip(cand.tokenMint, cand.pool.address, "micro_deploy_cap", score, {
           deployed: microExp!.deployedSol, size, capSol, pct: g.micro_deploy_cap_pct,
         });
@@ -1967,7 +1968,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // Per-token cap (§5).
     const exposure = tokenExposureSol(cand.tokenMint);
     const cap = (bankroll.deployableSol + bankroll.deployedSol) * (config().sizing.per_token_max_pct / 100);
-    if (exposure + size > cap) {
+    if (exposure + size > cap && !comboSeed?.enabled) {
       recordSkip(cand.tokenMint, cand.pool.address, "per_token_cap", score, { exposure, cap });
       continue;
     }
@@ -1998,11 +1999,16 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // only when the clamped size falls under the minimum. Fail-open if the
     // SOL price feed is down (TVL gates still bound the absolute risk).
     const solUsd = await solUsdPrice();
+    // Kept for combo: its per-play size replaces `size` later and must still
+    // respect this cap (see the combo override below).
+    let poolShareCapSol = Infinity;
     if (solUsd !== null && solUsd > 0) {
       const sharePct = isMicro ? microPoolSharePct() : g.max_pool_share_pct;
       const shareCapSol = (cand.pool.tvlUsd * (sharePct / 100)) / solUsd;
+      poolShareCapSol = shareCapSol;
+      const shareFloor = comboSeed?.enabled ? comboSeed.min_floor_sol : sizeFloor;
       if (size > shareCapSol) {
-        if (shareCapSol < sizeFloor) {
+        if (shareCapSol < shareFloor) {
           recordSkip(cand.tokenMint, cand.pool.address, "pool_share", score, { shareCapSol, size, tvlUsd: cand.pool.tvlUsd });
           continue;
         }
@@ -2343,6 +2349,15 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           continue;
         }
         play = classified.play;
+        // Pool-share cap still binds the combo's own size (clamped above only
+        // for the seed); skip if clamping would take it under combo's floor.
+        if (comboSize > poolShareCapSol) {
+          if (poolShareCapSol < cc.min_floor_sol) {
+            recordSkip(cand.tokenMint, cand.pool.address, "pool_share", score, { play, comboSize, shareCapSol: poolShareCapSol, tvlUsd: cand.pool.tvlUsd });
+            continue;
+          }
+          comboSize = poolShareCapSol;
+        }
         size = comboSize;
       }
     }

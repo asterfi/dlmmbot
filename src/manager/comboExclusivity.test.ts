@@ -114,6 +114,27 @@ describe("combo sizing seed — upstream cold-start size never pre-empts combo",
     vi.clearAllMocks();
   });
 
+  it("upstream's per-token wallet-% cap does not pre-empt a combo candidate", async () => {
+    installConfig((c) => {
+      c.sizing.kelly_enabled = false;
+      c.sizing.per_token_max_pct = 0.001; // would block any non-zero size
+      c.sizing.max_positions = 5;
+      c.entry.tranche_enabled = false;
+      c.entry.max_quote_drift_bins = 0;
+      c.majors.enabled = false;
+      c.gates.min_entry_score = 60;
+      c.combo!.enabled = true;
+      c.combo!.canary_mode = true;
+    });
+    vi.mocked(scan).mockResolvedValue({ candidates: [unclassifiableCandidate()], rejected: [], sweptPools: 1 });
+
+    await enterNewPositions(exec);
+
+    const gates = skipped().map((d) => d.failed_gate);
+    expect(gates).not.toContain("per_token_cap");
+    expect(gates).toContain("combo_no_play");
+  });
+
   it("a gate-passing candidate reaches combo classification instead of dying as size_zero", async () => {
     vi.mocked(scan).mockResolvedValue({ candidates: [unclassifiableCandidate()], rejected: [], sweptPools: 1 });
 
