@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyPlay, detectDipBounce, type ComboConfigLike, type PlayCandidateFeatures } from "./plays.js";
+import { classifyPlay, detectDipBounce, detectDump, type ComboConfigLike, type PlayCandidateFeatures } from "./plays.js";
 import type { Candle } from "../../scanner/meteora.js";
 
 const CFG: ComboConfigLike = {
@@ -14,7 +14,12 @@ const CFG: ComboConfigLike = {
   eys_reject_mcap_hi_usd: 1_000_000,
   danko_mcap_min_usd: 1_000_000,
   danko_age_min_h: 48,
+  danko_dump_min_pct: 30,
+  danko_flow_ratio_min: 0.05,
 };
+
+/** A danko-eligible feature set otherwise — dump/flow/buyers all present. */
+const DANKO_OK = { dumpPct: 40, flowRatio: 0.1, buyersPresent: true };
 
 function baseFeatures(overrides: Partial<PlayCandidateFeatures> = {}): PlayCandidateFeatures {
   return {
@@ -29,6 +34,9 @@ function baseFeatures(overrides: Partial<PlayCandidateFeatures> = {}): PlayCandi
     flowUsdPerMin: 0,
     dipBounce: null,
     oneSidedFeasible: true,
+    dumpPct: null,
+    flowRatio: null,
+    buyersPresent: false,
     ...overrides,
   };
 }
@@ -55,20 +63,44 @@ describe("detectDipBounce", () => {
   });
 });
 
+describe("detectDump", () => {
+  const candle = (high: number, low: number): Candle => ({ timestamp: 0, open: high, high, low, close: low, volume: 1 });
+  const candles = [
+    candle(1, 0.9), candle(0.95, 0.8), candle(0.9, 0.75), candle(0.85, 0.7),
+    candle(0.8, 0.72), candle(0.78, 0.73),
+  ];
+
+  it("measures how far CURRENT price sits below the swing high, not the dip's full extent", () => {
+    // swing high = 1; current = 0.6 -> 40% below the high, even with no bounce yet.
+    const d = detectDump(candles, 0.6);
+    expect(d).not.toBeNull();
+    expect(d!.dumpPct).toBeCloseTo(40, 0);
+  });
+
+  it("null when price is AT or above the recent high (no dump)", () => {
+    expect(detectDump(candles, 1)).toBeNull();
+    expect(detectDump(candles, 1.1)).toBeNull();
+  });
+
+  it("null with too few candles for a swing", () => {
+    expect(detectDump([], 0.5)).toBeNull();
+  });
+});
+
 describe("classifyPlay — danko_trap", () => {
-  it("accepts mcap>=1M AND age>=48h", () => {
-    const f = baseFeatures({ mcapUsd: 1_000_000, tokenAgeMinutes: 48 * 60 });
+  it("accepts mcap>=1M, age>=48h, dump>=30%, flow_ratio>=0.05, buyers present", () => {
+    const f = baseFeatures({ mcapUsd: 1_000_000, tokenAgeMinutes: 48 * 60, ...DANKO_OK });
     expect(classifyPlay(f, CFG)?.play).toBe("danko_trap");
   });
 
   it("rejects just under the mcap floor", () => {
-    const f = baseFeatures({ mcapUsd: 999_999, tokenAgeMinutes: 48 * 60 });
+    const f = baseFeatures({ mcapUsd: 999_999, tokenAgeMinutes: 48 * 60, ...DANKO_OK });
     expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
   });
 
   it("rejects just under the age floor (falls through to eys_seat at this mcap)", () => {
     const f = baseFeatures({
-      mcapUsd: 1_000_000, tokenAgeMinutes: 48 * 60 - 1,
+      mcapUsd: 1_000_000, tokenAgeMinutes: 48 * 60 - 1, ...DANKO_OK,
       feesEarnedPoolSol: 10, flowUsdPerMin: 100_000,
     });
     const c = classifyPlay(f, CFG);
@@ -76,12 +108,37 @@ describe("classifyPlay — danko_trap", () => {
   });
 
   it("fails closed on unknown age", () => {
-    const f = baseFeatures({ mcapUsd: 5_000_000, tokenAgeMinutes: null });
+    const f = baseFeatures({ mcapUsd: 5_000_000, tokenAgeMinutes: null, ...DANKO_OK });
     expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
   });
 
   it("rejects when a one-sided range can't be built", () => {
-    const f = baseFeatures({ mcapUsd: 2_000_000, tokenAgeMinutes: 60 * 60, oneSidedFeasible: false });
+    const f = baseFeatures({ mcapUsd: 2_000_000, tokenAgeMinutes: 60 * 60, oneSidedFeasible: false, ...DANKO_OK });
+    expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
+  });
+
+  it("fails closed when dumpPct is unknown (no candles)", () => {
+    const f = baseFeatures({ mcapUsd: 2_000_000, tokenAgeMinutes: 60 * 60, ...DANKO_OK, dumpPct: null });
+    expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
+  });
+
+  it("rejects a dump under the 30% floor (price hasn't fallen enough)", () => {
+    const f = baseFeatures({ mcapUsd: 2_000_000, tokenAgeMinutes: 60 * 60, ...DANKO_OK, dumpPct: 29.9 });
+    expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
+  });
+
+  it("fails closed when flowRatio is unknown", () => {
+    const f = baseFeatures({ mcapUsd: 2_000_000, tokenAgeMinutes: 60 * 60, ...DANKO_OK, flowRatio: null });
+    expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
+  });
+
+  it("rejects flow_ratio under the floor — a dumped pool with no live flow ('volume relative to active liquidity')", () => {
+    const f = baseFeatures({ mcapUsd: 2_000_000, tokenAgeMinutes: 60 * 60, ...DANKO_OK, flowRatio: 0.049 });
+    expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
+  });
+
+  it("rejects when buyers are not present (no bounce off the post-dump low)", () => {
+    const f = baseFeatures({ mcapUsd: 2_000_000, tokenAgeMinutes: 60 * 60, ...DANKO_OK, buyersPresent: false });
     expect(classifyPlay(f, CFG)?.play).not.toBe("danko_trap");
   });
 });
@@ -109,8 +166,8 @@ describe("classifyPlay — molu_ladder", () => {
     expect(classifyPlay(f, CFG)?.play).not.toBe("molu_ladder");
   });
 
-  it("rejects age >= 48h (goes to danko_trap territory instead)", () => {
-    const f = baseFeatures({ mcapUsd: 1_500_000, tokenAgeMinutes: 48 * 60, dipBounce: dip });
+  it("rejects age >= 48h (goes to danko_trap territory instead, when danko's own gates also clear)", () => {
+    const f = baseFeatures({ mcapUsd: 1_500_000, tokenAgeMinutes: 48 * 60, dipBounce: dip, ...DANKO_OK });
     expect(classifyPlay(f, CFG)?.play).toBe("danko_trap");
   });
 });

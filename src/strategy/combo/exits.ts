@@ -13,6 +13,8 @@ export interface ComboExitConfig {
   molu_top_tier_sol: number;      // position-size threshold for the 5% exit
   eys_tp_pct: number;             // 2 (configurable 1-3)
   danko_tp_pct: number;           // 15-20, default 17.5
+  /** Flow-death threshold as a fraction of the entry gate (danko_flow_ratio_min) — current flowRatio below this collapses. */
+  danko_flow_death_ratio: number;
 }
 
 export interface ComboExitInput {
@@ -40,6 +42,18 @@ export interface ComboExitInput {
    * trade outcome — it must instead time out (see combo.danko_idle_max_h).
    */
   everFilled: boolean;
+  /**
+   * danko_trap only (owner's strategy-fidelity fix, 2026-10-02, re-read from
+   * his Part 3 post: "when 5m volume disappears, the fees disappear with
+   * it... I manage positions based on flow"): true once the CURRENT flow
+   * signal has collapsed relative to the entry-gate threshold (current
+   * flowRatio < danko_flow_death_ratio * danko_flow_ratio_min — the same
+   * gate the entry side checks, not a newly-persisted entry-moment snapshot).
+   * Unlike the generic `flowDead` below, this does NOT force an exit on its
+   * own: Danko never stop-losses, so a flow-dead position below break-even
+   * keeps holding the ladder and waits.
+   */
+  flowCollapsed?: boolean;
   /** eys_ape only: has price run through the top of the token-sided range (fully converted to SOL)? Sourced from PositionMark.aboveRange — no new state. */
   aboveRange?: boolean;
 }
@@ -50,7 +64,9 @@ export interface ComboExitDecision {
 }
 
 export function comboExitCheck(input: ComboExitInput, cfg: ComboExitConfig): ComboExitDecision {
-  if (input.flowDead) {
+  // danko_trap never stop-losses and is managed on its OWN flow signal
+  // (flowCollapsed, below) instead of this generic one — see its branch.
+  if (input.play !== "danko_trap" && input.flowDead) {
     return { shouldExit: true, reason: `${input.play}: flow/volume died` };
   }
   switch (input.play) {
@@ -75,9 +91,15 @@ export function comboExitCheck(input: ComboExitInput, cfg: ComboExitConfig): Com
       if (input.pnlFrac >= tpFrac) {
         return { shouldExit: true, reason: `danko_trap: +${(input.pnlFrac * 100).toFixed(1)}% >= ${(tpFrac * 100).toFixed(1)}% runner target` };
       }
-      if (input.everFilled && input.everDrawn && input.pnlFrac >= 0) {
-        return { shouldExit: true, reason: `danko_trap: break-even-or-better (${(input.pnlFrac * 100).toFixed(1)}%) after a bounce` };
+      if (input.everFilled && input.pnlFrac >= 0 && (input.everDrawn || input.flowCollapsed)) {
+        return {
+          shouldExit: true,
+          reason: `danko_trap: break-even-or-better (${(input.pnlFrac * 100).toFixed(1)}%) ` +
+            (input.everDrawn ? "after a bounce" : "as 5m flow collapsed"),
+        };
       }
+      // No stop-loss, ever (owner's rule): a flow-dead ladder below
+      // break-even just keeps holding — exits only on a real bounce/TP.
       return { shouldExit: false, reason: "" };
     }
     case "eys_ape": {

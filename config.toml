@@ -781,6 +781,35 @@ danko_age_min_h = 48
 danko_down_min_pct = 85
 danko_down_max_pct = 90
 danko_tp_pct = 17.5          # exit at break-even-or-better after a bounce, or +15-20% if it runs (midpoint default)
+# Danko's own selection rules (strategy-fidelity fix, 2026-10-02, re-read from
+# his Part 3 post): "a token that still has buyers and volume after a dump",
+# discovered by "volume relative to active liquidity" (not raw volume). Three
+# gates, all fail-closed on unknown data (see strategy/combo/plays.ts
+# classifyDanko): a recent dump (price now this far below its recent high),
+# live flow_ratio (freshest 5m volume / pool TVL — bin-level active liquidity
+# isn't exposed by the scanner today), and buyers still present (price has
+# started bouncing off the post-dump low at all).
+danko_dump_min_pct = 30
+# Default chosen without a live sample yet (none of the 6 observed live
+# trades had flow_ratio computed under the old rules) — 0.05 means 5m volume
+# at least 5% of pool TVL, a level that should separate "still trading" pools
+# from genuinely dead ones for typical meme-pool TVL ($20k-150k). Revisit once
+# a live distribution exists (see the read-only check in this round's report).
+danko_flow_ratio_min = 0.05
+# Flow-death exit (owner, 2026-10-02: "when 5m volume disappears, the fees
+# disappear with it... I manage positions based on flow"). Fraction of
+# danko_flow_ratio_min below which current flow counts as collapsed — unlocks
+# a break-even exit ONLY; Danko never stop-losses, so a flow-dead position
+# still below break-even just keeps holding the ladder.
+danko_flow_death_ratio = 0.3
+# Canary mode (1 slot): a never-filled Danko ladder ties up the only slot far
+# longer than it should. 6h stands when canary_mode is off.
+danko_idle_max_h_canary = 2
+# Canary priority (owner, 2026-10-02): live evidence showed molu-shaped
+# candidates (DvdmEnzt, D1YZZg9d) losing the single slot to Danko every
+# sweep. Danko only takes the slot when nothing higher in this list looked
+# eligible this sweep (see manager/loop.ts's canary pre-sort).
+play_priority = ["eys_seat", "eys_ape", "molu_ladder", "danko_trap"]
 
 # eys_ape (owner addition, 2026-10-01; widened 2026-10-02): token-sided ape,
 # range above price, SOL-fee pools (Eys "0.1->10 SOL" $CTO article). Re-read

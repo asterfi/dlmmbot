@@ -45,6 +45,26 @@ export interface GmgnTrendingToken {
 export interface GmgnPresence {
   token: GmgnTrendingToken;
   intervals: Set<string>;   // which trending windows the mint appears in
+  /** volumeUsd for the window it was seen in, keyed by window (e.g. "5m" -> volume over the last 5 minutes). */
+  volumeByInterval: Map<string, number>;
+}
+
+/**
+ * Freshest available per-minute volume for a mint (owner's strategy-fidelity
+ * fix, 2026-10-02): Eys watches CURRENT spike volume ("100K+ volume per
+ * minute"), not a 30-minute average — vol30mUsd/30 smooths out exactly the
+ * spike Eys is looking for. Picks the shortest configured GMGN trending
+ * window present (1m, then 5m), divides by its length. Returns null if
+ * neither window's data is present (caller falls back to the vol30m proxy).
+ */
+export function gmgnPerMinuteVolumeUsd(presence: GmgnPresence | undefined): { usdPerMin: number; window: string } | null {
+  if (!presence) return null;
+  const WINDOWS: Array<{ key: string; minutes: number }> = [{ key: "1m", minutes: 1 }, { key: "5m", minutes: 5 }];
+  for (const w of WINDOWS) {
+    const v = presence.volumeByInterval.get(w.key);
+    if (v !== undefined) return { usdPerMin: v / w.minutes, window: w.key };
+  }
+  return null;
 }
 
 let cache: { at: number; byMint: Map<string, GmgnPresence> } | null = null;
@@ -502,8 +522,8 @@ export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
       const tokens = await fetchInterval(iv, g.min_liquidity_usd);
       for (const t of tokens) {
         const cur = byMint.get(t.address);
-        if (cur) cur.intervals.add(iv);
-        else byMint.set(t.address, { token: t, intervals: new Set([iv]) });
+        if (cur) { cur.intervals.add(iv); cur.volumeByInterval.set(iv, t.volumeUsd); }
+        else byMint.set(t.address, { token: t, intervals: new Set([iv]), volumeByInterval: new Map([[iv, t.volumeUsd]]) });
       }
     } catch (e) {
       const msg = (e as Error).message;

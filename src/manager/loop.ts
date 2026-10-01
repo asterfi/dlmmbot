@@ -18,7 +18,7 @@ import { planRange, planTrancheRange, depthReachable } from "../ranges/planner.j
 import { applyBinRentGate } from "../ranges/binRent.js";
 import { fetchPool } from "../scanner/meteora.js";
 import { fetchCandlesDeep } from "../scanner/candles.js";
-import { trendingByMint } from "../scanner/gmgn.js";
+import { trendingByMint, gmgnPerMinuteVolumeUsd } from "../scanner/gmgn.js";
 import { feeMomentumPart, opportunityScore, structurePart, turnoverPart } from "../scanner/score.js";
 import { scan } from "../scanner/scan.js";
 import { flowFor, startSmartFlow } from "../scanner/smartflow.js";
@@ -31,9 +31,9 @@ import { applyRiskCut, classifyYoung, whaleCheck } from "../risk/entryRisk.js";
 import { enterMajorsPositions } from "./majorsEntry.js";
 import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
-import type { ExitReason, Position } from "../types.js";
+import type { Candidate, ExitReason, Position } from "../types.js";
 import { vetToken } from "../vetting/vet.js";
-import { classifyPlay, detectDipBounce, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
+import { classifyPlay, detectDipBounce, detectDump, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
 import { sizeComboPlay, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
 import { comboExitCheck } from "../strategy/combo/exits.js";
@@ -1148,11 +1148,20 @@ export async function managePositions(exec: Executor): Promise<void> {
         const pnlFrac = pos.entrySol > 0 ? (mark.valueSol + pos.feesClaimedSol - pos.entrySol) / pos.entrySol : 0;
         const feeDaily = mark.feeTvl30mPct * 48;
         const flowDead = feeDaily < pm.rotation_fee_daily_min_pct || mark.vol30mUsd < pm.rotation_vol_30m_min_usd;
+        // Danko's own flow-death signal (strategy-fidelity fix, 2026-10-02):
+        // "when 5m volume disappears, the fees disappear with it". mark only
+        // carries vol30mUsd (positions aren't re-polled with fresh 5m candles
+        // every tick), so vol30m/6 is used as a 5m proxy — same unit basis as
+        // the entry gate's flowRatio (vol5mUsd/tvlUsd), just smoothed.
+        const currentFlowRatio = mark.tvlUsd > 0 ? (mark.vol30mUsd / 6) / mark.tvlUsd : null;
+        const flowCollapsed = pos.play === "danko_trap" && currentFlowRatio !== null
+          && currentFlowRatio < cc.danko_flow_ratio_min * cc.danko_flow_death_ratio;
         const trig = comboExitCheck(
           {
             play: pos.play, entrySol: pos.entrySol, pnlFrac, flowDead, everDrawn: !!pos.fellDeep,
             everFilled: everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
               .get(pos.id) as { f: number } | undefined)?.f === 1,
+            flowCollapsed,
             aboveRange: mark.aboveRange,
           },
           cc,
@@ -1211,7 +1220,11 @@ export async function managePositions(exec: Executor): Promise<void> {
       // re-opened on the same token). A ladder that never fills needs its OWN
       // timeout instead, since nothing else will ever close it.
       if (comboCfgExit?.enabled && pos.play) {
-        const idleMaxH = pos.play === "danko_trap" ? comboCfgExit.danko_idle_max_h
+        // Canary mode (1 slot): a never-filled Danko ladder ties up the ONLY
+        // slot for far longer than it should (owner, 2026-10-02) — a shorter
+        // timeout applies while canary_mode is on; 6h stands the rest of the time.
+        const idleMaxH = pos.play === "danko_trap"
+          ? (comboCfgExit.canary_mode ? (comboCfgExit.danko_idle_max_h_canary ?? 2) : comboCfgExit.danko_idle_max_h)
           : pos.play === "molu_ladder" ? comboCfgExit.molu_idle_max_h
           : null;
         const filled = everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
@@ -1742,8 +1755,9 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
   const normalCap = Math.max(0, bankroll.effectiveSlots - rot.alpha_slots);
 
   let candidates;
+  let rejected: Candidate[] = [];
   try {
-    ({ candidates } = await scan());
+    ({ candidates, rejected } = await scan());
   } catch (e) {
     logError({
       source: "scanner",
@@ -1785,6 +1799,79 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         const as = stonkSet.has(a.tokenMint) ? 1 : 0;
         const bs = stonkSet.has(b.tokenMint) ? 1 : 0;
         return as !== bs ? bs - as : b.score - a.score;
+      });
+    }
+  }
+
+  // Shared GMGN trending read (owner's strategy-fidelity fix, 2026-10-02):
+  // ONE call, reusing trendingByMint()'s own 10-minute cache — used below both
+  // for the rescue lane and as an opportunistic cross-check on Eys's
+  // per-minute volume. No new GMGN call pattern; see trendingByMint for the
+  // rate-limit accounting.
+  const trendingMap: Awaited<ReturnType<typeof trendingByMint>> = comboCfgTick?.enabled
+    ? await trendingByMint().catch(() => new Map())
+    : new Map();
+
+  // GMGN Trending as an extra Eys discovery source (strategy-fidelity fix,
+  // 2026-10-02, re-read from his article: "I always watch the GMGN Trending
+  // section"). Scoped deliberately narrow given the live GMGN rate-limit
+  // pressure (coordinator, 2026-10-02 — shared key already throttling L1-L2):
+  // this adds ZERO new GMGN calls. It reuses the SAME trendingByMint() call
+  // already made elsewhere in the codebase (its own 10-minute cache, well
+  // under the "poll at most once per 2 min" bar) and only looks at candidates
+  // the main Meteora sweep already fetched but rejected for ONE specific
+  // reason: fee_tvl_24h. A genuine $100k/min spike on a token whose 24h
+  // fee/TVL ratio hasn't caught up yet is exactly the case that gate wrongly
+  // blocks — every OTHER gate (vetting, exclude_mints, security, age) still
+  // applies unchanged; this never bypasses a safety check, only the one fee
+  // gate, and only when GMGN's own trending list confirms the spike.
+  if (comboCfgTick?.enabled && rejected.length > 0) {
+    try {
+      for (const r of rejected) {
+        if (r.gateFailures.length !== 1 || r.gateFailures[0]!.gate !== "fee_tvl_24h") continue;
+        const pres = trendingMap.get(r.tokenMint);
+        if (!pres) continue;
+        if (pres.token.marketCapUsd < comboCfgTick.eys_mcap_min_usd) continue;
+        const gmgnRate = gmgnPerMinuteVolumeUsd(pres);
+        const usdPerMin = gmgnRate?.usdPerMin ?? (pres.token.volumeUsd / 60); // 1h trending fallback (owner's old reading unit), only if no fresher window
+        if (usdPerMin < comboCfgTick.eys_flow_usd_per_min_min) continue;
+        candidates = [...candidates, { ...r, gateFailures: [] }];
+        recordDecision(r.tokenMint, r.pool.address, "skipped", "gmgn_eys_rescue", r.score, {
+          symbol: r.symbol, usdPerMin, window: gmgnRate?.window ?? "1h_fallback", mcapUsd: pres.token.marketCapUsd,
+        });
+        console.log(`[combo] ${r.symbol}: GMGN trending rescue — $${usdPerMin.toFixed(0)}/min spike bypasses fee_tvl_24h`);
+      }
+    } catch (e) {
+      console.error("[combo] GMGN trending rescue lane threw (idles this tick):", (e as Error).message);
+    }
+  }
+
+  // Canary priority (owner, 2026-10-02): with only 1 slot, Danko was eating
+  // it every sweep ahead of molu/eys candidates that never got a chance — live
+  // evidence showed molu-shaped candidates (DvdmEnzt, D1YZZg9d) rejected
+  // canary_max_concurrent because Danko held the slot. A full lookahead would
+  // require running the whole vet+candle pipeline twice (double the RPC/GMGN
+  // load), so this is a cheap, pool-data-only heuristic re-sort: candidates
+  // that COULD plausibly be eys_seat/eys_ape/molu_ladder (by mcap/flow alone —
+  // no candles needed) are tried first, same mechanism as the Stonks-priority
+  // sort above. The real classifier (unchanged) still gates correctly either
+  // way; worst case a false "looks non-danko" candidate just fails its own
+  // classification and the loop moves on to the next in order, including any
+  // deferred Danko candidates.
+  if (comboCfgTick?.enabled && comboCfgTick.canary_mode) {
+    const priority = comboCfgTick.play_priority ?? ["eys_seat", "eys_ape", "molu_ladder", "danko_trap"];
+    const dankoRank = priority.indexOf("danko_trap");
+    const looksNonDanko = (c: Candidate): boolean => {
+      const eysish = c.pool.marketCapUsd >= comboCfgTick!.eys_mcap_min_usd
+        && (c.pool.vol30mUsd / 30) >= comboCfgTick!.eys_flow_usd_per_min_min / 3; // within 3x — cheap pre-filter, not the real gate
+      const moluish = c.pool.marketCapUsd >= comboCfgTick!.molu_mcap_min_usd;
+      return eysish || moluish;
+    };
+    if (dankoRank === priority.length - 1) {
+      candidates = [...candidates].sort((a, b) => {
+        const an = looksNonDanko(a) ? 1 : 0;
+        const bn = looksNonDanko(b) ? 1 : 0;
+        return an !== bn ? bn - an : b.score - a.score;
       });
     }
   }
@@ -2201,6 +2288,31 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       const feesEarnedPoolSol = (solUsd && solUsd > 0 && ageDays !== null)
         ? (feeRunRateUsdPerDay * Math.min(Math.max(ageDays, 1 / 24), 365)) / solUsd
         : null;
+      // Eys's own volume reading (strategy-fidelity fix, 2026-10-02, re-read:
+      // "100K+ volume PER MINUTE... strong upward spikes") — vol30mUsd/30 is a
+      // 30-minute AVERAGE and smooths out exactly the spike Eys is watching
+      // for; the live book never fired eys_seat because of it. Freshest
+      // available window first: the 5m candle this same tick already fetched
+      // for dip/bounce (free — no extra call), cross-checked against GMGN's
+      // trending data for this mint when it happens to be present (also
+      // free — same cached bulk call used for the rescue lane above). Falls
+      // back to the vol30m proxy only when neither fresher source has data.
+      const freshestCandle = candles.length > 0 ? candles[candles.length - 1] : null;
+      const vol5mUsd = freshestCandle ? freshestCandle.volume : null;
+      const datapiUsdPerMin = vol5mUsd !== null ? vol5mUsd / 5 : null;
+      const gmgnRate = gmgnPerMinuteVolumeUsd(trendingMap.get(cand.tokenMint));
+      let flowUsdPerMin: number;
+      let volWindow: string;
+      if (gmgnRate !== null) { flowUsdPerMin = gmgnRate.usdPerMin; volWindow = `gmgn_${gmgnRate.window}`; }
+      else if (datapiUsdPerMin !== null) { flowUsdPerMin = datapiUsdPerMin; volWindow = "datapi_5m"; }
+      else { flowUsdPerMin = cand.pool.vol30mUsd / 30; volWindow = "vol30m_avg_fallback"; }
+      const dump = detectDump(candles, entryPrice);
+      const dipBounce = detectDipBounce(candles, entryPrice);
+      // Danko's flow_ratio (his own words: "volume relative to active
+      // liquidity", not raw volume) — freshest per-minute volume over 5
+      // minutes, against pool TVL (active-range bin liquidity isn't exposed
+      // by the scanner today; TVL is the owner-approved fallback).
+      const flowRatio = (vol5mUsd !== null && cand.pool.tvlUsd > 0) ? vol5mUsd / cand.pool.tvlUsd : null;
       const features: PlayCandidateFeatures = {
         mcapUsd: cand.pool.marketCapUsd,
         tokenAgeMinutes: ageMin,
@@ -2210,12 +2322,12 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         feeTvl24hPct: cand.pool.feeTvl24hPct,
         feesEarnedPoolSol,
         devFeesKnownZero: false, // not knowable from current scanner data — never a blocking gate (STRATEGY: "if knowable")
-        // Strongest available volume-rate signal: 30m volume rate (the
-        // scanner's own freshest window), mapped to USD/min against the
-        // owner's Eys >=100k USD/min threshold. Documented in config.toml [combo].
-        flowUsdPerMin: cand.pool.vol30mUsd / 30,
-        dipBounce: detectDipBounce(candles, entryPrice),
+        flowUsdPerMin,
+        dipBounce,
         oneSidedFeasible: reach.ok,
+        dumpPct: dump?.dumpPct ?? null,
+        flowRatio,
+        buyersPresent: dipBounce !== null,
       };
       let classified = classifyPlay(features, cc);
       // eys_ape (widened 2026-10-02): ANY candidate from the main sweep is
@@ -2340,6 +2452,10 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             fees_24h_sol: solUsd ? feeRunRateUsdPerDay / solUsd : null,
             fees_earned_lifetime_sol: features.feesEarnedPoolSol,
             quote_only_fee: cand.pool.feesBothTokens === false,
+            vol_per_min_usd: features.flowUsdPerMin,
+            eys_vol_window: volWindow,
+            danko_dump_pct: features.dumpPct,
+            danko_flow_ratio: features.flowRatio,
           },
           candle_summary: features.dipBounce
             ? { dip_pct: features.dipBounce.dipPct, bounce_pct: features.dipBounce.bouncePct }

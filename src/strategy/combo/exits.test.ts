@@ -7,14 +7,47 @@ const CFG: ComboExitConfig = {
   molu_top_tier_sol: 0.5,
   eys_tp_pct: 2,
   danko_tp_pct: 17.5,
+  danko_flow_death_ratio: 0.3,
 };
 
 describe("comboExitCheck — flow death", () => {
-  it("exits any play immediately on flow death, regardless of PnL", () => {
-    for (const play of ["molu_ladder", "eys_seat", "danko_trap", "eys_ape"] as const) {
+  it("exits molu/eys/ape immediately on flow death, regardless of PnL", () => {
+    for (const play of ["molu_ladder", "eys_seat", "eys_ape"] as const) {
       const d = comboExitCheck({ play, entrySol: 1, pnlFrac: -0.5, flowDead: true, everDrawn: false, everFilled: true }, CFG);
       expect(d.shouldExit).toBe(true);
     }
+  });
+
+  it("does NOT force-exit danko_trap on the generic flowDead signal — it never stop-losses (owner's strategy-fidelity fix, 2026-10-02)", () => {
+    const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: -0.5, flowDead: true, everDrawn: false, everFilled: true }, CFG);
+    expect(d.shouldExit).toBe(false);
+  });
+});
+
+describe("comboExitCheck — danko_trap flow-death (relative, 5m-volume-collapse)", () => {
+  it("exits at break-even-or-better once flow has collapsed, even without a prior drawdown bounce", () => {
+    const d = comboExitCheck({
+      play: "danko_trap", entrySol: 1, pnlFrac: 0.01, flowDead: false,
+      everDrawn: false, everFilled: true, flowCollapsed: true,
+    }, CFG);
+    expect(d.shouldExit).toBe(true);
+    expect(d.reason).toMatch(/flow collapsed/);
+  });
+
+  it("holds (no stop-loss) when flow has collapsed but PnL is still negative", () => {
+    const d = comboExitCheck({
+      play: "danko_trap", entrySol: 1, pnlFrac: -0.2, flowDead: false,
+      everDrawn: false, everFilled: true, flowCollapsed: true,
+    }, CFG);
+    expect(d.shouldExit).toBe(false);
+  });
+
+  it("does not require flowCollapsed when the position already bounced (everDrawn)", () => {
+    const d = comboExitCheck({
+      play: "danko_trap", entrySol: 1, pnlFrac: 0, flowDead: false,
+      everDrawn: true, everFilled: true, flowCollapsed: false,
+    }, CFG);
+    expect(d.shouldExit).toBe(true);
   });
 });
 

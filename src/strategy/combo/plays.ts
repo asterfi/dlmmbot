@@ -36,6 +36,23 @@ export function detectDipBounce(candles: Candle[], currentPrice: number): DipBou
   return { dipPct, bouncePct };
 }
 
+/**
+ * Danko's "a token that still has buyers and volume after a dump" selection
+ * (owner's strategy-fidelity fix, 2026-10-02, re-read from his Part 3 post):
+ * how far CURRENT price sits below its recent high — not dip-to-low like
+ * detectDipBounce (which measures the drawdown's full extent, not where price
+ * is now). A fresh dump with price still near the bottom should qualify even
+ * before any bounce has started; detectDipBounce's bouncePct>0 requirement
+ * would wrongly reject that.
+ */
+export function detectDump(candles: Candle[], currentPrice: number): { dumpPct: number } | null {
+  const sw = swing(candles);
+  if (!sw || sw.high <= 0 || currentPrice <= 0) return null;
+  const dumpPct = ((sw.high - currentPrice) / sw.high) * 100;
+  if (dumpPct <= 0) return null;
+  return { dumpPct };
+}
+
 export interface PlayCandidateFeatures {
   mcapUsd: number;
   /** Mint age in minutes; null = unknown (treated conservatively, see each play). */
@@ -65,6 +82,25 @@ export interface PlayCandidateFeatures {
   dipBounce: DipBounce | null;
   /** Can a one-sided SOL bid-ask actually be built within the bin/rent caps? */
   oneSidedFeasible: boolean;
+  /**
+   * Danko's selection rules (owner, 2026-10-02, re-read from his Part 3 post):
+   * how far price sits below its recent high right now (see detectDump) —
+   * null = unknown (candles unavailable), fails closed.
+   */
+  dumpPct: number | null;
+  /**
+   * "Volume relative to active liquidity" (Danko's own words) — freshest
+   * available volume window (GMGN 1m/5m, else the vol30m proxy) divided by
+   * the active-range liquidity USD, or pool TVL when bin-level liquidity
+   * isn't available. null = unknown, fails closed.
+   */
+  flowRatio: number | null;
+  /**
+   * "A token that still has buyers... after a dump" — whether price has
+   * started recovering off its post-dump low at all (dipBounce != null,
+   * since detectDipBounce only returns non-null once bouncePct > 0).
+   */
+  buyersPresent: boolean;
 }
 
 export interface ComboConfigLike {
@@ -79,6 +115,10 @@ export interface ComboConfigLike {
   eys_reject_mcap_hi_usd: number;
   danko_mcap_min_usd: number;
   danko_age_min_h: number;
+  /** Price must sit at least this far below its recent high right now (see detectDump). */
+  danko_dump_min_pct: number;
+  /** Minimum flow_ratio (freshest volume / active liquidity) — "volume relative to active liquidity", Danko's own discovery rule. */
+  danko_flow_ratio_min: number;
 }
 
 export interface PlayClassification {
@@ -90,11 +130,21 @@ function classifyDanko(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassi
   if (!(f.mcapUsd >= c.danko_mcap_min_usd)) return null;
   if (f.tokenAgeMinutes === null || f.tokenAgeMinutes < c.danko_age_min_h * 60) return null; // unknown age fails closed
   if (!f.oneSidedFeasible) return null;
+  // Danko's own selection rules (Part 3, re-read 2026-10-02): a recent dump,
+  // live flow relative to active liquidity (not raw volume), and buyers still
+  // present. All three fail CLOSED on unknown data — a token we cannot verify
+  // is still trading after its dump is not Danko's setup, it's a dead pool.
+  if (f.dumpPct === null || f.dumpPct < c.danko_dump_min_pct) return null;
+  if (f.flowRatio === null || f.flowRatio < c.danko_flow_ratio_min) return null;
+  if (!f.buyersPresent) return null;
   return {
     play: "danko_trap",
     reasons: [
       `mcap $${f.mcapUsd.toFixed(0)} >= $${c.danko_mcap_min_usd}`,
       `age ${(f.tokenAgeMinutes / 60).toFixed(1)}h >= ${c.danko_age_min_h}h (proven floor)`,
+      `dump ${f.dumpPct.toFixed(1)}% >= ${c.danko_dump_min_pct}% below recent high`,
+      `flow_ratio ${f.flowRatio.toFixed(3)} >= ${c.danko_flow_ratio_min} (volume/active-liquidity)`,
+      "buyers still present (bouncing off the post-dump low)",
     ],
   };
 }

@@ -381,6 +381,25 @@ export interface Config {
     danko_down_min_pct: number;
     danko_down_max_pct: number;
     danko_tp_pct: number;
+    /**
+     * Danko's own selection rules (strategy-fidelity fix, 2026-10-02, re-read
+     * from his Part 3 post): a recent dump off the high, live flow relative
+     * to ACTIVE LIQUIDITY (not raw volume), and buyers still present. See
+     * strategy/combo/plays.ts classifyDanko.
+     */
+    danko_dump_min_pct: number;
+    danko_flow_ratio_min: number;
+    /** Flow-death exit (owner, 2026-10-02): "when 5m volume disappears, the fees disappear with it" — fraction of danko_flow_ratio_min below which flow counts as collapsed. Does NOT force a stop-loss; only unlocks a break-even exit. */
+    danko_flow_death_ratio: number;
+    /** Canary-mode idle timeout is shorter — one slot is too valuable to tie up for 6h on a ladder that never fills. */
+    danko_idle_max_h_canary: number;
+    /**
+     * Canary mode (1 slot): which play gets first claim on the single slot
+     * when more than one classifies in the same sweep. Danko is deliberately
+     * last — the owner's live evidence showed molu/eys candidates losing the
+     * slot to Danko every time. See manager/loop.ts's canary pre-sort.
+     */
+    play_priority?: Array<"eys_seat" | "eys_ape" | "molu_ladder" | "danko_trap">;
     /** Canary account sizing (owner addition 2026-10-01, ~0.3 SOL accounts). */
     canary_mode: boolean;
     canary_position_sol: number;
