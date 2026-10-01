@@ -53,6 +53,7 @@ describe("entry score floor", () => {
       c.entry.max_quote_drift_bins = 0;
       c.follow.enabled = false;
       c.majors.enabled = false;
+      c.combo!.enabled = false;
       c.gates.min_entry_score = 80;
     });
     exec = new FakeExecutor("paper");

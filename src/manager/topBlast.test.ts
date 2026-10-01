@@ -59,6 +59,7 @@ describe("top-blast telemetry", () => {
       c.entry.tranche_enabled = false;
       c.follow.enabled = false;
       c.majors.enabled = false;
+      c.combo!.enabled = false;
     });
     exec = new FakeExecutor("paper");
     vi.mocked(fetchCandlesDeep).mockResolvedValue(candles());

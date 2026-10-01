@@ -1270,7 +1270,10 @@ export async function managePositions(exec: Executor): Promise<void> {
             getDb().prepare("UPDATE positions SET state='closed_missed' WHERE id=?").run(pos.id);
           else bankProfit(pos, exitSol, "P3 take-profit");
           recordDecision(pos.tokenMint, pos.poolAddress, "exited", `P3_above_${classification}`, null, { mark, sustainedS: now() - since, exitSol, sustainMin, sleeve });
-          if (pos.followChainId == null && sleeve !== "majors") armFollowChain(pos, mark.price, mark.vol30mUsd);
+          // Combo exclusivity (owner's blocker fix): follow-mode re-entry opens
+          // positions outside the combo plays' sizing, so it must never arm
+          // while combo is enabled — not just left disabled in config.
+          if (pos.followChainId == null && sleeve !== "majors" && !config().combo?.enabled) armFollowChain(pos, mark.price, mark.vol30mUsd);
         }
         continue;
       }
@@ -2267,6 +2270,17 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       }
     }
 
+    // --- COMBO EXCLUSIVITY (owner's blocker fix, 2026-10-01) ---
+    // While combo is enabled, the plays' own sizing is the ONLY risk control
+    // the owner wants in effect — a candidate that fit no play must NEVER
+    // fall through to upstream's normal Kelly-sized entry below. This must
+    // run AFTER the combo block above (which may have set `play`) and BEFORE
+    // displacement/open.
+    if (comboCfgEntry?.enabled && !play) {
+      recordSkip(cand.tokenMint, cand.pool.address, "combo_no_play", score, { symbol: cand.symbol });
+      continue;
+    }
+
     if (needsDisplacement) {
       const displaced = await tryDisplacement(exec, score, cand.tokenMint);
       if (!displaced) {
@@ -2377,7 +2391,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     const te = config().entry;
     // Never on a risk-cut entry: a young token or a whale overhang is exactly
     // the crash-through case a deeper pocket would be filled by.
-    if (te.tranche_enabled && score >= te.tranche_score_min && !isMicro && !riskCut && !play) {
+    if (te.tranche_enabled && score >= te.tranche_score_min && !isMicro && !riskCut && !play && !comboCfgEntry?.enabled) {
       const tSize = size * (te.tranche_size_pct / 100);
       const tFloor = minPositionSol(bankroll.walletSol);
       const slotsLeft = bankroll.effectiveSlots - openPositionCount();
@@ -2436,7 +2450,10 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       }
     }
   }
-  await enterMajorsPositions(exec, bankroll);
+  // Combo exclusivity (owner's blocker fix): majors is already off by default
+  // (majors.enabled=false) and gated internally, but guard explicitly here too
+  // — majors opens positions outside the combo plays' sizing.
+  if (!config().combo?.enabled) await enterMajorsPositions(exec, bankroll);
 }
 
 /** Main loop: manage every poll_s, enter every interval_s. */
@@ -2603,7 +2620,11 @@ export async function runLoop(): Promise<void> {
       // Follow chains tick at poll cadence, not scanner cadence — dip detection
       // on a 15% retrace needs finer sampling than the 60s scan. Frozen entries
       // freeze follow legs too: both add exposure.
-      if (!entriesFrozen()) {
+      // Combo exclusivity (owner's blocker fix): a chain can only exist if it
+      // was armed before combo was turned on (armFollowChain itself is now
+      // gated too) — this stops it from firing a NEW leg (opening a position)
+      // while combo is enabled, belt-and-braces with the arm-site guard.
+      if (!entriesFrozen() && !config().combo?.enabled) {
         try {
           await tickFollowChains(exec);
         } catch (e) {

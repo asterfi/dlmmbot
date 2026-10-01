@@ -467,7 +467,12 @@ regime_sol_24h_pause_pct = -15
 # unguarded chasing is negative-EV at every depth/shape (median hot-window
 # retrace 26%, p75 34%); this gate set was the only one at/above breakeven at
 # the measured in-range fee rate, with zero simulated stops or below-cuts.
-enabled = true
+# DISABLED while [combo].enabled (owner's blocker fix, 2026-10-01): follow
+# re-entry opens positions outside the combo plays' own sizing, which must be
+# the ONLY risk control in effect. Also guarded in code (armFollowChain's call
+# site and tickFollowChains are both skipped while combo.enabled) — this
+# config flag is belt-and-braces, not the only thing stopping it.
+enabled = false
 min_vol_30m_usd = 100000   # arm only while the pool does 4x our normal entry floor
 retrace_arm_pct = 15       # wait for this dip from the post-exit / post-high peak
 range_depth_pct = 30       # bid-ask depth — tighter than the 40% default, far from "top blast"
@@ -662,9 +667,12 @@ enabled = true
 
 # Eys 30/70 sizing: 30% of current equity (wallet SOL + open position value,
 # same `equity` risk/limits.ts computeBankroll() already computes) is the
-# combo strategy's ENTIRE active budget; the other 70% is never deployed by
-# combo plays (it remains available to upstream's own Kelly pipeline).
-# molu_ladder and eys_seat each get ~1/3 of the active budget per position;
+# combo strategy's ENTIRE active budget; the other 70% is NEVER DEPLOYED —
+# while combo.enabled, no other entry lane (upstream's own Kelly pipeline,
+# follow re-entry, majors, tranches) may open a position at all (owner's
+# blocker fix, 2026-10-01: the plays' own sizing is the ONLY risk control in
+# effect). A candidate that fits no play is skipped as `combo_no_play`, never
+# handed to Kelly sizing. molu_ladder and eys_seat each get ~1/3 of the active budget per position;
 # danko_trap gets up to 1/3 (and is capped at 1 concurrent regardless).
 # Sizes grow automatically as equity grows (percentages, not flat SOL).
 active_budget_pct = 30
