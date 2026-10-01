@@ -1,0 +1,6 @@
+.env
+*.secret.txt
+bot.env
+state.json
+dashboard-*.txt
+node_modules/

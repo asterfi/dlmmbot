@@ -1,0 +1,9 @@
+[Unit]
+Description=Run dlmmbot truth-pnl daily at 00:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

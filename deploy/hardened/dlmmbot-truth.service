@@ -1,0 +1,25 @@
+[Unit]
+Description=dlmmbot truth-pnl report (one-shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dlmmbot
+Group=dlmmbot
+WorkingDirectory=/opt/dlmmbot-live
+EnvironmentFile=/etc/dlmmbot/bot.env
+Environment=HOME=/var/lib/dlmmbot
+Environment=XDG_CACHE_HOME=/var/lib/dlmmbot/.cache
+Environment=npm_config_cache=/var/lib/dlmmbot/.npm-cache
+ExecStart=/opt/dlmmbot-live/node_modules/.bin/tsx scripts/truth-pnl.ts --telegram
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dlmmbot
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes

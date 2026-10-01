@@ -1,0 +1,13 @@
+{
+  "name": "dlmmbot-privy-setup",
+  "private": true,
+  "type": "module",
+  "description": "One-time Privy server-wallet + policy setup and owner-key emergency withdrawal for dlmmbot. Run on your own machine, never on the bot host.",
+  "dependencies": {
+    "@privy-io/node": "^0.35.0",
+    "@solana/web3.js": "^1.99.0",
+    "@meteora-ag/dlmm": "^1.9.14",
+    "bn.js": "^5.2.5",
+    "dotenv": "^18.0.5"
+  }
+}

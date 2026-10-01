@@ -1,0 +1,27 @@
+[Unit]
+Description=dlmmbot dashboard (loopback only; public via Caddy basic auth)
+After=network-online.target dlmmbot-live.service
+
+[Service]
+User=dlmmbot
+Group=dlmmbot
+WorkingDirectory=/opt/dlmmbot-live
+EnvironmentFile=/etc/dlmmbot/bot.env
+Environment=DASH_HOST=127.0.0.1 DASH_PORT=8787 HOME=/var/lib/dlmmbot
+ExecStart=/usr/bin/node deploy/dashboard-server.mjs
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dlmmbot
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

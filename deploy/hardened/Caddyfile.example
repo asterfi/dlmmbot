@@ -1,0 +1,36 @@
+# Public, read-only dashboard behind HTTPS + basic auth.
+# The dashboard itself listens on 127.0.0.1:8787 (DASH_HOST=127.0.0.1).
+# Generate the hash with: caddy hash-password  (or bcrypt it on your own machine)
+dashboard.example.com {
+	# Page + assets: basic auth. API + live socket: the dashboard server enforces its own
+	# DASH_TOKEN (the SPA sends it as a Bearer header, which would clobber basic auth).
+	@page not path /api/* /ws /favicon.svg
+	basicauth @page {
+		youruser $2b$12$REPLACE_WITH_BCRYPT_HASH
+	}
+	# Read-only from the internet: no config/profile/secret writes.
+	@write not method GET HEAD
+	respond @write "read-only dashboard" 403
+	@secret path /api/env /api/env/* /api/secrets /api/secrets/*
+	respond @secret "blocked" 403
+	reverse_proxy 127.0.0.1:8787
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+	log {
+		output file /var/log/caddy/dashboard-access.log
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					replace token REDACTED
+				}
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+			}
+		}
+	}
+}
