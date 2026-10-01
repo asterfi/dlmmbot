@@ -5,9 +5,10 @@ import {
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import { Connection, Keypair, PublicKey, TransactionInstruction } from "@solana/web3.js";
+import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { getDb, now } from "../db/db.js";
 import { buildSwapFromSolTx } from "./jupiter.js";
+import type { WalletSigner } from "./wallet.js";
 
 const ACCRUE_KEY = "profit_burn_accrued_sol";
 
@@ -65,7 +66,7 @@ async function resolveTokenProgram(connection: Connection, mint: PublicKey): Pro
  */
 export async function executeProfitBurn(opts: {
   connection: Connection;
-  wallet: Keypair;
+  wallet: WalletSigner;
   spendSol: number;
   measuredPnlSol: number;
   positionId: number;

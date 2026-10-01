@@ -344,6 +344,17 @@ export interface Env {
   gmgnApiKey: string | undefined;
   walletPrivateKey: string | undefined;
   walletKeypairPath: string | undefined;
+  /**
+   * Privy server-wallet signer (see executor/wallet.ts). When PRIVY_WALLET_ID
+   * is set, live mode signs through the Privy API instead of WALLET_PRIVATE_KEY
+   * — the bot process never holds the Solana secret key.
+   */
+  privyAppId: string | undefined;
+  privyAppSecret: string | undefined;
+  privyWalletId: string | undefined;
+  privyWalletAddress: string | undefined;
+  privyBotSignerId: string | undefined;
+  privyBotAuthKey: string | undefined;
   farmerMode: string;
 }
 
@@ -532,6 +543,12 @@ export function env(): Env {
     gmgnApiKey: process.env.GMGN_API_KEY || undefined,
     walletPrivateKey: process.env.WALLET_PRIVATE_KEY || undefined,
     walletKeypairPath: process.env.WALLET_KEYPAIR_PATH || undefined,
+    privyAppId: process.env.PRIVY_APP_ID || undefined,
+    privyAppSecret: process.env.PRIVY_APP_SECRET || undefined,
+    privyWalletId: process.env.PRIVY_WALLET_ID || undefined,
+    privyWalletAddress: process.env.PRIVY_WALLET_ADDRESS || undefined,
+    privyBotSignerId: process.env.PRIVY_BOT_SIGNER_ID || undefined,
+    privyBotAuthKey: process.env.PRIVY_BOT_AUTH_KEY || undefined,
     farmerMode: process.env.FARMER_MODE ?? "paper",
   };
 }

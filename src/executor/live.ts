@@ -30,7 +30,7 @@ import {
   computeUnitLimitFor, computeUnitLimitIx, escalate, hasComputeUnitLimit,
   priorityFeeSettings, recentFeeMicroLamports, setComputeUnitPrice, writableAccountsOf,
 } from "./priorityFee.js";
-import { loadKeypair } from "./wallet.js";
+import { loadSigner, type WalletSigner } from "./wallet.js";
 
 // CJS require (see reconcile.ts): the SDK's ESM build crashes on anchor's
 // CJS named exports under Node's loader; the CJS build has no such issue.
@@ -241,7 +241,7 @@ export function landedTxError(
 export class LiveExecutor implements Executor {
   readonly mode = "live" as const;
   readonly connection: Connection;
-  readonly wallet: Keypair;
+  readonly wallet: WalletSigner;
   private pools = new Map<string, Promise<DlmmPool>>();
 
   constructor() {
@@ -250,7 +250,9 @@ export class LiveExecutor implements Executor {
         'live mode requires BOTH [exec].mode="live" in config.toml AND FARMER_MODE=live in the environment'
       );
     }
-    this.wallet = loadKeypair(env().walletPrivateKey, env().walletKeypairPath);
+    // loadSigner throws if neither PRIVY_WALLET_ID nor WALLET_PRIVATE_KEY/
+    // WALLET_KEYPAIR_PATH is set — live mode refuses to start without a signer.
+    this.wallet = loadSigner(env());
     // makeConnection owns both the per-request timeout (a node that accepts the
     // TCP connection and never answers would otherwise wedge the manager tick
     // indefinitely — the one failure shape the watchdog cannot help with,
@@ -407,6 +409,36 @@ export class LiveExecutor implements Executor {
    * hazard the old catch guarded is unchanged and guarded the same way: nothing
    * is resent until the previous attempt's fate is known.
    */
+  /**
+   * Set a fresh blockhash/feePayer, apply any local extra signers, then hand
+   * off to the configured WalletSigner (Keypair in-process, or Privy over the
+   * API). A new blockhash invalidates whatever signatures were on `tx`
+   * before (web3.js re-derives the message and drops stale sigs), so extra
+   * signers are re-applied every attempt — same as the old sendTransaction
+   * path, which re-signed with every signer on every retry.
+   *
+   * Privy's response is a brand-new Transaction object, not `tx` mutated in
+   * place, so it carries forward whatever was serialized into the request —
+   * including the extra signers' signatures already on `tx`. The re-check
+   * after is a safety net in case Privy ever drops a signature it didn't
+   * recognize as its own.
+   */
+  private async signLegacy(tx: Transaction, extraSigners: Keypair[]): Promise<Transaction> {
+    const { blockhash } = await this.connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = this.wallet.publicKey;
+    for (const kp of extraSigners) tx.partialSign(kp);
+    const signed = await this.wallet.signTransaction(tx);
+    for (const kp of extraSigners) {
+      const entry = signed.signatures.find((s) => s.publicKey.equals(kp.publicKey));
+      if (!entry?.signature) {
+        console.warn(`[live] signer response dropped extra signer ${kp.publicKey.toBase58()} — re-applying locally`);
+        signed.partialSign(kp);
+      }
+    }
+    return signed;
+  }
+
   private async send(tx: Transaction, extraSigners: Keypair[] = []): Promise<string> {
     const baseFee = await this.applyComputeBudget(tx);
     const retries = config().exec.tx_retries;
@@ -415,12 +447,13 @@ export class LiveExecutor implements Executor {
       // Escalate before re-sending: the retry path exists for "broadcast but
       // never confirmed", which is precisely what an underpriced fee produces.
       if (i > 0) this.reprice(tx, baseFee, i);
+      const signed = await this.signLegacy(tx, extraSigners);
       let sig: string;
       try {
-        sig = await this.connection.sendTransaction(tx, [this.wallet, ...extraSigners], {
-          skipPreflight: false,
-          preflightCommitment: "confirmed",
-        });
+        sig = await this.connection.sendRawTransaction(
+          signed.serialize({ requireAllSignatures: true, verifySignatures: false }),
+          { skipPreflight: false, preflightCommitment: "confirmed" },
+        );
       } catch (e) {
         lastErr = e as Error;
         const detail = txErrorDetail(e);
@@ -437,8 +470,8 @@ export class LiveExecutor implements Executor {
         // double-execute (double-sell on closes, "account already in use" plus
         // an orphaned funded position on opens) and the landed attempt's
         // signature would never reach walletDelta. Resolve its fate first.
-        const attemptSig = tx.signature ? bs58.encode(tx.signature) : null;
-        const attemptBlockhash = tx.recentBlockhash;
+        const attemptSig = signed.signature ? bs58.encode(signed.signature) : null;
+        const attemptBlockhash = signed.recentBlockhash;
         if (attemptSig && attemptBlockhash) {
           const fate = await this.signatureFate(attemptSig, attemptBlockhash);
           if (fate === "landed") {
@@ -461,7 +494,7 @@ export class LiveExecutor implements Executor {
       // Broadcast accepted. Same fate resolution, by polling — the only
       // difference from the branch above is that here we know the signature
       // rather than reconstructing it from the signed bytes.
-      const fate = await this.signatureFate(sig, tx.recentBlockhash ?? "");
+      const fate = await this.signatureFate(sig, signed.recentBlockhash ?? "");
       if (fate === "landed") return sig;
       if (fate === "failed") {
         const landed = await this.connection

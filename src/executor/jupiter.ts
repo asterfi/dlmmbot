@@ -1,13 +1,13 @@
 import {
   AddressLookupTableAccount,
   Connection,
-  Keypair,
   PublicKey,
   TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
 import { config, env, SOL_MINT } from "../config.js";
+import type { WalletSigner } from "./wallet.js";
 
 // Jupiter swap client (REST v1): quote -> swap tx -> sign -> send. Used to
 // bank token-side fees and zap exits back to SOL. UNTESTED IN LIVE until the
@@ -105,7 +105,7 @@ function headers(): Record<string, string> {
 /** Swap `amountRaw` of `inputMint` to SOL. Returns lamports received (per quote) and signature. */
 export async function swapToSol(
   connection: Connection,
-  wallet: Keypair,
+  wallet: WalletSigner,
   inputMint: string,
   amountRaw: bigint,
   slippageBps: number
@@ -135,8 +135,8 @@ export async function swapToSol(
   if (!swapRes.ok) throw new Error(`jupiter swap HTTP ${swapRes.status}`);
   const { swapTransaction } = (await swapRes.json()) as { swapTransaction: string };
 
-  const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, "base64"));
-  tx.sign([wallet]);
+  const unsigned = VersionedTransaction.deserialize(Buffer.from(swapTransaction, "base64"));
+  const tx = await wallet.signTransaction(unsigned);
   const signature = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 });
   // A confirm that times out is NOT proof the swap failed — the tx is already
   // broadcast and can still land. Throwing the bare error loses the one thing
@@ -199,7 +199,7 @@ export function signatureFromSwapError(e: unknown): string | null {
 /** Swap `lamports` of SOL to `outputMint`. Returns raw token out (from quote) + signature. */
 export async function swapFromSol(
   connection: Connection,
-  wallet: Keypair,
+  wallet: WalletSigner,
   outputMint: string,
   lamports: bigint,
   slippageBps: number,
@@ -222,7 +222,7 @@ export async function swapFromSol(
  */
 export async function buildSwapFromSolTx(
   connection: Connection,
-  wallet: Keypair,
+  wallet: WalletSigner,
   outputMint: string,
   lamports: bigint,
   slippageBps: number,
@@ -280,8 +280,8 @@ export async function buildSwapFromSolTx(
     recentBlockhash: blockhash,
     instructions: ixs,
   }).compileToV0Message(alts);
-  const tx = new VersionedTransaction(msg);
-  tx.sign([wallet]);
+  const unsigned = new VersionedTransaction(msg);
+  const tx = await wallet.signTransaction(unsigned);
   return { tx, minOutRaw, outAmountRaw: BigInt(quote.outAmount) };
 }
 
@@ -361,7 +361,7 @@ export async function quoteToSolLamports(inputMint: string, amountRaw: bigint): 
  */
 export async function swapToSolEscalating(
   connection: Connection,
-  wallet: Keypair,
+  wallet: WalletSigner,
   inputMint: string,
   amountRaw: bigint,
   baseSlippageBps: number,
