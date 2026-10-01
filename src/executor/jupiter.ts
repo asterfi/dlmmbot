@@ -13,7 +13,7 @@ import type { WalletSigner } from "./wallet.js";
 // bank token-side fees and zap exits back to SOL. UNTESTED IN LIVE until the
 // first funded run — start with dust-sized swaps.
 
-interface QuoteResponse {
+export interface QuoteResponse {
   inputMint: string;
   outputMint: string;
   inAmount: string;
@@ -103,13 +103,20 @@ function headers(): Record<string, string> {
 }
 
 /** Swap `amountRaw` of `inputMint` to SOL. Returns lamports received (per quote) and signature. */
-export async function swapToSol(
+/**
+ * Quote + `/swap` (versioned, multi-hop-capable), signed but NOT sent — the
+ * build/sign half of `swapToSol`, split out (2026-10-01) so a caller can
+ * prove the exact transaction a token->SOL exit would send — e.g. a
+ * sign-only Privy policy smoke test — without broadcasting it. `swapToSol`
+ * below is unchanged in behavior; it just calls this and then sends.
+ */
+export async function buildSwapToSolTx(
   connection: Connection,
   wallet: WalletSigner,
   inputMint: string,
   amountRaw: bigint,
-  slippageBps: number
-): Promise<{ outLamports: number; signature: string } | null> {
+  slippageBps: number,
+): Promise<{ tx: VersionedTransaction; quote: QuoteResponse } | null> {
   if (amountRaw <= 0n || inputMint === SOL_MINT) return null;
   const base = config().apis.jupiter_quote;
 
@@ -137,6 +144,19 @@ export async function swapToSol(
 
   const unsigned = VersionedTransaction.deserialize(Buffer.from(swapTransaction, "base64"));
   const tx = await wallet.signTransaction(unsigned);
+  return { tx, quote };
+}
+
+export async function swapToSol(
+  connection: Connection,
+  wallet: WalletSigner,
+  inputMint: string,
+  amountRaw: bigint,
+  slippageBps: number
+): Promise<{ outLamports: number; signature: string } | null> {
+  const built = await buildSwapToSolTx(connection, wallet, inputMint, amountRaw, slippageBps);
+  if (!built) return null;
+  const { tx, quote } = built;
   const signature = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 });
   // A confirm that times out is NOT proof the swap failed — the tx is already
   // broadcast and can still land. Throwing the bare error loses the one thing
