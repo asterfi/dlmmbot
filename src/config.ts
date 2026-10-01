@@ -335,6 +335,83 @@ export interface Config {
    * "24h swing". Optional section: defaults in code for older configs.
    */
   candles?: { deep_source_enabled?: boolean; limit?: number; max_per_min?: number };
+  /**
+   * Combo strategy — Eys (fast) + molu (core) + Danko (deep), owner's
+   * decision 2026-10-01. Optional section: entirely inert (no classification,
+   * no sizing override) unless `enabled = true`. See STRATEGY.md and the
+   * `[combo]` block in config.toml for the full rationale.
+   */
+  combo?: {
+    enabled: boolean;
+    active_budget_pct: number;
+    molu_share_pct: number;
+    eys_share_pct: number;
+    danko_share_pct: number;
+    max_concurrent: number;
+    min_floor_sol: number;
+    fee_reserve_sol: number;
+    molu_mcap_min_usd: number;
+    molu_age_max_h: number;
+    molu_dip_min_pct: number;
+    molu_bounce_min_pct: number;
+    molu_tp_pct: number;
+    molu_tp_pct_top_tier: number;
+    molu_top_tier_sol: number;
+    eys_mcap_min_usd: number;
+    eys_fees_earned_min_sol: number;
+    eys_flow_usd_per_min_min: number;
+    eys_reject_mcap_lo_usd: number;
+    eys_reject_mcap_hi_usd: number;
+    eys_tp_pct: number;
+    danko_mcap_min_usd: number;
+    danko_age_min_h: number;
+    danko_down_min_pct: number;
+    danko_down_max_pct: number;
+    danko_tp_pct: number;
+    /** Canary account sizing (owner addition 2026-10-01, ~0.3 SOL accounts). */
+    canary_mode: boolean;
+    canary_position_sol: number;
+    position_rent_est_sol: number;
+    /** eys_ape: Stonks-launchpad token-sided ape (owner addition 2026-10-01). */
+    ape_enabled?: boolean;
+    ape_sol: number;
+    ape_fee_min_sol: number;
+    ape_range_up_pct: number;
+    /** eys_seat cost-skip: expected win must clear the estimated round-trip cost. */
+    eys_cost_tx_count: number;
+    eys_cost_tx_sol: number;
+    eys_cost_slippage_bps: number;
+  };
+  /**
+   * Jev — Typesafe System One decision layer for combo entries/exits.
+   * Composite scoring + every threshold lives in code (strategy/jev/policy.ts),
+   * per docs.typesafe.ai. Fail-open ONLY on transport failure (missing key,
+   * timeout, 5xx-after-retries, malformed response) — a genuine uncertain
+   * answer is handled by policy, not treated as a transport fallback.
+   */
+  jev?: {
+    enabled: boolean;
+    /** Pinned version (NOT "-latest" — the alias moves on new releases and thresholds are tuned per version). */
+    model?: string;
+    timeout_ms?: number;        // hard-clamped to <=6000ms in code regardless of this value
+    max_concurrent?: number;
+    max_response_bytes?: number;
+    max_consults_per_min?: number;
+    retain_days?: number;
+    // --- composite-scoring policy (strategy/jev/policy.ts) ---
+    redflag_veto?: number;
+    play_prob_min?: number;
+    uncertain_low?: number;
+    uncertain_high?: number;
+    weight_fresh_flow?: number;
+    weight_fee_generation?: number;
+    weight_bounce?: number;
+    weight_narrative?: number;
+    entry_threshold_molu_ladder?: number;
+    entry_threshold_danko_trap?: number;
+    entry_threshold_eys_seat?: number;
+    entry_threshold_eys_ape?: number;
+  };
 }
 
 export interface Env {

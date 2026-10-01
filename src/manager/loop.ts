@@ -33,10 +33,34 @@ import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
 import type { Position } from "../types.js";
 import { vetToken } from "../vetting/vet.js";
+import { classifyPlay, detectDipBounce, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
+import { classifyApe, type ApeCandidateFeatures } from "../strategy/combo/ape.js";
+import { sizeComboPlay, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
+import { comboExitCheck } from "../strategy/combo/exits.js";
+import { planDankoRange } from "../strategy/combo/dankoRange.js";
+import { planApeRange } from "../strategy/combo/apeRange.js";
+import { COMBO_PLAYBOOK } from "../strategy/combo/playbook.js";
+import { jevConsult } from "../strategy/jev/index.js";
+import { fetchStonkTokens } from "../scanner/stonkfun.js";
 
 // STRATEGY.md §4 — P0–P5 state machine. Live: P0 (TVL/price/rugcheck + GMGN
 // holder-watch), P1–P5, escape hatch, follow, micro/majors sleeves, residual
 // sweep, heartbeat. Second tranche: dual-range BidAsk below primary (score gate).
+
+/** Open combo-play position counts, current mode only (§ combo sizing's max-concurrent / max-1-danko caps). */
+function comboOpenCounts(): ComboOpenCounts {
+  const rows = getDb().prepare(
+    "SELECT play, COUNT(*) AS c FROM positions WHERE state IN ('pending','open','closing') AND mode = ? AND play IS NOT NULL GROUP BY play"
+  ).all(currentMode()) as Array<{ play: string; c: number }>;
+  const counts: ComboOpenCounts = { moluLadder: 0, eysSeat: 0, dankoTrap: 0, eysApe: 0 };
+  for (const r of rows) {
+    if (r.play === "molu_ladder") counts.moluLadder = r.c;
+    else if (r.play === "eys_seat") counts.eysSeat = r.c;
+    else if (r.play === "danko_trap") counts.dankoTrap = r.c;
+    else if (r.play === "eys_ape") counts.eysApe = r.c;
+  }
+  return counts;
+}
 
 function dataDir(): string {
   return process.env.FARMER_DB_PATH
@@ -688,7 +712,7 @@ function loadOpenPositions(): Position[] {
   const rows = getDb().prepare(
     `SELECT id, mode, pool, token_mint, symbol, tranche_of, entry_ts, entry_price, entry_sol,
             min_bin_id, max_bin_id, state, fees_claimed_sol, rent_paid_sol, profit_lock_fires,
-            exit_ts, exit_sol, exit_reason, follow_chain_id, close_requested_at
+            exit_ts, exit_sol, exit_reason, follow_chain_id, close_requested_at, play, fell_deep
      FROM positions WHERE state IN ('open','pending') AND mode = ?`
   ).all(currentMode()) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
@@ -704,6 +728,8 @@ function loadOpenPositions(): Position[] {
     exitReason: r.exit_reason as Position["exitReason"],
     followChainId: r.follow_chain_id as number | null,
     closeRequestedAt: r.close_requested_at as number | null,
+    play: r.play as Position["play"],
+    fellDeep: !!r.fell_deep,
   }));
 }
 
@@ -1087,6 +1113,54 @@ export async function managePositions(exec: Executor): Promise<void> {
           mark, pos, sleeve, drain: drain.evidence,
         });
         continue;
+      }
+
+      // --- COMBO EXIT: play-specific take-profit / flow-death, Jev-confirmed ---
+      // Runs ahead of P1 (disabled anyway, see config.toml) and P2/P3 for any
+      // position tagged with a combo play — each play defines its own exit
+      // economics (owner's decisions), not upstream's generic ladder. P0 above
+      // always runs first and is never gated by Jev.
+      const comboCfgExit = config().combo;
+      if (comboCfgExit?.enabled && pos.play) {
+        const cc = comboCfgExit;
+        const pnlFrac = pos.entrySol > 0 ? (mark.valueSol + pos.feesClaimedSol - pos.entrySol) / pos.entrySol : 0;
+        const feeDaily = mark.feeTvl30mPct * 48;
+        const flowDead = feeDaily < pm.rotation_fee_daily_min_pct || mark.vol30mUsd < pm.rotation_vol_30m_min_usd;
+        const trig = comboExitCheck(
+          { play: pos.play, entrySol: pos.entrySol, pnlFrac, flowDead, everDrawn: !!pos.fellDeep, aboveRange: mark.aboveRange },
+          cc,
+        );
+        if (trig.shouldExit) {
+          const jevResult = await jevConsult({
+            lane: "exit",
+            state: {
+              position: {
+                play: pos.play, entry_sol: pos.entrySol, pnl_frac: pnlFrac,
+                hold_min: (now() - pos.entryTs) / 60, above_range: mark.aboveRange, below_range: mark.belowRange,
+              },
+              trigger: { reason: trig.reason, flow_dead: flowDead },
+              pool: { fee_tvl_30m_pct: mark.feeTvl30mPct, vol_30m_usd: mark.vol30mUsd, tvl_usd: mark.tvlUsd },
+            },
+            fallbackVerdict: "yes",
+            positionId: pos.id, play: pos.play, mint: pos.tokenMint, pool: pos.poolAddress,
+            question: `exit now? (${trig.reason})`,
+          });
+          console.log(
+            `[jev] exit pos#${pos.id} ${pos.symbol} (${pos.play}): ${jevResult.verdict}` +
+            `${jevResult.fallback ? ` [jev_fallback: ${jevResult.outcome}]` : ""} (${jevResult.latencyMs}ms) — ${trig.reason}`
+          );
+          if (jevResult.verdict === "yes") {
+            await closeAndReport(exec, pos, "combo_exit", config().exec.exit_slippage_bps, "close", trig.reason);
+            clearRangeTimers(pos.id);
+            recordDecision(pos.tokenMint, pos.poolAddress, "exited", "combo_exit", null, {
+              play: pos.play, pnlFrac, flowDead, mark, jev: jevResult, reason: trig.reason,
+            });
+            continue;
+          }
+          recordDecision(pos.tokenMint, pos.poolAddress, "skipped", "combo_exit_jev_held", null, {
+            play: pos.play, pnlFrac, flowDead, mark, jev: jevResult, reason: trig.reason,
+          });
+        }
       }
 
       // --- P1 STOP LOSS ---
@@ -1604,6 +1678,22 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     });
     return;
   }
+
+  // eys_ape discovery (owner addition, 2026-10-01): Stonks Launchpad graduates
+  // ONLY where that mint also cleared our own DLMM scanner sweep above — see
+  // the [combo] ape_* comment in config.toml for why no separate mint->pool
+  // resolver is built. fetchStonkTokens has its own TTL/fail-open cache, so
+  // this is cheap to call every tick.
+  const comboCfgTick = config().combo;
+  let apeStonkMints: Set<string> | null = null;
+  if (comboCfgTick?.enabled && comboCfgTick.ape_enabled !== false) {
+    try {
+      const stonkRows = await fetchStonkTokens({});
+      apeStonkMints = new Set(stonkRows.map((r) => r.mint));
+    } catch (e) {
+      console.error("[combo] stonkfun list fetch threw (ape discovery idles this tick):", (e as Error).message);
+    }
+  }
   // Gates below re-run on every tick for the same candidate, so they write one
   // row per episode (recordSkip). Events — vet_error, quote_stale, open
   // failures — and counterfactual telemetry stay one row each (recordDecision).
@@ -1961,7 +2051,221 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         `(est ${rent.meta.est.toFixed(3)}, ${rent.meta.tier} budget ${rent.meta.budget})`
       );
     }
-    const range = rent.range;
+    let range = rent.range;
+
+    // --- COMBO STRATEGY: play classification, Eys 30/70 sizing, Jev gate ---
+    // Runs AFTER every upstream hard gate/vetting/risk check above has already
+    // passed — combo only reclassifies and resizes candidates upstream's own
+    // pipeline already considers safe to trade; it never bypasses a safety or
+    // vetting gate. A candidate that fits no play falls through unchanged to
+    // the normal Kelly-sized entry below.
+    let play: Play | null = null;
+    const comboCfgEntry = config().combo;
+    if (comboCfgEntry?.enabled) {
+      const cc = comboCfgEntry;
+      const ageMin = vet.facts.tokenAgeMinutes;
+      const ageDays = ageMin !== null ? ageMin / 1440 : null;
+      // Lifetime fees earned in the pool, approximated from the 24h fee
+      // run-rate (tvlUsd * feeTvl24hPct/100, $/day) held flat over the pool's
+      // observed age and converted at the live SOL/USD price — a conservative
+      // proxy (STRATEGY §2.1 already uses the same feeTvl24hPct figure for its
+      // own hot/cold read). Unknown SOL price or pool age fails eys_seat's
+      // fee gate closed rather than guessing.
+      const feeRunRateUsdPerDay = cand.pool.tvlUsd * (cand.pool.feeTvl24hPct / 100);
+      const feesEarnedPoolSol = (solUsd && solUsd > 0 && ageDays !== null)
+        ? (feeRunRateUsdPerDay * Math.min(Math.max(ageDays, 1 / 24), 365)) / solUsd
+        : null;
+      const features: PlayCandidateFeatures = {
+        mcapUsd: cand.pool.marketCapUsd,
+        tokenAgeMinutes: ageMin,
+        tvlUsd: cand.pool.tvlUsd,
+        vol30mUsd: cand.pool.vol30mUsd,
+        vol1hUsd: cand.pool.vol1hUsd,
+        feeTvl24hPct: cand.pool.feeTvl24hPct,
+        feesEarnedPoolSol,
+        devFeesKnownZero: false, // not knowable from current scanner data — never a blocking gate (STRATEGY: "if knowable")
+        // Strongest available volume-rate signal: 30m volume rate (the
+        // scanner's own freshest window), mapped to USD/min against the
+        // owner's Eys >=100k USD/min threshold. Documented in config.toml [combo].
+        flowUsdPerMin: cand.pool.vol30mUsd / 30,
+        dipBounce: detectDipBounce(candles, entryPrice),
+        oneSidedFeasible: reach.ok,
+      };
+      let classified = classifyPlay(features, cc);
+      // eys_ape: only for Stonks-listed mints that also cleared our own DLMM
+      // sweep (apeStonkMints), and only when no SOL-side play already fit —
+      // the rule-priority order stays danko > molu > eys_seat > eys_ape.
+      if (!classified && cc.ape_enabled !== false && apeStonkMints?.has(cand.tokenMint)) {
+        const apeFeatures: ApeCandidateFeatures = {
+          // feesBothTokens is always known for a DLMM pool our own scanner fetched.
+          feeModeKnown: true,
+          quoteOnlyFee: cand.pool.feesBothTokens === false,
+          feesEarnedPoolSol: features.feesEarnedPoolSol,
+          oneSidedFeasible: reach.ok, // approximation: symmetric bin-count feasibility, up vs down
+        };
+        const apeClassified = classifyApe(apeFeatures, cc);
+        if (apeClassified) {
+          classified = { play: "eys_ape", reasons: apeClassified.reasons };
+          if (apeClassified.feeModeUnknown) {
+            recordDecision(cand.tokenMint, cand.pool.address, "skipped", "fee_mode_unknown", score, { apeFeatures, symbol: cand.symbol });
+          }
+        }
+      }
+      if (classified) {
+        const counts = comboOpenCounts();
+        const canaryCfg: CanarySizingConfig = {
+          canary_mode: cc.canary_mode, canary_position_sol: cc.canary_position_sol,
+          ape_sol: cc.ape_sol, fee_reserve_sol: cc.fee_reserve_sol,
+          position_rent_est_sol: cc.position_rent_est_sol,
+        };
+        const sizeResult = sizeComboPlay(bankroll, classified.play, counts, cc, canaryCfg);
+        if (sizeResult.sizeSol <= 0) {
+          recordSkip(cand.tokenMint, cand.pool.address, sizeResult.skipReason ?? "combo_size_zero", score, {
+            play: classified.play, counts, bankroll, features,
+          });
+          continue;
+        }
+        let comboSize = sizeResult.sizeSol;
+
+        if (classified.play === "eys_seat") {
+          const costCfg: EysCostConfig = {
+            eys_tp_pct: cc.eys_tp_pct, eys_cost_tx_count: cc.eys_cost_tx_count,
+            eys_cost_tx_sol: cc.eys_cost_tx_sol, eys_cost_slippage_bps: cc.eys_cost_slippage_bps,
+          };
+          if (eysCostSkip(comboSize, costCfg)) {
+            recordSkip(cand.tokenMint, cand.pool.address, "skip_cost", score, { play: classified.play, size: comboSize, costCfg });
+            continue;
+          }
+        }
+
+        // danko_trap wants a deliberately deeper range (-85%/-90%) than the
+        // generic planner's P0-safety-margin cap allows — rebuild and re-gate
+        // the range for this one play only; molu_ladder/eys_seat keep the
+        // range already planned above (planRange's own fib/dip-aware depth).
+        if (classified.play === "danko_trap") {
+          const dankoPlanned = planDankoRange(
+            entryPrice, cand.pool.binStep, cand.pool.decimalsX,
+            cc.danko_down_min_pct, cc.danko_down_max_pct, config().entry.max_position_accounts,
+          );
+          const dankoRent = await applyBinRentGate({
+            range: dankoPlanned, score, poolAddress: cand.pool.address,
+            price: entryPrice, binStep: cand.pool.binStep, decimalsX: cand.pool.decimalsX,
+            minDownPct: cc.danko_down_min_pct, sizeSol: comboSize,
+          });
+          if (!dankoRent.ok) {
+            recordSkip(cand.tokenMint, cand.pool.address, "combo_danko_bin_rent", score, {
+              range: dankoRent.range, rent: dankoRent.meta,
+            });
+            continue;
+          }
+          range = dankoRent.range;
+        }
+
+        // eys_ape: token-sided range ABOVE current price.
+        if (classified.play === "eys_ape") {
+          const apePlanned = planApeRange(
+            entryPrice, cand.pool.binStep, cand.pool.decimalsX,
+            cc.ape_range_up_pct, config().entry.max_position_accounts,
+          );
+          const apeRent = await applyBinRentGate({
+            range: apePlanned, score, poolAddress: cand.pool.address,
+            price: entryPrice, binStep: cand.pool.binStep, decimalsX: cand.pool.decimalsX,
+            minDownPct: 0, sizeSol: comboSize,
+          });
+          if (!apeRent.ok) {
+            recordSkip(cand.tokenMint, cand.pool.address, "combo_ape_bin_rent", score, {
+              range: apeRent.range, rent: apeRent.meta,
+            });
+            continue;
+          }
+          range = apeRent.range;
+        }
+
+        // Structured state per docs.typesafe.ai: descriptive field names with
+        // units, a bounded candle/flow summary (not raw dumps), vet results,
+        // current equity/open positions, and the playbook text so Jev judges
+        // against the plays' own rules rather than guessing at them.
+        const jevState = {
+          candidate: {
+            rule_play: classified.play,
+            symbol: cand.symbol,
+            name_or_socials: null as string | null, // not tracked by the scanner today
+            mcap_usd: cand.pool.marketCapUsd,
+            age_hours: features.tokenAgeMinutes !== null ? features.tokenAgeMinutes / 60 : null,
+          },
+          pool: {
+            bin_step: cand.pool.binStep,
+            base_fee_pct: cand.pool.baseFeePct,
+            tvl_usd: cand.pool.tvlUsd,
+            vol_30m_usd: cand.pool.vol30mUsd,
+            vol_1h_usd: cand.pool.vol1hUsd,
+            fee_tvl_24h_pct: cand.pool.feeTvl24hPct,
+            fee_tvl_30m_pct: cand.pool.feeTvl30mPct,
+            fees_24h_sol: solUsd ? feeRunRateUsdPerDay / solUsd : null,
+            fees_earned_lifetime_sol: features.feesEarnedPoolSol,
+            quote_only_fee: cand.pool.feesBothTokens === false,
+          },
+          candle_summary: features.dipBounce
+            ? { dip_pct: features.dipBounce.dipPct, bounce_pct: features.dipBounce.bouncePct }
+            : { dip_pct: null, bounce_pct: null },
+          vet: {
+            holder_top10_pct: vet.facts.top10Pct,
+            single_holder_pct: vet.facts.singleHolderPct,
+            insider_cluster_pct: vet.facts.insiderClusterPct,
+            rugcheck_score_normalised: vet.facts.rugcheckScoreNormalised,
+            mint_authority_revoked: vet.facts.mintAuthority === null,
+            freeze_authority_revoked: vet.facts.freezeAuthority === null,
+            creator_rug_count: vet.facts.creatorRugCount,
+          },
+          flow: flow ? { smart_wallets: flow.smartWallets, new_joiners: flow.newJoiners, net_usd: flow.netUsd, kol_count: flow.kolNames.length } : null,
+          account: {
+            equity_sol: bankroll.walletSol, deployable_sol: bankroll.deployableSol,
+            open_combo_positions: counts,
+          },
+          plan: { entry_price_sol: entryPrice, size_sol: comboSize, range },
+          playbook: COMBO_PLAYBOOK,
+        };
+
+        const jevResult = await jevConsult({
+          lane: "enter",
+          state: jevState,
+          fallbackVerdict: "yes",
+          play: classified.play,
+          mint: cand.tokenMint,
+          pool: cand.pool.address,
+          question: `enter with play ${classified.play}?`,
+        });
+
+        // Freshness check (docs.typesafe.ai §5): a slow consult (>5s) paired
+        // with real price movement invalidates the answer rather than being
+        // re-queried (which would blow the overall <=6s consult budget) —
+        // reuses the same re-quote machinery as the main stale-quote guard.
+        if (jevResult.slow && jevResult.verdict === "yes") {
+          const fresh = await fetchPool(cand.pool.address).catch(() => null);
+          const driftPct = fresh && fresh.price > 0 ? Math.abs(fresh.price - entryPrice) / entryPrice * 100 : null;
+          if (driftPct !== null && driftPct > 3) {
+            recordSkip(cand.tokenMint, cand.pool.address, "jev_stale_price", score, {
+              play: classified.play, driftPct, latencyMs: jevResult.latencyMs,
+            });
+            continue;
+          }
+        }
+
+        console.log(
+          `[jev] enter ${cand.symbol} (${classified.play}): ${jevResult.verdict}` +
+          `${jevResult.fallback ? ` [jev_fallback: ${jevResult.outcome}]` : jevResult.outcome === "uncertain" ? " [uncertain]" : ""} ` +
+          `(${jevResult.latencyMs}ms${jevResult.playChoice ? `, jev_play=${jevResult.playChoice}` : ""})`
+        );
+        if (jevResult.verdict === "no") {
+          recordSkip(cand.tokenMint, cand.pool.address, jevResult.outcome === "uncertain" ? "jev_uncertain" : "jev_declined", score, {
+            play: classified.play, jev: jevResult, features,
+          });
+          continue;
+        }
+        play = classified.play;
+        size = comboSize;
+      }
+    }
 
     if (needsDisplacement) {
       const displaced = await tryDisplacement(exec, score, cand.tokenMint);
@@ -1984,6 +2288,8 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         sizeSol: size,
         range,
         entryPrice,
+        play: play ?? undefined,
+        side: play === "eys_ape" ? "token" : undefined,
       }));
     } catch (e) {
       const err = e as Error & { code?: string; logs?: string[] };
@@ -2032,6 +2338,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       size, range, vet: vet.facts, pool: cand.pool, kelly, isAlpha, flow,
       risk: { young, whale, riskCut },
       sleeve: isMicro ? "micro" : "meme",
+      play,
       entryOfSwingHigh: ofSwingHigh,
       experiment: { feePath, isMicro, baseScore, trendingBonus, flowBonus, flowPenalty },
     });
@@ -2070,7 +2377,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     const te = config().entry;
     // Never on a risk-cut entry: a young token or a whale overhang is exactly
     // the crash-through case a deeper pocket would be filled by.
-    if (te.tranche_enabled && score >= te.tranche_score_min && !isMicro && !riskCut) {
+    if (te.tranche_enabled && score >= te.tranche_score_min && !isMicro && !riskCut && !play) {
       const tSize = size * (te.tranche_size_pct / 100);
       const tFloor = minPositionSol(bankroll.walletSol);
       const slotsLeft = bankroll.effectiveSlots - openPositionCount();
