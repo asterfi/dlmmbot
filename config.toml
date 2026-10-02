@@ -746,7 +746,8 @@ fee_reserve_sol = 0.04   # always-free buffer for tx fees/ATAs (~0.001/round tri
 # once the range is built), or the play is SKIPPED (skip_affordability), never
 # force-sized under the floor. Flip canary_mode to false for normal 30/70 sizing.
 canary_mode = true
-canary_position_sol = 0.1
+canary_position_sol = 0.05    # floor for SOL-side canary size
+canary_position_pct = 24      # autocompound: SOL-side size = 24% of equity (0.08 SOL at 0.335); token-sided capped at ape_sol (Eys's 0.1)
 canary_max_concurrent = 2
 position_rent_est_sol = 0.045   # measured live: ~0.044 SOL per position account incl. token account + fees, refunded on close (was 0.065)
 
@@ -796,7 +797,7 @@ datapi_max_age_s = 120
 
 # --- eys_seat: Spot SOL-side, default range below price (top bin = active bin) ---
 # Exit: green >= eys_tp_pct OR flow death (held flow_dead_confirm_min) — never a stop.
-eys_tp_pct = 2                      # "whether it's 1%, 2%, or 3%"
+eys_tp_pct = 3                      # Eys: "whether it's 1%, 2%, or 3%". 3% while tickets are ~0.08 SOL: 2% (0.0016) only equals the round-trip cost estimate
 eys_seat_range_below_pct = 12       # same depth as the Spot majors default range
 # A seat above its range (about all SOL, flat) for this long with no breakout leg open on
 # the mint is idle and blocks a slot: close it (eys_seat_idle). While a breakout leg is

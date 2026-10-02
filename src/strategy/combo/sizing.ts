@@ -32,7 +32,9 @@ export interface ComboSizingConfig {
 
 export interface CanarySizingConfig {
   canary_mode: boolean;
-  canary_position_sol: number;  // flat size for SOL-side plays while canary_mode is on
+  canary_position_sol: number;  // canary SOL-side size FLOOR (and the flat size when canary_position_pct is unset)
+  /** Autocompound: canary SOL-side size as % of total equity (owner, 2026-10-03: 24% = 0.08 SOL at 0.335 equity). */
+  canary_position_pct?: number;
   /** Max open combo positions in canary mode (default 2: a seat plus its breakout). */
   canary_max_concurrent?: number;
   ape_sol: number;               // fixed token-sided ticket (eys_ape, eys_breakout), both modes
@@ -115,6 +117,18 @@ export interface ComboSizeResult {
 }
 
 /** Unified sizing entry point, always affordability-checked (one account's rent; see header). */
+/**
+ * Canary per-position size. With canary_position_pct set it scales with equity
+ * (autocompound), never below canary_position_sol. Token-sided legs are capped
+ * at Eys's fixed risk ticket (ape_sol): "My risk management has always been 0.1 SOL".
+ */
+export function canaryPositionSize(bankroll: Bankroll, cfg: Pick<CanarySizingConfig, "canary_position_sol" | "canary_position_pct" | "ape_sol">, tokenSided: boolean): number {
+  const solSide = cfg.canary_position_pct != null && cfg.canary_position_pct > 0
+    ? Math.max(cfg.canary_position_sol, bankroll.walletSol * (cfg.canary_position_pct / 100))
+    : cfg.canary_position_sol;
+  return tokenSided ? Math.min(cfg.ape_sol, solSide) : solSide;
+}
+
 export function sizeComboPlay(
   bankroll: Bankroll,
   play: Play,
@@ -131,7 +145,7 @@ export function sizeComboPlay(
     if (totalOpen(counts) >= (canaryCfg.canary_max_concurrent ?? 2)) {
       return { sizeSol: 0, skipReason: "canary_max_concurrent" };
     }
-    const raw = tokenSided ? canaryCfg.ape_sol : canaryCfg.canary_position_sol;
+    const raw = canaryPositionSize(bankroll, canaryCfg, tokenSided);
     const afford = checkAffordability(bankroll, raw, canaryCfg);
     if (!afford.ok) return { sizeSol: 0, skipReason: `skip_affordability: ${afford.reason}` };
     return { sizeSol: raw, skipReason: null };

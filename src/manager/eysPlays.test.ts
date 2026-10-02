@@ -113,6 +113,7 @@ beforeEach(() => {
     cc.enabled = true;
     cc.canary_mode = true;
     cc.canary_position_sol = 0.1;
+    cc.canary_position_pct = undefined; // these tests pin the flat 0.1 ticket; autocompound is covered in sizing.test.ts
     cc.canary_max_concurrent = 2;
     cc.ape_sol = 0.1;
     cc.play_priority = ["eys_breakout", "eys_seat", "eys_tight", "eys_ape", "eys_dump_bonus"];

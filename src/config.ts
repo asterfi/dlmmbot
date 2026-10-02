@@ -428,6 +428,7 @@ export interface Config {
     /** Canary account sizing (owner addition 2026-10-01, ~0.3 SOL accounts). */
     canary_mode: boolean;
     canary_position_sol: number;
+    canary_position_pct?: number;
     /** Max open combo positions in canary mode (default 2: a seat plus its breakout). */
     canary_max_concurrent?: number;
     position_rent_est_sol: number;

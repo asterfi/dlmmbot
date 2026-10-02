@@ -42,7 +42,7 @@ import { planSeatRange, planTightRange } from "../strategy/combo/eysRanges.js";
 import { poolDataStale } from "../db/db.js";
 import { readOnchainCollectFeeMode } from "../strategy/combo/feeMode.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
-import { sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
+import { canaryPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
 import { comboExitCheck } from "../strategy/combo/exits.js";
 import { planDeepBidAskRange } from "../strategy/combo/deepBidAskRange.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
@@ -2100,7 +2100,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     const comboSeed = config().combo;
     if (comboSeed?.enabled) {
       size = comboSeed.canary_mode
-        ? comboSeed.canary_position_sol
+        ? canaryPositionSize(bankroll, comboSeed, false)
         : bankroll.walletSol * (comboSeed.active_budget_pct / 100) * (comboSeed.eys_share_pct / 100);
     }
     if (size <= 0) {
@@ -2543,6 +2543,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         const counts = comboOpenCounts();
         const canaryCfg: CanarySizingConfig = {
           canary_mode: cc.canary_mode, canary_position_sol: cc.canary_position_sol,
+          canary_position_pct: cc.canary_position_pct,
           canary_max_concurrent: cc.canary_max_concurrent,
           ape_sol: cc.ape_sol, fee_reserve_sol: cc.fee_reserve_sol,
           position_rent_est_sol: cc.position_rent_est_sol,

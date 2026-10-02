@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import {
-  comboPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, totalOpen,
+  canaryPositionSize, comboPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, totalOpen,
   type ComboOpenCounts, type ComboSizingConfig, type CanarySizingConfig, type EysCostConfig,
 } from "./sizing.js";
 import type { Bankroll } from "../../risk/limits.js";
@@ -63,9 +63,10 @@ describe("sizeComboPlay — canary mode: 2 slots, 0.1 SOL tickets", () => {
     expect(sizeComboPlay(rich, "eys_seat", open(), CFG, CANARY)).toEqual({ sizeSol: 0.1, skipReason: null });
     expect(sizeComboPlay(rich, "eys_dump_bonus", open({ eysSeat: 1 }), CFG, CANARY).sizeSol).toBe(0.1);
   });
-  it("token-sided plays (breakout, ape) take the fixed ape ticket", () => {
-    expect(sizeComboPlay(rich, "eys_breakout", open({ eysSeat: 1 }), CFG, { ...CANARY, ape_sol: 0.12 }).sizeSol).toBe(0.12);
-    expect(sizeComboPlay(rich, "eys_ape", open(), CFG, { ...CANARY, ape_sol: 0.12 }).sizeSol).toBe(0.12);
+  it("token-sided plays (breakout, ape) take the fixed ape ticket (capped at the SOL-side size)", () => {
+    const c = { ...CANARY, canary_position_sol: 0.15, ape_sol: 0.12 };
+    expect(sizeComboPlay(rich, "eys_breakout", open({ eysSeat: 1 }), CFG, c).sizeSol).toBe(0.12);
+    expect(sizeComboPlay(rich, "eys_ape", open(), CFG, c).sizeSol).toBe(0.12);
   });
   it("an open seat plus its breakout fills both slots: a third is canary_max_concurrent", () => {
     const r = sizeComboPlay(rich, "eys_tight", open({ eysSeat: 1, eysBreakout: 1 }), CFG, CANARY);
@@ -134,5 +135,30 @@ describe("eysCostSkip — take-profit plays must clear the round-trip cost", () 
   });
   it("a tiny position never clears it", () => {
     expect(eysCostSkip(0.02, COST)).toBe(true);
+  });
+});
+
+describe("canaryPositionSize — autocompound", () => {
+  const cfg = { canary_position_sol: 0.05, canary_position_pct: 24, ape_sol: 0.1 };
+  it("SOL-side size is 24% of equity: 0.08 at 0.335 SOL, grows with the account", () => {
+    expect(canaryPositionSize(bankroll(0.335), cfg, false)).toBeCloseTo(0.0804, 4);
+    expect(canaryPositionSize(bankroll(1), cfg, false)).toBeCloseTo(0.24, 6);
+  });
+  it("never below the floor", () => {
+    expect(canaryPositionSize(bankroll(0.1), cfg, false)).toBe(0.05);
+  });
+  it("token-sided legs cap at Eys's fixed 0.1 ticket, and never exceed the SOL-side size", () => {
+    expect(canaryPositionSize(bankroll(1), cfg, true)).toBe(0.1);
+    expect(canaryPositionSize(bankroll(0.335), cfg, true)).toBeCloseTo(0.0804, 4);
+  });
+  it("without canary_position_pct it is the flat canary_position_sol", () => {
+    expect(canaryPositionSize(bankroll(5), { canary_position_sol: 0.1, ape_sol: 0.1 }, false)).toBe(0.1);
+  });
+});
+describe("eysCostSkip at 0.08 SOL", () => {
+  const COST: EysCostConfig = { eys_tp_pct: 3, eys_cost_tx_count: 4, eys_cost_tx_sol: 0.0003, eys_cost_slippage_bps: 50 };
+  it("3% clears the cost estimate (0.0024 > 0.0016); 2% would not", () => {
+    expect(eysCostSkip(0.08, COST)).toBe(false);
+    expect(eysCostSkip(0.07, { ...COST, eys_tp_pct: 2 })).toBe(true); // 0.0014 < 0.00155
   });
 });
