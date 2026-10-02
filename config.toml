@@ -734,7 +734,7 @@ active_budget_pct = 30
 eys_share_pct = 33.33
 max_concurrent = 3
 min_floor_sol = 0.05        # never size below this; SKIP the play rather than oversize
-fee_reserve_sol = 0.05      # always-free rent/fee buffer combo sizing will not touch, on top of [sizing] reserve_sol/reserve_pct above
+fee_reserve_sol = 0.04   # always-free buffer for tx fees/ATAs (~0.001/round trip); combo uses ONLY this, not [sizing] reserve
 
 # Canary sizing — for a small account (~0.3 SOL) where the normal 30/70 math would
 # size everything below the viable floor. While canary_mode is true: at most
@@ -748,7 +748,7 @@ fee_reserve_sol = 0.05      # always-free rent/fee buffer combo sizing will not 
 canary_mode = true
 canary_position_sol = 0.1
 canary_max_concurrent = 2
-position_rent_est_sol = 0.065   # DLMM position-account rent estimate (observed ~0.06-0.07 SOL; see ranges/binRent.ts BIN_ARRAY_RENT_SOL=0.075/array)
+position_rent_est_sol = 0.045   # measured live: ~0.044 SOL per position account incl. token account + fees, refunded on close (was 0.065)
 
 # --- Eys token selection (hard gates; "never force a trade") ---
 # "100k+ MCAP, at least 10 SOL in fees, 100K+ volume per minute, 0 dev fees, and of

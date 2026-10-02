@@ -56,6 +56,16 @@ export function totalOpen(counts: ComboOpenCounts): number {
  * Normal-mode per-position size for a SOL-side play, or 0 when the play should
  * be skipped. Token-sided plays are never sized here (fixed `ape_sol` ticket).
  */
+/**
+ * Free SOL the combo may spend: total equity minus open positions' entry value
+ * and the banked ledger. Upstream's [sizing] reserve is NOT taken out here —
+ * combo keeps its own `fee_reserve_sol` buffer instead (owner, 2026-10-03: two
+ * reserves stacked held back over a third of a 0.33 SOL account).
+ */
+export function comboFreeSol(bankroll: Bankroll): number {
+  return Math.max(0, bankroll.walletSol - bankroll.deployedSol - bankroll.bankedSol);
+}
+
 export function comboPositionSize(
   bankroll: Bankroll,
   counts: ComboOpenCounts,
@@ -67,7 +77,7 @@ export function comboPositionSize(
   const raw = activeBudget * (cfg.eys_share_pct / 100);
 
   const floor = Math.max(cfg.min_floor_sol, minPositionSol(equity));
-  const deployable = Math.max(0, bankroll.deployableSol - cfg.fee_reserve_sol);
+  const deployable = Math.max(0, comboFreeSol(bankroll) - cfg.fee_reserve_sol);
   const size = Math.min(raw, deployable);
 
   return size >= floor ? size : 0;
@@ -88,13 +98,12 @@ export function checkAffordability(
   sizeSol: number,
   cfg: Pick<CanarySizingConfig, "fee_reserve_sol" | "position_rent_est_sol">,
 ): AffordabilityResult {
-  const neededEquity = sizeSol + cfg.fee_reserve_sol + cfg.position_rent_est_sol;
-  if (bankroll.walletSol < neededEquity) {
-    return { ok: false, reason: `equity ${bankroll.walletSol.toFixed(4)} < size+reserve+rent ${neededEquity.toFixed(4)}` };
-  }
-  const neededDeployable = sizeSol + cfg.position_rent_est_sol;
-  if (bankroll.deployableSol < neededDeployable) {
-    return { ok: false, reason: `deployable ${bankroll.deployableSol.toFixed(4)} < size+rent ${neededDeployable.toFixed(4)}` };
+  // Free SOL must cover the deposit, the position-account rent (refunded on
+  // close) and the always-free fee buffer.
+  const free = comboFreeSol(bankroll);
+  const needed = sizeSol + cfg.position_rent_est_sol + cfg.fee_reserve_sol;
+  if (free < needed) {
+    return { ok: false, reason: `free ${free.toFixed(4)} < size+rent+reserve ${needed.toFixed(4)}` };
   }
   return { ok: true };
 }

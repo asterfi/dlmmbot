@@ -378,13 +378,13 @@ describe("slots and affordability", () => {
     expect(exec.opens[0]!.play).toBe("eys_seat");
   });
   it("skips (never undersizes) when equity cannot cover size + reserve + one account's rent", async () => {
-    exec.wallet = 0.2; // needs 0.1 + 0.05 + 0.065 = 0.215
+    exec.wallet = 0.18; // needs 0.1 + 0.045 rent + 0.04 buffer = 0.185
     await enterNewPositions(exec);
     expect(exec.opens).toHaveLength(0);
     expect(skippedGates().some((g) => g.startsWith("skip_affordability"))).toBe(true);
   });
-  it("prices the REAL position-account count: a 2-account Spot range on a fine-step pool needs 0.1 + 0.05 + 2x0.065", async () => {
-    exec.wallet = 0.27; // enough for one account (0.215), not for two (0.28)
+  it("prices the REAL position-account count: a 2-account Spot range on a fine-step pool needs 0.1 + 2x0.045 + 0.04", async () => {
+    exec.wallet = 0.21; // enough for one account (0.185), not for two (0.23)
     vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ binStep: 10 }))], rejected: [], sweptPools: 1 });
     await enterNewPositions(exec);
     expect(exec.opens).toHaveLength(0);

@@ -41,11 +41,15 @@ describe("comboPositionSize — Eys 30/70 (normal mode)", () => {
   it("sizes a SOL-side position at 1/3 of 30% of equity", () => {
     expect(comboPositionSize(bankroll(100), open(), CFG)).toBeCloseTo(10, 4);
   });
-  it("never touches the 70%: clamps to deployable minus the fee reserve", () => {
-    expect(comboPositionSize(bankroll(100, 3), open(), CFG)).toBeCloseTo(2.95, 4);
+  it("clamps to FREE SOL (equity - deployed) minus the fee reserve", () => {
+    // 97 already deployed -> 3 free -> 2.95 after the 0.05 buffer; upstream's reserve is not stacked on top
+    expect(comboPositionSize(bankroll(100, 100, 97), open(), CFG)).toBeCloseTo(2.95, 4);
   });
   it("skips (0) when the clamped size falls under the floor", () => {
-    expect(comboPositionSize(bankroll(100, 0.08), open(), CFG)).toBe(0);
+    expect(comboPositionSize(bankroll(100, 100, 99.92), open(), CFG)).toBe(0);
+  });
+  it("ignores upstream's deployableSol (its reserve) — only the combo buffer applies", () => {
+    expect(comboPositionSize(bankroll(100, 0.08), open(), CFG)).toBeCloseTo(10, 4);
   });
   it("caps total concurrent combo positions", () => {
     expect(comboPositionSize(bankroll(100), open({ eysSeat: 2, eysTight: 1 }), CFG)).toBe(0);
@@ -86,17 +90,21 @@ describe("affordability — skip, never oversize", () => {
     expect(checkAffordability(bankroll(0.214), 0.1, CANARY).ok).toBe(false);
     expect(checkAffordability(bankroll(0.2151), 0.1, CANARY).ok).toBe(true);
   });
-  it("deployable must cover size + rent (0.165)", () => {
-    const r = checkAffordability(bankroll(1, 0.16), 0.1, CANARY);
+  it("FREE SOL (equity - deployed) must cover size + rent + reserve (0.215)", () => {
+    const r = checkAffordability(bankroll(1, 1, 0.8), 0.1, CANARY); // 0.2 free
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/deployable/);
-    expect(checkAffordability(bankroll(1, 0.165), 0.1, CANARY).ok).toBe(true);
+    expect(r.reason).toMatch(/free/);
+    expect(checkAffordability(bankroll(1, 1, 0.784), 0.1, CANARY).ok).toBe(true); // 0.216 free
   });
-  it("rent scales with the REAL position-account count: a 2-account range needs 0.1 + 2x0.065", () => {
+  it("second position: what the first one deployed is no longer free", () => {
+    // 0.3347 equity, first seat deployed 0.1 (rent already left the free balance in live) -> 0.2347 free
+    expect(checkAffordability(bankroll(0.3347, 0.3347, 0.1), 0.1, { fee_reserve_sol: 0.04, position_rent_est_sol: 0.045 }).ok).toBe(true);
+  });
+  it("rent scales with the REAL position-account count: a 2-account range needs 0.1 + 2x0.065 + 0.05", () => {
     const two = { fee_reserve_sol: 0.05, position_rent_est_sol: 0.065 * 2 };
-    expect(checkAffordability(bankroll(1, 0.2), 0.1, { fee_reserve_sol: 0.05, position_rent_est_sol: 0.065 }).ok).toBe(true);
-    expect(checkAffordability(bankroll(1, 0.2), 0.1, two).ok).toBe(false);
-    expect(checkAffordability(bankroll(1, 0.23), 0.1, two).ok).toBe(true);
+    expect(checkAffordability(bankroll(1, 1, 0.78), 0.1, { fee_reserve_sol: 0.05, position_rent_est_sol: 0.065 }).ok).toBe(true); // 0.22 free
+    expect(checkAffordability(bankroll(1, 1, 0.78), 0.1, two).ok).toBe(false);
+    expect(checkAffordability(bankroll(1, 1, 0.72), 0.1, two).ok).toBe(true); // 0.28 free
   });
   it("sizeComboPlay returns skip_affordability instead of a smaller size", () => {
     const r = sizeComboPlay(bankroll(0.2), "eys_seat", open(), CFG, CANARY);
