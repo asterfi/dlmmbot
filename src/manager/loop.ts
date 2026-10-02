@@ -142,6 +142,7 @@ const midBandLogged = new Set<number>();              // young-exit telemetry lo
 const rugcheckLastCheck = new Map<number, number>();  // P0 rugcheck-flip throttle
 const everInRange = new Set<number>();                // P3 win-vs-missed classification
 const fellDeep = new Set<number>();                   // escape hatch armed (also persisted)
+const comboAboveSince = new Map<number, number>();   // combo: when price last went above this position's range (unix s); cleared in/below range
 const everFilled = new Set<number>();                 // combo: has this ladder ever actually converted SOL->token? (also persisted)
 const peakPnl = new Map<number, number>();            // give-back telemetry: best fee-inclusive PnL (persisted)
 const giveBackLogged = new Set<number>();             // give-back counterfactual logged once (persisted)
@@ -1163,6 +1164,11 @@ export async function managePositions(exec: Executor): Promise<void> {
               .get(pos.id) as { f: number } | undefined)?.f === 1,
             flowCollapsed,
             aboveRange: mark.aboveRange,
+            aboveRangeMin: (() => {
+              if (!mark.aboveRange) { comboAboveSince.delete(pos.id); return 0; }
+              if (!comboAboveSince.has(pos.id)) comboAboveSince.set(pos.id, now());
+              return (now() - comboAboveSince.get(pos.id)!) / 60;
+            })(),
           },
           cc,
         );

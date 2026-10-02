@@ -370,6 +370,7 @@ export interface Config {
     molu_tp_pct: number;
     molu_tp_pct_top_tier: number;
     molu_top_tier_sol: number;
+    molu_above_exit_min: number;
     eys_mcap_min_usd: number;
     /**
      * Eys-only young-age carve-out (owner, 2026-10-02): upstream's

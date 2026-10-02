@@ -8,6 +8,7 @@ const CFG: ComboExitConfig = {
   eys_tp_pct: 2,
   danko_tp_pct: 17.5,
   danko_flow_death_ratio: 0.3,
+  molu_above_exit_min: 10,
 };
 
 describe("comboExitCheck — flow death", () => {
@@ -131,5 +132,23 @@ describe("comboExitCheck — danko_trap", () => {
   it("exits on the runner target regardless of the drawdown history", () => {
     const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: 0.175, flowDead: false, everDrawn: false, everFilled: true }, CFG);
     expect(d.shouldExit).toBe(true);
+  });
+});
+
+describe("comboExitCheck — molu closes to the upside", () => {
+  const base = { play: "molu_ladder" as const, entrySol: 0.1, pnlFrac: 0.02, flowDead: false, everDrawn: false };
+  it("closes a filled ladder that has sat above its range for >= molu_above_exit_min", () => {
+    const d = comboExitCheck({ ...base, everFilled: true, aboveRange: true, aboveRangeMin: 12 }, CFG);
+    expect(d.shouldExit).toBe(true);
+    expect(d.reason).toMatch(/above range/);
+  });
+  it("gives a quick retest the grace period", () => {
+    expect(comboExitCheck({ ...base, everFilled: true, aboveRange: true, aboveRangeMin: 4 }, CFG).shouldExit).toBe(false);
+  });
+  it("never closes an unfilled ladder on the upside rule (idle timeout owns that case)", () => {
+    expect(comboExitCheck({ ...base, everFilled: false, aboveRange: true, aboveRangeMin: 60 }, CFG).shouldExit).toBe(false);
+  });
+  it("does nothing while price is back in range", () => {
+    expect(comboExitCheck({ ...base, everFilled: true, aboveRange: false, aboveRangeMin: 0 }, CFG).shouldExit).toBe(false);
   });
 });

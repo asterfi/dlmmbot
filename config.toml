@@ -752,6 +752,7 @@ molu_bounce_min_pct = 5     # ...then bounced >=5% off the resulting low
 molu_tp_pct = 15            # exit: +15% position value bounce...
 molu_tp_pct_top_tier = 5    # ...or +5% when the position's entry size is in the top tier
 molu_top_tier_sol = 0.5     # "top tier" position-size threshold for the 5% exit
+molu_above_exit_min = 10    # filled ladder above its range this long -> close to the upside (molu: "close a pool to the upside to lock in profits")
 # Range shape (one-sided SOL bid-ask below price, ~100-125 bins) is built by
 # the existing planner/bin-rent machinery (ranges/planner.ts, ranges/binRent.ts)
 # under the normal [entry] min_down_pct/max_down_pct/max_position_accounts

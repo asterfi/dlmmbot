@@ -11,6 +11,8 @@ export interface ComboExitConfig {
   molu_tp_pct: number;            // 15
   molu_tp_pct_top_tier: number;   // 5
   molu_top_tier_sol: number;      // position-size threshold for the 5% exit
+  /** Minutes a FILLED molu ladder may sit above its range (back to ~all SOL) before closing to lock in the round trip. */
+  molu_above_exit_min: number;    // 10
   eys_tp_pct: number;             // 2 (configurable 1-3)
   danko_tp_pct: number;           // 15-20, default 17.5
   /** Flow-death threshold as a fraction of the entry gate (danko_flow_ratio_min) — current flowRatio below this collapses. */
@@ -56,6 +58,8 @@ export interface ComboExitInput {
   flowCollapsed?: boolean;
   /** eys_ape only: has price run through the top of the token-sided range (fully converted to SOL)? Sourced from PositionMark.aboveRange — no new state. */
   aboveRange?: boolean;
+  /** Minutes price has continuously been above the range (combo-side timer in loop.ts); 0/undefined when in or below range. */
+  aboveRangeMin?: number;
 }
 
 export interface ComboExitDecision {
@@ -76,6 +80,17 @@ export function comboExitCheck(input: ComboExitInput, cfg: ComboExitConfig): Com
         : cfg.molu_tp_pct / 100;
       if (input.pnlFrac >= tpFrac) {
         return { shouldExit: true, reason: `molu_ladder: +${(input.pnlFrac * 100).toFixed(1)}% >= ${(tpFrac * 100).toFixed(0)}% target` };
+      }
+      // molu: "When price leaves your range… you earn nothing until price
+      // returns or you move" and "Don't be scared to close a pool to the
+      // upside to lock in profits". Once a filled SOL-side ladder sits above
+      // its range it has sold its fill back up and is ~all SOL again, so its
+      // value can no longer climb to the TP — close and free the slot.
+      if (input.everFilled && input.aboveRange && (input.aboveRangeMin ?? 0) >= cfg.molu_above_exit_min) {
+        return {
+          shouldExit: true,
+          reason: `molu_ladder: above range ${Math.round(input.aboveRangeMin ?? 0)}m — round trip done, closing to the upside (${(input.pnlFrac * 100).toFixed(1)}%)`,
+        };
       }
       return { shouldExit: false, reason: "" };
     }
