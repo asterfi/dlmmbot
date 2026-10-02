@@ -1,154 +1,70 @@
 import { describe, expect, it } from "vitest";
-import { comboExitCheck, type ComboExitConfig } from "./exits.js";
+import { comboExitCheck, type ComboExitConfig, type ComboExitInput } from "./exits.js";
 
-const CFG: ComboExitConfig = {
-  molu_tp_pct: 15,
-  molu_tp_pct_top_tier: 5,
-  molu_top_tier_sol: 0.5,
-  eys_tp_pct: 2,
-  danko_tp_pct: 17.5,
-  danko_flow_death_ratio: 0.3,
-  molu_above_exit_min: 10,
-};
+const CFG: ComboExitConfig = { eys_tp_pct: 2 };
 
-describe("comboExitCheck — flow death", () => {
-  it("exits molu/eys/ape immediately on flow death, regardless of PnL", () => {
-    for (const play of ["molu_ladder", "eys_seat", "eys_ape"] as const) {
-      const d = comboExitCheck({ play, entrySol: 1, pnlFrac: -0.5, flowDead: true, everDrawn: false, everFilled: true }, CFG);
+function input(over: Partial<ComboExitInput>): ComboExitInput {
+  return { play: "eys_seat", entrySol: 0.1, pnlFrac: 0, flowDead: false, everFilled: true, aboveRange: false, ...over };
+}
+
+describe("eys_seat / eys_tight — green or flow death, never a stop-loss", () => {
+  for (const play of ["eys_seat", "eys_tight"] as const) {
+    it(`${play}: holds below the target`, () => {
+      expect(comboExitCheck(input({ play, pnlFrac: 0.019 }), CFG).shouldExit).toBe(false);
+    });
+    it(`${play}: exits once green by the target (+2%)`, () => {
+      const d = comboExitCheck(input({ play, pnlFrac: 0.02 }), CFG);
       expect(d.shouldExit).toBe(true);
-    }
-  });
-
-  it("does NOT force-exit danko_trap on the generic flowDead signal — it never stop-losses (owner's strategy-fidelity fix, 2026-10-02)", () => {
-    const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: -0.5, flowDead: true, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(false);
-  });
-});
-
-describe("comboExitCheck — danko_trap flow-death (relative, 5m-volume-collapse)", () => {
-  it("exits at break-even-or-better once flow has collapsed, even without a prior drawdown bounce", () => {
-    const d = comboExitCheck({
-      play: "danko_trap", entrySol: 1, pnlFrac: 0.01, flowDead: false,
-      everDrawn: false, everFilled: true, flowCollapsed: true,
-    }, CFG);
-    expect(d.shouldExit).toBe(true);
-    expect(d.reason).toMatch(/flow collapsed/);
-  });
-
-  it("holds (no stop-loss) when flow has collapsed but PnL is still negative", () => {
-    const d = comboExitCheck({
-      play: "danko_trap", entrySol: 1, pnlFrac: -0.2, flowDead: false,
-      everDrawn: false, everFilled: true, flowCollapsed: true,
-    }, CFG);
-    expect(d.shouldExit).toBe(false);
-  });
-
-  it("does not require flowCollapsed when the position already bounced (everDrawn)", () => {
-    const d = comboExitCheck({
-      play: "danko_trap", entrySol: 1, pnlFrac: 0, flowDead: false,
-      everDrawn: true, everFilled: true, flowCollapsed: false,
-    }, CFG);
-    expect(d.shouldExit).toBe(true);
+      expect(d.reason).toMatch(/target/);
+    });
+    it(`${play}: exits on confirmed flow death regardless of PnL`, () => {
+      expect(comboExitCheck(input({ play, pnlFrac: -0.3, flowDead: true }), CFG).shouldExit).toBe(true);
+    });
+    it(`${play}: a deep loss with flow alive just holds (no stop-loss)`, () => {
+      expect(comboExitCheck(input({ play, pnlFrac: -0.6 }), CFG).shouldExit).toBe(false);
+    });
+  }
+  it("the target is configurable (1-3%)", () => {
+    expect(comboExitCheck(input({ pnlFrac: 0.012 }), { eys_tp_pct: 1 }).shouldExit).toBe(true);
+    expect(comboExitCheck(input({ pnlFrac: 0.029 }), { eys_tp_pct: 3 }).shouldExit).toBe(false);
   });
 });
 
-describe("comboExitCheck — eys_ape", () => {
-  it("holds while below the range top", () => {
-    const d = comboExitCheck({ play: "eys_ape", entrySol: 0.1, pnlFrac: 0.3, flowDead: false, everDrawn: false, everFilled: true, aboveRange: false }, CFG);
-    expect(d.shouldExit).toBe(false);
-  });
-
-  it("exits once price runs through the top (fully converted to SOL)", () => {
-    const d = comboExitCheck({ play: "eys_ape", entrySol: 0.1, pnlFrac: 0.3, flowDead: false, everDrawn: false, everFilled: true, aboveRange: true }, CFG);
+describe("eys_breakout — range fully converted, green, or flow death", () => {
+  it("exits when price ran through the top (range fully converted to SOL)", () => {
+    const d = comboExitCheck(input({ play: "eys_breakout", aboveRange: true, pnlFrac: -0.05 }), CFG);
     expect(d.shouldExit).toBe(true);
+    expect(d.reason).toMatch(/fully converted/);
   });
-
-  it("accepts going to zero without a stop-loss trigger", () => {
-    const d = comboExitCheck({ play: "eys_ape", entrySol: 0.1, pnlFrac: -0.99, flowDead: false, everDrawn: false, everFilled: true, aboveRange: false }, CFG);
-    expect(d.shouldExit).toBe(false);
+  it("exits green at the target", () => {
+    expect(comboExitCheck(input({ play: "eys_breakout", pnlFrac: 0.025 }), CFG).shouldExit).toBe(true);
+  });
+  it("exits on flow death", () => {
+    expect(comboExitCheck(input({ play: "eys_breakout", flowDead: true, pnlFrac: -0.2 }), CFG).shouldExit).toBe(true);
+  });
+  it("otherwise holds, even deep underwater (token-sided money is 'okay to lose')", () => {
+    expect(comboExitCheck(input({ play: "eys_breakout", pnlFrac: -0.7 }), CFG).shouldExit).toBe(false);
   });
 });
 
-describe("comboExitCheck — molu_ladder", () => {
-  it("holds below +15%", () => {
-    const d = comboExitCheck({ play: "molu_ladder", entrySol: 0.2, pnlFrac: 0.14, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(false);
-  });
-
-  it("exits at +15% for a normal-tier position", () => {
-    const d = comboExitCheck({ play: "molu_ladder", entrySol: 0.2, pnlFrac: 0.15, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(true);
-  });
-
-  it("exits at +5% (not +15%) for a top-tier position", () => {
-    const below = comboExitCheck({ play: "molu_ladder", entrySol: 0.6, pnlFrac: 0.049, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(below.shouldExit).toBe(false);
-    const at = comboExitCheck({ play: "molu_ladder", entrySol: 0.6, pnlFrac: 0.05, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(at.shouldExit).toBe(true);
-  });
-
-  it("top-tier boundary is exact at molu_top_tier_sol", () => {
-    const d = comboExitCheck({ play: "molu_ladder", entrySol: 0.5, pnlFrac: 0.05, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(true); // at the boundary counts as top tier
+describe("eys_ape — unchanged: range fully converted or flow death", () => {
+  it("exits when converted; holds otherwise (no profit target, no stop)", () => {
+    expect(comboExitCheck(input({ play: "eys_ape", aboveRange: true }), CFG).shouldExit).toBe(true);
+    expect(comboExitCheck(input({ play: "eys_ape", pnlFrac: 0.5 }), CFG).shouldExit).toBe(false);
+    expect(comboExitCheck(input({ play: "eys_ape", pnlFrac: -0.99 }), CFG).shouldExit).toBe(false);
+    expect(comboExitCheck(input({ play: "eys_ape", flowDead: true }), CFG).shouldExit).toBe(true);
   });
 });
 
-describe("comboExitCheck — eys_seat", () => {
-  it("holds below the configured target (default 2%)", () => {
-    const d = comboExitCheck({ play: "eys_seat", entrySol: 0.2, pnlFrac: 0.019, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(false);
+describe("eys_dump_bonus — waits for a real fill and a green bounce; flow death is its premise", () => {
+  it("exits green only on a ladder that actually filled", () => {
+    expect(comboExitCheck(input({ play: "eys_dump_bonus", pnlFrac: 0.03, everFilled: true }), CFG).shouldExit).toBe(true);
+    expect(comboExitCheck(input({ play: "eys_dump_bonus", pnlFrac: 0.03, everFilled: false }), CFG).shouldExit).toBe(false);
   });
-
-  it("exits at the configured target", () => {
-    const d = comboExitCheck({ play: "eys_seat", entrySol: 0.2, pnlFrac: 0.02, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(true);
+  it("flow death does NOT exit it (volume fading is why it was placed)", () => {
+    expect(comboExitCheck(input({ play: "eys_dump_bonus", flowDead: true, pnlFrac: -0.4, everFilled: true }), CFG).shouldExit).toBe(false);
   });
-});
-
-describe("comboExitCheck — danko_trap", () => {
-  it("holds while still negative and never drawn (no bounce yet)", () => {
-    const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: -0.1, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(false);
-  });
-
-  it("exits at break-even-or-better after having been drawn down", () => {
-    const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: 0, flowDead: false, everDrawn: true, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(true);
-  });
-
-  it("does NOT exit on break-even-or-better if the ladder never actually filled (owner's live-churn fix, 2026-10-02)", () => {
-    // everDrawn can be true from upstream's fell_deep tracking even when
-    // nothing ever converted; a ladder that never filled has no real trade to
-    // call break-even on. It must time out instead (combo.danko_idle_max_h).
-    const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: 0, flowDead: false, everDrawn: true, everFilled: false }, CFG);
-    expect(d.shouldExit).toBe(false);
-  });
-
-  it("does not exit on a positive mark that was never drawn down (no bounce condition met)", () => {
-    const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: 0.05, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(false);
-  });
-
-  it("exits on the runner target regardless of the drawdown history", () => {
-    const d = comboExitCheck({ play: "danko_trap", entrySol: 1, pnlFrac: 0.175, flowDead: false, everDrawn: false, everFilled: true }, CFG);
-    expect(d.shouldExit).toBe(true);
-  });
-});
-
-describe("comboExitCheck — molu closes to the upside", () => {
-  const base = { play: "molu_ladder" as const, entrySol: 0.1, pnlFrac: 0.02, flowDead: false, everDrawn: false };
-  it("closes a filled ladder that has sat above its range for >= molu_above_exit_min", () => {
-    const d = comboExitCheck({ ...base, everFilled: true, aboveRange: true, aboveRangeMin: 12 }, CFG);
-    expect(d.shouldExit).toBe(true);
-    expect(d.reason).toMatch(/above range/);
-  });
-  it("gives a quick retest the grace period", () => {
-    expect(comboExitCheck({ ...base, everFilled: true, aboveRange: true, aboveRangeMin: 4 }, CFG).shouldExit).toBe(false);
-  });
-  it("never closes an unfilled ladder on the upside rule (idle timeout owns that case)", () => {
-    expect(comboExitCheck({ ...base, everFilled: false, aboveRange: true, aboveRangeMin: 60 }, CFG).shouldExit).toBe(false);
-  });
-  it("does nothing while price is back in range", () => {
-    expect(comboExitCheck({ ...base, everFilled: true, aboveRange: false, aboveRangeMin: 0 }, CFG).shouldExit).toBe(false);
+  it("holds below the target", () => {
+    expect(comboExitCheck(input({ play: "eys_dump_bonus", pnlFrac: 0.01 }), CFG).shouldExit).toBe(false);
   });
 });

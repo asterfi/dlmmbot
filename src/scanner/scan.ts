@@ -209,10 +209,6 @@ export async function scan(opts: { withTiming?: boolean } = {}): Promise<ScanRes
     }
 
     const cand: Candidate = { pool: p, tokenMint: p.mintX, symbol, score, scoreParts: weighted, gateFailures };
-    if (gateFailures.length === 0) {
-      const sibs = (poolsByMint.get(p.mintX) ?? []).filter((s) => s.address === p.address || poolGates(s).length === 0);
-      if (sibs.length > 1) cand.siblings = sibs;
-    }
     if (gateFailures.length === 0) candidates.push(cand);
     else {
       rejected.push(cand);

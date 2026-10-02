@@ -3,7 +3,7 @@ import {
   SendTransactionError,
 } from "@solana/web3.js";
 import type { ParsedTransactionWithMeta } from "@solana/web3.js";
-import { createBurnCheckedInstruction, createCloseAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { createBurnCheckedInstruction, createCloseAccountInstruction, getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import bs58 from "bs58";
 import BN from "bn.js";
 import { createRequire } from "node:module";
@@ -286,6 +286,18 @@ export function attributeReclaimToPosition(positionId: number, deltaSol: number)
   getDb().prepare(
     "UPDATE positions SET close_return_sol = COALESCE(close_return_sol, 0) + ? WHERE id = ? AND close_return_sol IS NOT NULL"
   ).run(deltaSol, positionId);
+}
+
+/**
+ * How much of a mint a close may sell (owner audit, 2026-10-03). Normally the wallet
+ * balance (the sellable truth; xToSwap is the fallback for a blind read). When ANOTHER
+ * position is open on the same mint the wallet may hold tokens that are not this
+ * close's — a breakout's swapped tokens before their deposit — so the sale is capped at
+ * xToSwap, the chain-side amount of this position's own accounts.
+ */
+export function sellAmountForClose(o: { walletX: bigint; walletXKnown: boolean; xToSwap: bigint; otherOnMint: boolean }): bigint {
+  const walletOrChain = o.walletXKnown ? o.walletX : o.xToSwap;
+  return o.otherOnMint && walletOrChain > o.xToSwap ? o.xToSwap : walletOrChain;
 }
 
 export class LiveExecutor implements Executor {
@@ -813,8 +825,50 @@ export class LiveExecutor implements Executor {
     return { valueSol: valueSol + feesSol, feesSol, feeXRaw };
   }
 
+  /**
+   * Per-mint serialization (owner audit, 2026-10-03). With seat + breakout both
+   * possible on ONE mint, a breakout's swapped tokens sit in the wallet between its
+   * swap and its deposit, and a seat close reads/sells/burns the wallet's balance of
+   * that mint — they must never interleave. open() and close() on the same mint run
+   * one at a time; different mints stay concurrent.
+   */
+  private mintLockMap?: Map<string, Promise<unknown>>;
+
+  private async withMintLock<T>(mint: string, fn: () => Promise<T>): Promise<T> {
+    const locks = (this.mintLockMap ??= new Map());
+    const prev = locks.get(mint) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const chain = prev.then(() => gate);
+    locks.set(mint, chain);
+    await prev.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (locks.get(mint) === chain) locks.delete(mint);
+    }
+  }
+
+  /** True while an open()/close() holds (or is queued on) this mint's lock. */
+  mintBusy(mint: string): boolean {
+    return this.mintLockMap?.has(mint) ?? false;
+  }
+
+  /** Any OTHER open/opening/closing live position on this mint (excluding `excludeId`)? */
+  mintHasOtherActivePosition(mint: string, excludeId: number): boolean {
+    const row = getDb().prepare(
+      "SELECT COUNT(*) AS c FROM positions WHERE token_mint = ? AND id != ? AND state IN ('pending','open','closing') AND mode = 'live'"
+    ).get(mint, excludeId) as { c: number };
+    return row.c > 0;
+  }
+
   async open(params: OpenParams): Promise<Position> {
-    // eys_ape (owner addition, 2026-10-01) is token-sided: swap SOL into the
+    return this.withMintLock(params.tokenMint, () => this.openUnlocked(params));
+  }
+
+  private async openUnlocked(params: OpenParams): Promise<Position> {
+    // Token-sided plays (eys_ape, eys_breakout; owner addition, 2026-10-01) are token-sided: swap SOL into the
     // token, deposit the token side above price. Policy smoke-tested
     // sign-only 2026-10-01 (scripts/policy-smoke-real.ts): both the SOL->token
     // swap and the token-sided deposit ALLOW. claimAllSwapFee/removeLiquidity/
@@ -1245,6 +1299,10 @@ export class LiveExecutor implements Executor {
   }
 
   async close(position: Position, reason: ExitReason, slippageBps: number): Promise<{ exitSol: number; txCostSol: number }> {
+    return this.withMintLock(position.tokenMint, () => this.closeUnlocked(position, reason, slippageBps));
+  }
+
+  private async closeUnlocked(position: Position, reason: ExitReason, slippageBps: number): Promise<{ exitSol: number; txCostSol: number }> {
     const pool = await this.pool(position.poolAddress);
     const { priceYperX, positions } = await this.ourLbPositions(position);
     const xDecimals = pool.tokenX.mint.decimals;
@@ -1377,7 +1435,13 @@ export class LiveExecutor implements Executor {
     // totalXAmount) into an exact-in swap for more than we hold — which fails
     // every slippage tier on exactly the below-range closes where the swap IS
     // the exit value. xToSwap remains the fallback for a blind RPC read.
-    const toSell = walletXKnown ? walletX : xToSwap;
+    // Same-mint safety (owner audit, 2026-10-03): when ANOTHER position is open on this
+    // mint (an eys_seat and its eys_breakout), the wallet's balance of the mint may not
+    // all be ours — sell only what THIS close removed (xToSwap, the chain-side amount of
+    // this position's own accounts), never the wallet total, and never touch the
+    // residual (no dust-burn, no residual swap).
+    const otherOnMint = this.mintHasOtherActivePosition(position.tokenMint, position.id);
+    const toSell = sellAmountForClose({ walletX, walletXKnown, xToSwap, otherOnMint });
     const balPostRemove = walletXKnown ? walletX : null;
     const removeSigCount = sigs.length;
     let swapSig: string | null = null;
@@ -1397,7 +1461,11 @@ export class LiveExecutor implements Executor {
       // as before — a quote failure is not evidence of dust.
       const quoteLamports = await quoteToSolLamports(position.tokenMint, toSell).catch(() => null);
       quotePromise = Promise.resolve(quoteLamports);
-      if (isDustQuote(quoteLamports)) {
+      if (isDustQuote(quoteLamports) && otherOnMint) {
+        console.log(
+          `[live] pos#${position.id} ${position.symbol}: dust residual left in place — another position is open on this mint`
+        );
+      } else if (isDustQuote(quoteLamports)) {
         try {
           const burned = await this.burnDustAndClose(position.tokenMint, position.id);
           if (burned) {
@@ -1454,7 +1522,7 @@ export class LiveExecutor implements Executor {
     const stateByReason: Record<ExitReason, string> = {
       P0_safety: "closed_safety", P1_stop: "closed_stop", P2_rotation: "closed_rotation",
       P3_above: "closed_win", P5_below: "closed_below", give_back: "closed_giveback", escape: "closed_escape", manual: "closed_manual", combo_exit: "closed_rotation",
-      combo_idle_timeout: "closed_rotation", combo_left_behind: "closed_rotation",
+      combo_idle_timeout: "closed_rotation", eys_seat_idle: "closed_rotation",
     };
     // Actual wallet credit for this close (exit value + rent refunds - tx fees).
     const closeReturnSol = sigs.length ? await this.walletDelta(sigs) : 0;
@@ -1581,7 +1649,7 @@ export class LiveExecutor implements Executor {
     // Best-effort, non-blocking: never let housekeeping fail a real exit.
     if (position.play) {
       try {
-        const reclaimed = await this.cleanupEmptyTokenAccounts(position.id);
+        const reclaimed = await this.cleanupEmptyTokenAccounts(position.id, position.tokenMint);
         if (reclaimed !== 0) {
           // Fold the reclaim into THIS position's realized result so the positions
           // table / dashboard / CLOSED card match the on-chain wallet delta for the
@@ -1617,12 +1685,12 @@ export class LiveExecutor implements Executor {
    * any account's close failing (e.g. a race with an in-flight swap still
    * using it) is logged and skipped, never thrown.
    */
-  async cleanupEmptyTokenAccounts(positionId: number | null = null): Promise<number> {
+  async cleanupEmptyTokenAccounts(positionId: number | null = null, lockedMint: string | null = null): Promise<number> {
     const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
     const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     const wsolAta = getAssociatedTokenAddressSync(new PublicKey(SOL_MINT), this.wallet.publicKey).toBase58();
     const openMints = new Set(
-      (getDb().prepare("SELECT DISTINCT token_mint AS m FROM positions WHERE state = 'open'").all() as { m: string }[])
+      (getDb().prepare("SELECT DISTINCT token_mint AS m FROM positions WHERE state IN ('pending','open','closing')").all() as { m: string }[])
         .map((r) => r.m)
     );
     const candidates: { pubkey: PublicKey; programId: PublicKey; mint: string }[] = [];
@@ -1638,7 +1706,8 @@ export class LiveExecutor implements Executor {
         const info = acc.account.data.parsed.info as { mint: string; tokenAmount: { amount: string } };
         if (BigInt(info.tokenAmount.amount) !== 0n) continue;             // only genuinely empty accounts
         if (acc.pubkey.toBase58() === wsolAta) continue;                  // wSOL ATA: owned by unwrapWsol/in-flight swaps
-        if (openMints.has(info.mint)) continue;                           // mint of a currently open position
+        if (openMints.has(info.mint)) continue;                           // mint of a currently open/opening/closing position
+        if (this.mintBusy(info.mint) && info.mint !== lockedMint) continue; // an open()/close() is mid-flight on this mint (our own closing mint excepted)
         candidates.push({ pubkey: acc.pubkey, programId, mint: info.mint });
       }
     }
@@ -1680,7 +1749,19 @@ export class LiveExecutor implements Executor {
    */
   async burnDustAndClose(mint: string, positionId: number | null): Promise<{ sig: string; burnedRaw: bigint; reclaimedSol: number } | null> {
     const mintPk = new PublicKey(mint);
+    // Defense in depth: never burn a mint another open/opening position uses.
+    if (positionId !== null && this.mintHasOtherActivePosition(mint, positionId)) return null;
     const accs = await this.connection.getParsedTokenAccountsByOwner(this.wallet.publicKey, { mint: mintPk });
+    // The Privy policy allows Burn/BurnChecked/CloseAccount only through the classic Token
+    // program (the programId allowlist does not include Token-2022). Skip the attempt up
+    // front instead of spending a doomed Privy call; the dust stays, and the close finishes.
+    if (accs.value.some((a) => a.account.owner.equals(TOKEN_2022_PROGRAM_ID))) {
+      console.log(`[live] dust_burn_skipped_t22: ${mint.slice(0, 8)}… is a Token-2022 mint — leaving the dust (policy allowlist)`);
+      getDb().prepare(
+        "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, tx_cost_sol, detail_json) VALUES (?, ?, ?, NULL, 0, 0, ?)"
+      ).run(positionId, now(), "dust_burn_skipped_t22", JSON.stringify({ mint }));
+      return null;
+    }
     const tx = new Transaction();
     let burnedRaw = 0n;
     let closes = 0;
@@ -1774,6 +1855,10 @@ export class LiveExecutor implements Executor {
           }
           continue;
         }
+        // Same-mint safety (owner audit, 2026-10-03): a non-zero balance of a mint with an
+        // open/opening/closing position (or an open()/close() mid-flight on it) is that
+        // position's inventory — e.g. a breakout's swapped tokens before their deposit.
+        if (this.mintBusy(info.mint) || this.mintHasOtherActivePosition(info.mint, -1)) continue;
         const raw = BigInt(info.tokenAmount.amount);
         const quoted = await quoteToSolLamports(info.mint, raw);
         if (quoted === null || quoted < minSol * 1e9) continue;

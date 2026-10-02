@@ -35,12 +35,12 @@ function samples(): Array<{ name: string; built: BuiltCard }> {
   return [
     { name: "opened", built: buildOpenedCard({
       symbol: "WIF", posId: 4821, sizeSol: 0.42, entryPrice: 0.0003841,
-      score: 78, depthPct: 32, play: "molu ladder",
+      score: 78, depthPct: 32, play: "eys seat",
     }) },
     { name: "closed", built: buildClosedCard({
       symbol: "WIF", posId: 4821, pnlSol: 0.0612, pnlPct: 14.6,
       entrySol: 0.420, exitSol: 0.481, feesSol: 0.0038, holdTime: "2h14m",
-      reason: "profit target", play: "molu ladder",
+      reason: "profit target", play: "eys seat",
     }) },
     { name: "fees_claimed", built: buildFeesClaimedCard({
       symbol: "BONK", posId: 4790, claimedSol: 0.0091,
@@ -54,7 +54,7 @@ function samples(): Array<{ name: string; built: BuiltCard }> {
     }) },
     { name: "jev_decision", built: buildJevDecisionCard({
       symbol: "MEW", verdict: "yes", redFlagMax: 0.18, composite: 0.74,
-      play: "danko trap",
+      play: "eys dump bonus",
       keyAnswers: [
         { q: "organic flow", a: "yes" },
         { q: "red flag", a: "none" },

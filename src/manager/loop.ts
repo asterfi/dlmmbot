@@ -31,16 +31,20 @@ import { applyRiskCut, classifyYoung, whaleCheck } from "../risk/entryRisk.js";
 import { enterMajorsPositions } from "./majorsEntry.js";
 import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
-import type { Candidate, ExitReason, Position } from "../types.js";
+import type { Candidate, ExitReason, Position, RangePlan } from "../types.js";
 import { vetToken } from "../vetting/vet.js";
-import { classifyAllPlays, pickByPriority, DEFAULT_PLAY_PRIORITY, detectDipBounce, detectDump, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
-import { planMoluRange } from "../strategy/combo/moluRange.js";
-import { chooseMoluPool } from "../strategy/combo/moluPool.js";
-import { priceDivergenceGate } from "../scanner/priceGate.js";
+import {
+  classifyAllPlays, pickByPriority, DEFAULT_PLAY_PRIORITY, isKnownPlay, isTokenSidedPlay,
+  dynamicVolFloor, eysVolTier, feePerMusd, lastCandleSpikePct, hasMajorDump, recentRangePct, volumePeakDropPct, belowAthPct,
+  type Play, type PlayCandidateFeatures, type VolTier, type DynamicVolFloor,
+} from "../strategy/combo/plays.js";
+import { planSeatRange, planTightRange } from "../strategy/combo/eysRanges.js";
+import { poolDataStale } from "../db/db.js";
+import { readOnchainCollectFeeMode } from "../strategy/combo/feeMode.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
 import { sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
 import { comboExitCheck } from "../strategy/combo/exits.js";
-import { planDankoRange } from "../strategy/combo/dankoRange.js";
+import { planDeepBidAskRange } from "../strategy/combo/deepBidAskRange.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
 import { COMBO_PLAYBOOK } from "../strategy/combo/playbook.js";
 import { jevConsult } from "../strategy/jev/index.js";
@@ -50,19 +54,28 @@ import { fetchStonkTokens } from "../scanner/stonkfun.js";
 // holder-watch), P1–P5, escape hatch, follow, micro/majors sleeves, residual
 // sweep, heartbeat. Second tranche: dual-range BidAsk below primary (score gate).
 
-/** Open combo-play position counts, current mode only (§ combo sizing's max-concurrent / max-1-danko caps). */
+/** Open combo-play position counts, current mode only (canary_max_concurrent / max_concurrent caps). */
 function comboOpenCounts(): ComboOpenCounts {
   const rows = getDb().prepare(
     "SELECT play, COUNT(*) AS c FROM positions WHERE state IN ('pending','open','closing') AND mode = ? AND play IS NOT NULL GROUP BY play"
   ).all(currentMode()) as Array<{ play: string; c: number }>;
-  const counts: ComboOpenCounts = { moluLadder: 0, eysSeat: 0, dankoTrap: 0, eysApe: 0 };
+  const counts: ComboOpenCounts = { eysSeat: 0, eysBreakout: 0, eysTight: 0, eysApe: 0, eysDumpBonus: 0 };
   for (const r of rows) {
-    if (r.play === "molu_ladder") counts.moluLadder = r.c;
-    else if (r.play === "eys_seat") counts.eysSeat = r.c;
-    else if (r.play === "danko_trap") counts.dankoTrap = r.c;
+    if (r.play === "eys_seat") counts.eysSeat = r.c;
+    else if (r.play === "eys_breakout") counts.eysBreakout = r.c;
+    else if (r.play === "eys_tight") counts.eysTight = r.c;
     else if (r.play === "eys_ape") counts.eysApe = r.c;
+    else if (r.play === "eys_dump_bonus") counts.eysDumpBonus = r.c;
   }
   return counts;
+}
+
+/** Open (or opening/closing) combo positions on one token, current mode only — breakout/tight/bonus context and the per-token play caps. */
+function openComboOnToken(mint: string): Array<{ id: number; play: Play; entryPrice: number; volThreshold: number | null }> {
+  const rows = getDb().prepare(
+    "SELECT id, play, entry_price AS entryPrice, vol_threshold AS volThreshold FROM positions WHERE token_mint = ? AND state IN ('pending','open','closing') AND mode = ? AND play IS NOT NULL"
+  ).all(mint, currentMode()) as Array<{ id: number; play: string; entryPrice: number; volThreshold: number | null }>;
+  return rows.filter((r) => isKnownPlay(r.play)) as Array<{ id: number; play: Play; entryPrice: number; volThreshold: number | null }>;
 }
 
 function dataDir(): string {
@@ -146,10 +159,8 @@ const rugcheckLastCheck = new Map<number, number>();  // P0 rugcheck-flip thrott
 const everInRange = new Set<number>();                // P3 win-vs-missed classification
 const fellDeep = new Set<number>();                   // escape hatch armed (also persisted)
 // combo flow-death confirmation (owner, 2026-10-03): the raw flowDead / flowCollapsed condition must hold continuously for combo.flow_dead_confirm_min before it may trigger an exit. In-memory: a restart just restarts the confirmation window, which is the safe direction.
-const comboLeftBehindSince = new Map<number, number>(); // unfilled ladder with price >= left_behind_pct above its top bin: when that began
 const p0CrashSkippedLogged = new Set<number>();          // p0_crash_skipped_combo logged once per position
 const comboFlowDeadSince = new Map<number, number>();
-const comboFlowCollapsedSince = new Map<number, number>();
 const comboAboveSince = new Map<number, number>();   // combo: when price last went above this position's range (unix s); cleared in/below range
 const everFilled = new Set<number>();                 // combo: has this ladder ever actually converted SOL->token? (also persisted)
 const peakPnl = new Map<number, number>();            // give-back telemetry: best fee-inclusive PnL (persisted)
@@ -249,8 +260,7 @@ export function resetManagerStateForTests(): void {
   fellDeep.clear();
   everFilled.clear();
   comboFlowDeadSince.clear();
-  comboFlowCollapsedSince.clear();
-  comboLeftBehindSince.clear();
+  comboAboveSince.clear();
   p0CrashSkippedLogged.clear();
   peakPnl.clear();
   giveBackLogged.clear();
@@ -333,8 +343,7 @@ function clearRangeTimers(posId: number): void {
   fellDeep.delete(posId);
   everFilled.delete(posId);
   comboFlowDeadSince.delete(posId);
-  comboFlowCollapsedSince.delete(posId);
-  comboLeftBehindSince.delete(posId);
+  comboAboveSince.delete(posId);
   p0CrashSkippedLogged.delete(posId);
   clearHolderWatch(posId);
 }
@@ -760,7 +769,9 @@ function loadOpenPositions(): Position[] {
     exitReason: r.exit_reason as Position["exitReason"],
     followChainId: r.follow_chain_id as number | null,
     closeRequestedAt: r.close_requested_at as number | null,
-    play: r.play as Position["play"],
+    // Retired plays (molu_ladder / danko_trap) on historical rows are read-only labels:
+    // they load as a non-combo position and never reach combo logic.
+    play: isKnownPlay(r.play) ? r.play : null,
     fellDeep: !!r.fell_deep,
   }));
 }
@@ -1187,37 +1198,29 @@ export async function managePositions(exec: Executor): Promise<void> {
       // economics (owner's decisions), not upstream's generic ladder. P0 above
       // always runs first and is never gated by Jev.
       const comboCfgExit = config().combo;
+      let comboAboveMin = 0;
       if (comboCfgExit?.enabled && pos.play) {
         const cc = comboCfgExit;
         const pnlFrac = pos.entrySol > 0 ? (mark.valueSol + pos.feesClaimedSol - pos.entrySol) / pos.entrySol : 0;
         const feeDaily = mark.feeTvl30mPct * 48;
         const flowDeadRaw = feeDaily < pm.rotation_fee_daily_min_pct || mark.vol30mUsd < pm.rotation_vol_30m_min_usd;
-        // Danko's own flow-death signal (strategy-fidelity fix, 2026-10-02):
-        // "when 5m volume disappears, the fees disappear with it". mark only
-        // carries vol30mUsd (positions aren't re-polled with fresh 5m candles
-        // every tick), so vol30m/6 is used as a 5m proxy — same unit basis as
-        // the entry gate's flowRatio (vol5mUsd/tvlUsd), just smoothed.
-        const currentFlowRatio = mark.tvlUsd > 0 ? (mark.vol30mUsd / 6) / mark.tvlUsd : null;
-        const flowCollapsedRaw = pos.play === "danko_trap" && currentFlowRatio !== null
-          && currentFlowRatio < cc.danko_flow_ratio_min * cc.danko_flow_death_ratio;
-        // pos#7 OCTO (2026-10-03) was closed by ONE tick of vol30m=4834 < 5000.
-        // Both flow-death signals now need to hold continuously for
-        // flow_dead_confirm_min; the timer resets the moment the condition clears.
+        // pos#7 OCTO (2026-10-03) was closed by ONE tick of vol30m=4834 < 5000: flow
+        // death must hold continuously for flow_dead_confirm_min; the timer resets
+        // the moment the condition clears.
         const confirmS = (cc.flow_dead_confirm_min ?? 3) * 60;
         const flowDead = flowConfirmed(comboFlowDeadSince, pos.id, flowDeadRaw, now(), confirmS);
-        const flowCollapsed = flowConfirmed(comboFlowCollapsedSince, pos.id, flowCollapsedRaw, now(), confirmS);
+        // Continuous time above the range (eys_seat idle rule below).
+        if (!mark.aboveRange) { comboAboveSince.delete(pos.id); comboAboveMin = 0; }
+        else {
+          if (!comboAboveSince.has(pos.id)) comboAboveSince.set(pos.id, now());
+          comboAboveMin = (now() - comboAboveSince.get(pos.id)!) / 60;
+        }
         const trig = comboExitCheck(
           {
-            play: pos.play, entrySol: pos.entrySol, pnlFrac, flowDead, everDrawn: !!pos.fellDeep,
+            play: pos.play, entrySol: pos.entrySol, pnlFrac, flowDead,
             everFilled: everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
               .get(pos.id) as { f: number } | undefined)?.f === 1,
-            flowCollapsed,
             aboveRange: mark.aboveRange,
-            aboveRangeMin: (() => {
-              if (!mark.aboveRange) { comboAboveSince.delete(pos.id); return 0; }
-              if (!comboAboveSince.has(pos.id)) comboAboveSince.set(pos.id, now());
-              return (now() - comboAboveSince.get(pos.id)!) / 60;
-            })(),
           },
           cc,
         );
@@ -1267,60 +1270,52 @@ export async function managePositions(exec: Executor): Promise<void> {
         }
       }
 
-      // --- COMBO IDLE TIMEOUT + exclusivity skip (owner's live-churn fix, 2026-10-02) ---
+      // --- COMBO IDLE RULES + exclusivity skip (live-churn fix 2026-10-02; Eys-only 2026-10-03) ---
       // A combo position is managed ONLY by comboExitCheck above + P0 safety —
       // P1/P2/P3/P5/give_back/escape below must never touch it (that was the
-      // bug: danko_trap ladders that price ran away from, never filling, got
-      // closed by P3_above's "missed" case every ~18min then immediately
-      // re-opened on the same token). A ladder that never fills needs its OWN
-      // timeout instead, since nothing else will ever close it.
+      // bug: ladders that price ran away from got closed by P3_above's "missed"
+      // case every ~18min then immediately re-opened). Positions that sit idle
+      // need their OWN rules, since nothing else will ever close them. Jev is not
+      // consulted for these mechanical housekeeping closes.
       if (comboCfgExit?.enabled && pos.play) {
-        // Canary mode (1 slot): a never-filled Danko ladder ties up the ONLY
-        // slot for far longer than it should (owner, 2026-10-02) — a shorter
-        // timeout applies while canary_mode is on; 6h stands the rest of the time.
-        const idleMaxH = pos.play === "danko_trap"
-          ? (comboCfgExit.canary_mode ? (comboCfgExit.danko_idle_max_h_canary ?? 2) : comboCfgExit.danko_idle_max_h)
-          : pos.play === "molu_ladder" ? comboCfgExit.molu_idle_max_h
-          : null;
         const filled = everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
           .get(pos.id) as { f: number } | undefined)?.f === 1;
-        // Left-behind (owner, 2026-10-03): a never-filled molu/danko ladder whose
-        // price has run >= left_behind_pct above its top bin (top bin = the active
-        // bin at entry) is not coming back soon — free the slot after
-        // left_behind_min continuous minutes instead of waiting out the idle
-        // timeout. Ladders hovering just above range still ride the idle timeouts.
-        const lbPct = comboCfgExit.left_behind_pct ?? 20;
-        const lbMin = comboCfgExit.left_behind_min ?? 30;
-        const leftBehindRaw = (pos.play === "molu_ladder" || pos.play === "danko_trap") && !filled
-          && pos.entryPrice > 0 && mark.price >= pos.entryPrice * (1 + lbPct / 100);
-        if (flowConfirmed(comboLeftBehindSince, pos.id, leftBehindRaw, now(), lbMin * 60)) {
-          await closeAndReport(exec, pos, "combo_left_behind" as ExitReason, config().exec.exit_slippage_bps, "close",
-            `combo left behind: ${pos.play} never filled, price ${(((mark.price / pos.entryPrice) - 1) * 100).toFixed(0)}% above its top bin for ${lbMin}m`);
-          clearRangeTimers(pos.id);
-          const cooldownH = comboCfgExit.reentry_cooldown_h ?? 3;
-          if (cooldownH > 0) blacklist(pos.tokenMint, "token", "combo left behind — never filled", cooldownH);
-          recordDecision(pos.tokenMint, pos.poolAddress, "exited", "combo_left_behind", null, {
-            play: pos.play, ageH, lbPct, lbMin, price: mark.price, entryPrice: pos.entryPrice, mark,
-          });
-          continue;
+        // eys_seat idle (owner audit, 2026-10-03): a Spot SOL-side seat whose token
+        // pumped away sits about all-SOL and flat, never reaches +2%, and blocks a
+        // slot forever. Eys keeps the seat as the BACKUP while a breakout leg is
+        // open; otherwise it is idle. Above range for eys_seat_idle_above_min with no
+        // eys_breakout open on the mint -> close. With a breakout open the seat stays;
+        // once the breakout closes the rule applies at once if the time above range
+        // has already elapsed.
+        const idleAboveMin = comboCfgExit.eys_seat_idle_above_min ?? 20;
+        if (pos.play === "eys_seat" && mark.aboveRange && comboAboveMin >= idleAboveMin) {
+          const breakoutOpen = openComboOnToken(pos.tokenMint).some((p) => p.play === "eys_breakout");
+          if (!breakoutOpen) {
+            await closeAndReport(exec, pos, "eys_seat_idle", config().exec.exit_slippage_bps, "close",
+              `eys_seat idle: above its range ${Math.round(comboAboveMin)}m with no breakout leg open`);
+            clearRangeTimers(pos.id);
+            const cooldownH = comboCfgExit.reentry_cooldown_h ?? 3;
+            if (cooldownH > 0) blacklist(pos.tokenMint, "token", "eys_seat idle — token ran away", cooldownH);
+            recordDecision(pos.tokenMint, pos.poolAddress, "exited", "eys_seat_idle", null, {
+              play: pos.play, ageH, aboveMin: comboAboveMin, idleAboveMin, mark,
+            });
+            continue;
+          }
         }
-        if (idleMaxH && !filled && ageH > idleMaxH) {
-          // Jev is NOT consulted for idle timeouts — there is nothing to judge
-          // (the ladder never earned a cent either way) and no reason to spend
-          // a consult on a mechanical housekeeping close.
+        // eys_dump_bonus never-filled timeout: a deep Bid-Ask ladder the market
+        // never came back down to holds a slot for nothing.
+        const dumpIdleH = comboCfgExit.eys_dump_idle_max_h ?? 2;
+        if (pos.play === "eys_dump_bonus" && !filled && ageH > dumpIdleH) {
           await closeAndReport(exec, pos, "combo_idle_timeout" as ExitReason, config().exec.exit_slippage_bps, "close",
-            `combo idle timeout: ${pos.play} never filled in ${idleMaxH}h (age ${ageH.toFixed(1)}h)`);
+            `combo idle timeout: eys_dump_bonus never filled in ${dumpIdleH}h (age ${ageH.toFixed(1)}h)`);
           clearRangeTimers(pos.id);
-          const cooldownH = comboCfgExit.reentry_cooldown_h ?? 3;
-          if (cooldownH > 0) blacklist(pos.tokenMint, "token", "combo idle timeout — never filled", cooldownH);
           recordDecision(pos.tokenMint, pos.poolAddress, "exited", "combo_idle_timeout", null, {
-            play: pos.play, ageH, idleMaxH, mark,
+            play: pos.play, ageH, idleMaxH: dumpIdleH, mark,
           });
           continue;
         }
-        // Not timed out (or already filled and waiting on comboExitCheck) —
-        // still a combo position, so skip the entire upstream P1-escape
-        // ladder below unconditionally.
+        // Not idle (or filled and waiting on comboExitCheck) — still a combo position,
+        // so skip the entire upstream P1-escape ladder below unconditionally.
         continue;
       }
 
@@ -1921,51 +1916,66 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     }
   }
 
-  // Canary priority (owner, 2026-10-02): with only 1 slot, Danko was eating
-  // it every sweep ahead of molu/eys candidates that never got a chance — live
-  // evidence showed molu-shaped candidates (DvdmEnzt, D1YZZg9d) rejected
-  // canary_max_concurrent because Danko held the slot. A full lookahead would
-  // require running the whole vet+candle pipeline twice (double the RPC/GMGN
-  // load), so this is a cheap, pool-data-only heuristic re-sort: candidates
-  // that COULD plausibly be eys_seat/eys_ape/molu_ladder (by mcap/flow alone —
-  // no candles needed) are tried first, same mechanism as the Stonks-priority
-  // sort above. The real classifier (unchanged) still gates correctly either
-  // way; worst case a false "looks non-danko" candidate just fails its own
-  // classification and the loop moves on to the next in order, including any
-  // deferred Danko candidates.
-  if (comboCfgTick?.enabled && comboCfgTick.canary_mode) {
-    const priority = comboCfgTick.play_priority ?? ["eys_seat", "eys_ape", "molu_ladder", "danko_trap"];
-    const dankoRank = priority.indexOf("danko_trap");
-    const looksNonDanko = (c: Candidate): boolean => {
-      const eysish = c.pool.marketCapUsd >= comboCfgTick!.eys_mcap_min_usd
-        && (c.pool.vol30mUsd / 30) >= comboCfgTick!.eys_flow_usd_per_min_min / 3; // within 3x — cheap pre-filter, not the real gate
-      const moluish = c.pool.marketCapUsd >= comboCfgTick!.molu_mcap_min_usd;
-      return eysish || moluish;
-    };
-    if (dankoRank === priority.length - 1) {
-      candidates = [...candidates].sort((a, b) => {
-        const an = looksNonDanko(a) ? 1 : 0;
-        const bn = looksNonDanko(b) ? 1 : 0;
-        return an !== bn ? bn - an : b.score - a.score;
-      });
+  // Dynamic soft volume floor (owner, 2026-10-03: "find a sweet spot... make it
+  // dynamic"): max(static floor, the 80th percentile of per-minute volume among the
+  // current GMGN 5m trending tokens with mcap >= the Eys mcap floor). Computed from
+  // the trending read above (the 10-minute cached poll — no extra GMGN call), so it
+  // is "recomputed each trending poll" by construction. OFF (soft tier closed) when
+  // the market read is blind (< 5 samples) or the floor is not below the hard tier.
+  let volFloorInfo: DynamicVolFloor = { floor: null, percentileValue: null, samples: 0 };
+  if (comboCfgTick?.enabled) {
+    const vols: number[] = [];
+    for (const pres of trendingMap.values()) {
+      if (pres.token.marketCapUsd < comboCfgTick.eys_mcap_min_usd) continue;
+      const r = gmgnPerMinuteVolumeUsd(pres);
+      if (r) vols.push(r.usdPerMin);
     }
+    volFloorInfo = dynamicVolFloor(vols, {
+      staticFloor: comboCfgTick.eys_vol_floor_usd_per_min ?? 15_000,
+      hard: comboCfgTick.eys_vol_hard_usd_per_min ?? comboCfgTick.eys_flow_usd_per_min_min,
+      percentile: comboCfgTick.eys_vol_percentile ?? 0.8,
+    });
   }
+
+  // Slot priority (owner, 2026-10-03): breakout (for an open seat) > seat > tight >
+  // ape > dump bonus. A full cross-candidate lookahead would run the vet+candle
+  // pipeline twice, so this is a cheap, pool-data-only re-sort, same mechanism as the
+  // Stonks sort above: tokens whose seat is already open (breakout candidates) first,
+  // then tokens that look Eys-shaped by mcap and 30m-average volume (within 3x of the
+  // lowest volume tier — a pre-filter, not the real gate), then the rest. The real
+  // classifier still decides; within a candidate, play_priority resolves exactly.
+  if (comboCfgTick?.enabled) {
+    const seatMints = new Set(
+      (getDb().prepare(
+        "SELECT DISTINCT token_mint AS m FROM positions WHERE play = 'eys_seat' AND state IN ('pending','open','closing') AND mode = ?"
+      ).all(currentMode()) as Array<{ m: string }>).map((r) => r.m),
+    );
+    const lowTier = Math.min(volFloorInfo.floor ?? Infinity, comboCfgTick.eys_vol_hard_usd_per_min ?? comboCfgTick.eys_flow_usd_per_min_min);
+    const rankOf = (c: Candidate): number => {
+      if (seatMints.has(c.tokenMint)) return 0;
+      const eysish = c.pool.marketCapUsd >= comboCfgTick!.eys_mcap_min_usd && (c.pool.vol30mUsd / 30) >= lowTier / 3;
+      return eysish ? 1 : 2;
+    };
+    candidates = [...candidates].sort((a, b) => rankOf(a) - rankOf(b) || b.score - a.score);
+  }
+  // While combo is enabled it owns slot admission (canary_max_concurrent / max_concurrent
+  // in sizing.ts); upstream's normal/alpha slot caps and displacement do not apply.
+  const comboOwnsSlots = !!comboCfgTick?.enabled;
   // Gates below re-run on every tick for the same candidate, so they write one
   // row per episode (recordSkip). Events — vet_error, quote_stale, open
   // failures — and counterfactual telemetry stay one row each (recordDecision).
   for (const candIn of candidates) {
-    // `let`: molu's pool choice may swap the candidate's pool mid-pipeline.
-    let cand = candIn;
+    const cand = candIn;
     const opened = openPositionCount();
     // Cheap admission pre-check before spending vetting calls: when the normal
     // book is full, only candidates that could plausibly reach alpha (pre-vet
     // score + max vetting uplift) are worth vetting.
     const maxVetUplift = 0.5 * config().score.w_vetting_soft;
-    if (opened >= normalCap && cand.score + maxVetUplift < rot.alpha_score_min) {
+    if (!comboOwnsSlots && opened >= normalCap && cand.score + maxVetUplift < rot.alpha_score_min) {
       recordSkip(cand.tokenMint, cand.pool.address, "slots_full", cand.score, { symbol: cand.symbol });
       continue;
     }
-    if (opened >= bankroll.effectiveSlots && !rot.displacement_enabled) break;
+    if (!comboOwnsSlots && opened >= bankroll.effectiveSlots && !rot.displacement_enabled) break;
 
     // One owner per token: while a follow chain is live for this mint, the
     // chain decides re-entry timing — the normal pipeline entering in parallel
@@ -2065,7 +2075,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // Slot admission (§5): normal slots for everyone, alpha slots only for
     // exceptional FUNDAMENTALS; full book -> displacement attempt for alpha only.
     const isAlpha = baseScore >= rot.alpha_score_min;
-    const admitted = opened < normalCap || (isAlpha && opened < bankroll.effectiveSlots);
+    const admitted = comboOwnsSlots || opened < normalCap || (isAlpha && opened < bankroll.effectiveSlots);
     // Displacement is only PLANNED here — the victim is closed immediately
     // before the open, after every remaining gate has passed. We used to
     // liquidate a healthy earning position first and then skip the candidate
@@ -2091,7 +2101,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     if (comboSeed?.enabled) {
       size = comboSeed.canary_mode
         ? comboSeed.canary_position_sol
-        : bankroll.walletSol * (comboSeed.active_budget_pct / 100) * (comboSeed.molu_share_pct / 100);
+        : bankroll.walletSol * (comboSeed.active_budget_pct / 100) * (comboSeed.eys_share_pct / 100);
     }
     if (size <= 0) {
       const gate = sizingMode() === "kelly" && kelly.regime === "negative_edge" ? "kelly_negative_edge" : "size_zero";
@@ -2198,7 +2208,11 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     }
     // One primary position per token (§5) — tranches are the only sanctioned
     // second position and they're opened by the manager, not the entry pipeline.
-    if (tokenExposureSol(cand.tokenMint) > 0) {
+    // Combo: a token with an open Eys position may take a SECOND, different play (an
+    // eys_breakout on an open seat, an eys_tight, an eys_dump_bonus) — the per-token
+    // play caps live in classification and the slot cap in sizing. Anything else still
+    // reads as already positioned.
+    if (tokenExposureSol(cand.tokenMint) > 0 && !(comboOwnsSlots && openComboOnToken(cand.tokenMint).length > 0)) {
       recordSkip(cand.tokenMint, cand.pool.address, "already_positioned", score, { symbol: cand.symbol });
       continue;
     }
@@ -2302,7 +2316,13 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // would silently truncate to the bin-account ceiling and we would enter with
     // a fraction of the intended range. Checked before the candle fetch so a
     // pool we cannot trade properly costs us nothing.
-    const reach = depthReachable(config().entry.min_down_pct, cand.pool.binStep, config().entry.max_position_accounts);
+    // Upstream's depth gate (a range min_down_pct deep must be buildable) and its
+    // generic planned range exist for the Kelly pipeline; every combo play builds its
+    // own range below (a 12% Spot seat or 15-bin tight range is perfectly buildable on
+    // a fine-step pool the -40% gate would reject), so they are bypassed under combo.
+    const reach = comboOwnsSlots
+      ? { ok: true, binsNeeded: 0, maxBins: 0 }
+      : depthReachable(config().entry.min_down_pct, cand.pool.binStep, config().entry.max_position_accounts);
     if (!reach.ok) {
       recordSkip(cand.tokenMint, cand.pool.address, "range_too_shallow", score, {
         binStep: cand.pool.binStep, minDownPct: config().entry.min_down_pct, ...reach,
@@ -2312,35 +2332,41 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     }
 
     const candles = await fetchCandlesDeep(cand.pool.address, "5m").catch(() => []);
-    const planned = planRange(entryPrice, cand.pool.binStep, candles, cand.pool.decimalsX);
-    const rent = await applyBinRentGate({
-      range: planned,
-      score,
-      poolAddress: cand.pool.address,
-      price: entryPrice,
-      binStep: cand.pool.binStep,
-      decimalsX: cand.pool.decimalsX,
-      minDownPct: config().entry.min_down_pct,
-      sizeSol: size,
-    });
-    if (!rent.ok) {
-      recordSkip(cand.tokenMint, cand.pool.address, "bin_rent", score, {
-        range: rent.range, rent: rent.meta,
+    let range: RangePlan;
+    if (comboOwnsSlots) {
+      // Placeholder only: every combo play replaces it with its own range in the combo block.
+      range = planSeatRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, config().combo?.eys_seat_range_below_pct ?? 12, config().entry.max_position_accounts);
+    } else {
+      const planned = planRange(entryPrice, cand.pool.binStep, candles, cand.pool.decimalsX);
+      const rent = await applyBinRentGate({
+        range: planned,
+        score,
+        poolAddress: cand.pool.address,
+        price: entryPrice,
+        binStep: cand.pool.binStep,
+        decimalsX: cand.pool.decimalsX,
+        minDownPct: config().entry.min_down_pct,
+        sizeSol: size,
       });
-      continue;
+      if (!rent.ok) {
+        recordSkip(cand.tokenMint, cand.pool.address, "bin_rent", score, {
+          range: rent.range, rent: rent.meta,
+        });
+        continue;
+      }
+      if (rent.meta.shrunk) {
+        console.log(
+          `[enter] ${cand.symbol}: shrunk range for rent ${rent.meta.est.toFixed(3)}→${rent.range.estBinRentSol.toFixed(3)} SOL ` +
+          `(depth → ${rent.range.bottomPricePct.toFixed(0)}%)`
+        );
+      } else if (rent.meta.actual != null && rent.meta.actual < rent.meta.est) {
+        console.log(
+          `[enter] ${cand.symbol}: actual bin rent ${rent.meta.actual.toFixed(3)} SOL ` +
+          `(est ${rent.meta.est.toFixed(3)}, ${rent.meta.tier} budget ${rent.meta.budget})`
+        );
+      }
+      range = rent.range;
     }
-    if (rent.meta.shrunk) {
-      console.log(
-        `[enter] ${cand.symbol}: shrunk range for rent ${rent.meta.est.toFixed(3)}→${rent.range.estBinRentSol.toFixed(3)} SOL ` +
-        `(depth → ${rent.range.bottomPricePct.toFixed(0)}%)`
-      );
-    } else if (rent.meta.actual != null && rent.meta.actual < rent.meta.est) {
-      console.log(
-        `[enter] ${cand.symbol}: actual bin rent ${rent.meta.actual.toFixed(3)} SOL ` +
-        `(est ${rent.meta.est.toFixed(3)}, ${rent.meta.tier} budget ${rent.meta.budget})`
-      );
-    }
-    let range = rent.range;
 
     // --- COMBO STRATEGY: play classification, Eys 30/70 sizing, Jev gate ---
     // Runs AFTER every upstream hard gate/vetting/risk check above has already
@@ -2351,9 +2377,17 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     let play: Play | null = null;
     let apeSource: ApeSource | null = null;
     let qualifyingPlaysOuter: Play[] = [];
+    let volThresholdOuter: number | null = null;
     const comboCfgEntry = config().combo;
     if (comboCfgEntry?.enabled) {
       const cc = comboCfgEntry;
+      // datapi freshness (owner, 2026-10-03): no documented guarantee and no timestamp in
+      // the payload, so judged from our own snapshots (see db.ts poolDataStale).
+      const stale = poolDataStale(cand.pool.address, { maxAgeS: cc.datapi_max_age_s ?? 120 });
+      if (stale.stale) {
+        recordSkip(cand.tokenMint, cand.pool.address, "stale_pool_data", score, { symbol: cand.symbol, reason: stale.reason });
+        continue;
+      }
       const ageMin = vet.facts.tokenAgeMinutes;
       const ageDays = ageMin !== null ? ageMin / 1440 : null;
       // Lifetime fees earned in the pool, approximated from the 24h fee
@@ -2384,13 +2418,31 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       if (gmgnRate !== null) { flowUsdPerMin = gmgnRate.usdPerMin; volWindow = `gmgn_${gmgnRate.window}`; }
       else if (datapiUsdPerMin !== null) { flowUsdPerMin = datapiUsdPerMin; volWindow = "datapi_5m"; }
       else { flowUsdPerMin = cand.pool.vol30mUsd / 30; volWindow = "vol30m_avg_fallback"; }
-      const dump = detectDump(candles, entryPrice);
-      const dipBounce = detectDipBounce(candles, entryPrice);
-      // Danko's flow_ratio (his own words: "volume relative to active
-      // liquidity", not raw volume) — freshest per-minute volume over 5
-      // minutes, against pool TVL (active-range bin liquidity isn't exposed
-      // by the scanner today; TVL is the owner-approved fallback).
-      const flowRatio = (vol5mUsd !== null && cand.pool.tvlUsd > 0) ? vol5mUsd / cand.pool.tvlUsd : null;
+      // ---- Eys context (owner, 2026-10-03) ----
+      // Trailing per-minute volume (datapi 4h, else 1h) for vol_accel = freshest
+      // per-minute volume / trailing average: is volume ACCELERATING, not just big.
+      const trailingPerMin = (cand.pool.vol4hUsd ?? 0) > 0
+        ? cand.pool.vol4hUsd! / 240
+        : (cand.pool.vol1hUsd > 0 ? cand.pool.vol1hUsd / 60 : 0);
+      const volAccel = trailingPerMin > 0 ? flowUsdPerMin / trailingPerMin : null;
+      const openOnToken = openComboOnToken(cand.tokenMint);
+      const seatPos = openOnToken.find((p) => p.play === "eys_seat") ?? null;
+      const hardBar = cc.eys_vol_hard_usd_per_min ?? cc.eys_flow_usd_per_min_min;
+      // The seat's range top = its entry (active) bin; breakout needs price one bin above it.
+      const seat = seatPos
+        ? { topPrice: seatPos.entryPrice * (1 + cand.pool.binStep / 10_000), volThreshold: seatPos.volThreshold ?? hardBar }
+        : null;
+      const firstSeen = (getDb().prepare("SELECT MIN(ts) AS t FROM pool_snapshots WHERE pool = ?")
+        .get(cand.pool.address) as { t: number | null } | undefined)?.t ?? null;
+      const observedMin = firstSeen !== null ? (now() - firstSeen) / 60 : null;
+      const tightN = cc.eys_tight_candles ?? 3;
+      const noMajorDump = !hasMajorDump(candles, tightN, cc.eys_tight_dump_pct ?? 15);
+      const recentRange = recentRangePct(candles, tightN);
+      const choppy = recentRange !== null && recentRange <= (cc.eys_tight_range_max_pct ?? 25);
+      const dumpWin = cc.eys_dump_window_candles ?? 12;
+      const spike5mPct = lastCandleSpikePct(candles);
+      const volPeakDropPct = volumePeakDropPct(candles, dumpWin);
+      const athBelowPct = belowAthPct(candles, dumpWin, entryPrice);
       const features: PlayCandidateFeatures = {
         mcapUsd: cand.pool.marketCapUsd,
         tokenAgeMinutes: ageMin,
@@ -2399,55 +2451,87 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         vol1hUsd: cand.pool.vol1hUsd,
         feeTvl24hPct: cand.pool.feeTvl24hPct,
         feesEarnedPoolSol,
-        devFeesKnownZero: false, // not knowable from current scanner data — never a blocking gate (STRATEGY: "if knowable")
+        // "0 dev fees": the datapi/GMGN trending data we read does not expose the creator/dev
+        // fee share, so it is never a blocking gate; the token2022_extensions vetting gate
+        // already rejects a Token-2022 transfer fee.
+        devFeesKnownZero: false,
         flowUsdPerMin,
-        dipBounce,
+        volAccel,
+        dynamicVolFloor: volFloorInfo.floor,
         oneSidedFeasible: reach.ok,
-        dumpPct: dump?.dumpPct ?? null,
-        flowRatio,
-        buyersPresent: dipBounce !== null,
+        openPlaysOnToken: openOnToken.map((p) => p.play),
+        seat,
+        price: entryPrice,
+        spike5mPct,
+        observedMin,
+        noMajorDump,
+        choppy,
+        volPeakDropPct,
+        athBelowPct,
       };
+      const volTierInfo = eysVolTier(features, cc);
       // Within-candidate resolution (owner, 2026-10-03): evaluate EVERY play the
       // candidate qualifies for and pick the highest-priority one per config
-      // play_priority (eys_seat > eys_ape > molu_ladder > danko_trap), instead of
-      // the old fixed danko > molu > eys_seat rule order. The full list is
+      // play_priority (breakout > seat > tight > ape > dump bonus). The full list is
       // recorded (decision features + Jev state) as qualifying_plays.
-      const qualifying: Array<{ play: Play; reasons: string[] }> = classifyAllPlays(features, cc);
+      const qualifying: Array<{ play: Play; reasons: string[]; volTier?: VolTier; volThreshold?: number }> = classifyAllPlays(features, cc);
       let apeClassifiedFull: ReturnType<typeof classifyApe> = null;
       let apeFeaturesFull: ApeCandidateFeatures | null = null;
-      // eys_ape (widened 2026-10-02): ANY candidate from the main sweep is
-      // eligible, not just Stonks mints. Stonks-listed mints are tagged
-      // source="stonks" and get the ranking boost applied via the candidates
-      // re-sort above; everything else is source="meteora".
-      if (cc.ape_enabled !== false) {
+      // eys_ape: ANY candidate from the main sweep is eligible, not just Stonks mints
+      // (Stonks-listed mints are tagged source="stonks" and ranked first via the
+      // candidates re-sort above; everything else is source="meteora"). Only a DLMM SOL
+      // pool can reach here at all: launchpads (DBC) graduate to DAMM v2, so a Stonks
+      // coin with no DLMM SOL pool simply never appears in the DLMM sweep.
+      if (cc.ape_enabled !== false && !openOnToken.some((p) => p.play === "eys_ape")) {
         const source: ApeSource = apeStonkMints?.has(cand.tokenMint) ? "stonks" : "meteora";
-        const apeFeatures: ApeCandidateFeatures = {
+        const apeBase = {
           mcapUsd: cand.pool.marketCapUsd,
           tokenAgeMinutes: ageMin,
-          // feesBothTokens is always known for a DLMM pool our own scanner fetched.
-          feeModeKnown: true,
-          quoteOnlyFee: cand.pool.feesBothTokens === false,
           feesEarnedPoolSol: features.feesEarnedPoolSol,
           flowUsdPerMin: features.flowUsdPerMin,
-          oneSidedFeasible: reach.ok, // approximation: symmetric bin-count feasibility, up vs down
+          oneSidedFeasible: reach.ok,
           source,
         };
-        const apeClassified = classifyApe(apeFeatures, cc);
-        if (apeClassified) {
-          qualifying.push({ play: "eys_ape", reasons: apeClassified.reasons });
-          apeClassifiedFull = apeClassified;
-          apeFeaturesFull = apeFeatures;
+        // Pre-check everything but the fee mode; only then spend an RPC on the pool's
+        // on-chain collect-fee mode (Meteora's quote-only / SOL-fee setting).
+        if (classifyApe({ ...apeBase, feeModeKnown: true, quoteOnlyFee: true }, cc)) {
+          const onchainMode = await readOnchainCollectFeeMode(cand.pool.address);
+          const datapiQuoteOnly = cand.pool.feesBothTokens === false;
+          const apeFeatures: ApeCandidateFeatures = {
+            ...apeBase,
+            // On-chain LbPair.parameters.collectFeeMode when readable (OnlyY=1 -> quote/SOL
+            // fees); otherwise the datapi's copy of it, logged as fee_mode_unknown.
+            feeModeKnown: true,
+            quoteOnlyFee: onchainMode !== null ? onchainMode === 1 : datapiQuoteOnly,
+          };
+          if (onchainMode === null) {
+            recordDecision(cand.tokenMint, cand.pool.address, "skipped", "fee_mode_unknown", score, {
+              symbol: cand.symbol, reason: "on-chain collectFeeMode unreadable; using datapi value", datapiQuoteOnly,
+            });
+          } else if ((onchainMode === 1) !== datapiQuoteOnly) {
+            console.warn(`[combo] ${cand.symbol}: datapi fee mode (quoteOnly=${datapiQuoteOnly}) disagrees with on-chain collectFeeMode=${onchainMode} — trusting the chain`);
+          }
+          const apeClassified = classifyApe(apeFeatures, cc);
+          if (apeClassified) {
+            qualifying.push({ play: "eys_ape", reasons: apeClassified.reasons });
+            apeClassifiedFull = apeClassified;
+            apeFeaturesFull = apeFeatures;
+          }
         }
       }
-      // A young-but-Eys-eligible candidate (ageEysOnly, see below) may only use
-      // the Eys plays — drop the rest BEFORE picking, so a priority list that
-      // ranked molu above eys can't strand an Eys-qualifying candidate.
-      const qualifyingPool = vet.facts.ageEysOnly
-        ? qualifying.filter((q) => q.play === "eys_seat" || q.play === "eys_ape")
-        : qualifying;
-      let classified: { play: Play; reasons: string[] } | null =
-        pickByPriority(qualifyingPool, cc.play_priority ?? DEFAULT_PLAY_PRIORITY);
-      const qualifyingPlays = qualifying.map((q) => q.play);
+      // Token-sided plays (eys_ape, eys_breakout) swap SOL -> token and deposit the token
+      // above price. The Privy program allowlist does not cover Token-2022, so a
+      // Token-2022 mint would be rejected mid-open (after the swap) — skip it here.
+      const isT22 = vet.facts.tokenProgram === "spl-token-2022";
+      const qualifyingUsable = isT22 ? qualifying.filter((q) => !isTokenSidedPlay(q.play)) : qualifying;
+      if (isT22 && qualifying.some((q) => isTokenSidedPlay(q.play))) {
+        recordSkip(cand.tokenMint, cand.pool.address, "token2022_policy", score, {
+          symbol: cand.symbol, dropped: qualifying.filter((q) => isTokenSidedPlay(q.play)).map((q) => q.play),
+        });
+      }
+      let classified: { play: Play; reasons: string[]; volTier?: VolTier; volThreshold?: number } | null =
+        pickByPriority(qualifyingUsable, cc.play_priority ?? DEFAULT_PLAY_PRIORITY);
+      const qualifyingPlays = qualifyingUsable.map((q) => q.play);
       qualifyingPlaysOuter = qualifyingPlays;
       if (classified?.play === "eys_ape" && apeClassifiedFull) {
         apeSource = apeClassifiedFull.source;
@@ -2455,21 +2539,11 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           recordDecision(cand.tokenMint, cand.pool.address, "skipped", "fee_mode_unknown", score, { apeFeatures: apeFeaturesFull, symbol: cand.symbol });
         }
       }
-      // Young-but-Eys-eligible (owner, 2026-10-02): vetToken let this
-      // candidate past the age_min hard-fail ONLY because it might be
-      // eys_seat/eys_ape — if it classified as anything else (or nothing),
-      // it must still be rejected, with the SAME age_min gate name vetToken
-      // itself would have used.
-      if (vet.facts.ageEysOnly && classified?.play !== "eys_seat" && classified?.play !== "eys_ape") {
-        recordSkip(cand.tokenMint, cand.pool.address, "age_min", score, {
-          symbol: cand.symbol, tokenAgeMinutes: ageMin, play: classified?.play ?? null,
-        });
-        continue;
-      }
       if (classified) {
         const counts = comboOpenCounts();
         const canaryCfg: CanarySizingConfig = {
           canary_mode: cc.canary_mode, canary_position_sol: cc.canary_position_sol,
+          canary_max_concurrent: cc.canary_max_concurrent,
           ape_sol: cc.ape_sol, fee_reserve_sol: cc.fee_reserve_sol,
           position_rent_est_sol: cc.position_rent_est_sol,
         };
@@ -2482,7 +2556,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         }
         let comboSize = sizeResult.sizeSol;
 
-        if (classified.play === "eys_seat") {
+        if (classified.play === "eys_seat" || classified.play === "eys_tight") {
           const costCfg: EysCostConfig = {
             eys_tp_pct: cc.eys_tp_pct, eys_cost_tx_count: cc.eys_cost_tx_count,
             eys_cost_tx_sol: cc.eys_cost_tx_sol, eys_cost_slippage_bps: cc.eys_cost_slippage_bps,
@@ -2493,109 +2567,51 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           }
         }
 
-        // danko_trap wants a deliberately deeper range (-85%/-90%) than the
-        // generic planner's P0-safety-margin cap allows — rebuild and re-gate
-        // the range for this one play only; molu_ladder/eys_seat keep the
-        // range already planned above (planRange's own fib/dip-aware depth).
-        if (classified.play === "danko_trap") {
-          const dankoPlanned = planDankoRange(
-            entryPrice, cand.pool.binStep, cand.pool.decimalsX,
-            cc.danko_down_min_pct, cc.danko_down_max_pct, config().entry.max_position_accounts,
-          );
-          const dankoRent = await applyBinRentGate({
-            range: dankoPlanned, score, poolAddress: cand.pool.address,
-            price: entryPrice, binStep: cand.pool.binStep, decimalsX: cand.pool.decimalsX,
-            minDownPct: cc.danko_down_min_pct, sizeSol: comboSize,
-          });
-          if (!dankoRent.ok) {
-            recordSkip(cand.tokenMint, cand.pool.address, "combo_danko_bin_rent", score, {
-              range: dankoRent.range, rent: dankoRent.meta,
-            });
-            continue;
-          }
-          range = dankoRent.range;
-        }
-
-        // molu_ladder (owner, 2026-10-03; molu's Book 1): pool choice for young
-        // tokens + a ~110-bin ladder below price instead of upstream's depth band.
-        if (classified.play === "molu_ladder") {
-          let moluPoolReason: string = "single_pool";
-          const youngEnough = ageMin !== null && ageMin < cc.molu_age_max_h * 60;
-          if (youngEnough && cand.siblings && cand.siblings.length > 1) {
-            const choice = chooseMoluPool(
-              cand.siblings, { molu_fee_pool_min_vol30m_usd: cc.molu_fee_pool_min_vol30m_usd ?? 10_000 }, cand.pool,
+        // Every play builds its own range (ranges/ are the only place geometry lives):
+        //  seat / tight: Spot, SOL-side, top bin = active bin; breakout / ape: token-sided
+        //  ABOVE price; dump bonus: deep Bid-Ask SOL-side (-85..-90%).
+        const maxAccts = config().entry.max_position_accounts;
+        let plannedRange: RangePlan;
+        switch (classified.play) {
+          case "eys_tight":
+            plannedRange = planTightRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.eys_tight_bins ?? 15, maxAccts);
+            break;
+          case "eys_dump_bonus":
+            plannedRange = planDeepBidAskRange(
+              entryPrice, cand.pool.binStep, cand.pool.decimalsX,
+              cc.eys_dump_down_min_pct ?? 85, cc.eys_dump_down_max_pct ?? 90, maxAccts,
             );
-            moluPoolReason = choice.reason;
-            if (choice.pool.address !== cand.pool.address) {
-              const freshAlt = await fetchPool(choice.pool.address).catch(() => null);
-              const divergence = freshAlt && freshAlt.price > 0
-                ? await priceDivergenceGate(cand.tokenMint, freshAlt.price) : null;
-              if (freshAlt && freshAlt.price > 0 && !divergence) {
-                const from = cand.pool;
-                cand = { ...cand, pool: freshAlt };
-                entryPrice = freshAlt.price;
-                if (solUsd !== null && solUsd > 0) poolShareCapSol = (cand.pool.tvlUsd * (g.max_pool_share_pct / 100)) / solUsd;
-                recordDecision(cand.tokenMint, cand.pool.address, "skipped", "molu_pool_choice", score, {
-                  reason: choice.reason, from: from.address, to: cand.pool.address,
-                  fromBaseFeePct: from.baseFeePct, toBaseFeePct: cand.pool.baseFeePct,
-                  fromVol30m: from.vol30mUsd, toVol30m: cand.pool.vol30mUsd, siblings: cand.siblings?.length,
-                });
-                console.log(`[combo] ${cand.symbol}: molu pool choice ${choice.reason} — ${from.address.slice(0, 6)} (fee ${from.baseFeePct}%, vol30m $${from.vol30mUsd.toFixed(0)}) -> ${cand.pool.address.slice(0, 6)} (fee ${cand.pool.baseFeePct}%, vol30m $${cand.pool.vol30mUsd.toFixed(0)})`);
-              } else {
-                moluPoolReason = `${choice.reason}_alt_unusable_kept_scanner_pool`;
-              }
-            }
-          }
-          const moluPlanned = planMoluRange(
-            entryPrice, cand.pool.binStep, cand.pool.decimalsX,
-            cc.molu_bins_target ?? 110, cc.molu_bins_min ?? 100, cc.molu_bins_max ?? 125,
-            config().entry.max_position_accounts,
-          );
-          // The sizing affordability check priced ONE position account; a ~110-bin
-          // ladder usually needs two (refundable rent) — re-check with the real count.
-          const moluAfford = checkAffordability(bankroll, comboSize, {
-            fee_reserve_sol: cc.fee_reserve_sol,
-            position_rent_est_sol: cc.position_rent_est_sol * moluPlanned.positionAccounts,
-          });
-          if (!moluAfford.ok) {
-            recordSkip(cand.tokenMint, cand.pool.address, "skip_affordability", score, {
-              play: classified.play, positionAccounts: moluPlanned.positionAccounts, reason: moluAfford.reason,
-            });
-            continue;
-          }
-          const moluRent = await applyBinRentGate({
-            range: moluPlanned, score, poolAddress: cand.pool.address,
-            price: entryPrice, binStep: cand.pool.binStep, decimalsX: cand.pool.decimalsX,
-            minDownPct: Math.min(config().entry.min_down_pct, 30), sizeSol: comboSize,
-          });
-          if (!moluRent.ok) {
-            recordSkip(cand.tokenMint, cand.pool.address, "combo_molu_bin_rent", score, {
-              range: moluRent.range, rent: moluRent.meta, poolChoice: moluPoolReason,
-            });
-            continue;
-          }
-          range = moluRent.range;
-          console.log(`[combo] ${cand.symbol}: molu ladder ${range.binCount} bins (${range.positionAccounts} account(s), bottom ${range.bottomPricePct.toFixed(0)}%), pool choice: ${moluPoolReason}`);
+            break;
+          case "eys_ape":
+          case "eys_breakout":
+            plannedRange = planApeRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.ape_range_up_pct, maxAccts);
+            break;
+          default:
+            plannedRange = planSeatRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.eys_seat_range_below_pct ?? 12, maxAccts);
         }
-
-        // eys_ape: token-sided range ABOVE current price.
-        if (classified.play === "eys_ape") {
-          const apePlanned = planApeRange(
-            entryPrice, cand.pool.binStep, cand.pool.decimalsX,
-            cc.ape_range_up_pct, config().entry.max_position_accounts,
-          );
-          const apeRent = await applyBinRentGate({
-            range: apePlanned, score, poolAddress: cand.pool.address,
-            price: entryPrice, binStep: cand.pool.binStep, decimalsX: cand.pool.decimalsX,
-            minDownPct: 0, sizeSol: comboSize,
+        const rentRes = await applyBinRentGate({
+          range: plannedRange, score, poolAddress: cand.pool.address,
+          price: entryPrice, binStep: cand.pool.binStep, decimalsX: cand.pool.decimalsX,
+          minDownPct: classified.play === "eys_dump_bonus" ? (cc.eys_dump_down_min_pct ?? 85) : 0,
+          sizeSol: comboSize,
+        });
+        if (!rentRes.ok) {
+          recordSkip(cand.tokenMint, cand.pool.address, `combo_${classified.play}_bin_rent`, score, {
+            range: rentRes.range, rent: rentRes.meta,
           });
-          if (!apeRent.ok) {
-            recordSkip(cand.tokenMint, cand.pool.address, "combo_ape_bin_rent", score, {
-              range: apeRent.range, rent: apeRent.meta,
-            });
-            continue;
-          }
-          range = apeRent.range;
+          continue;
+        }
+        range = rentRes.range;
+        // Sizing priced ONE position account's rent; re-check with the real count.
+        const realAfford = checkAffordability(bankroll, comboSize, {
+          fee_reserve_sol: cc.fee_reserve_sol,
+          position_rent_est_sol: cc.position_rent_est_sol * range.positionAccounts,
+        });
+        if (!realAfford.ok) {
+          recordSkip(cand.tokenMint, cand.pool.address, "skip_affordability", score, {
+            play: classified.play, positionAccounts: range.positionAccounts, reason: realAfford.reason,
+          });
+          continue;
         }
 
         // Structured state per docs.typesafe.ai: descriptive field names with
@@ -2626,12 +2642,24 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             quote_only_fee: cand.pool.feesBothTokens === false,
             vol_per_min_usd: features.flowUsdPerMin,
             eys_vol_window: volWindow,
-            danko_dump_pct: features.dumpPct,
-            danko_flow_ratio: features.flowRatio,
+            // Dynamic volume bar (owner, 2026-10-03): which tier cleared, how it ranks in
+            // the market, and how fast volume is accelerating — Jev weighs these.
+            vol_tier: classified.volTier ?? volTierInfo?.tier ?? null,
+            vol_threshold_usd_per_min: classified.volThreshold ?? volTierInfo?.threshold ?? null,
+            vol_accel: features.volAccel ?? null,
+            dynamic_vol_floor_usd_per_min: volFloorInfo.floor,
+            market_percentile_usd_per_min: volFloorInfo.percentileValue,
+            market_percentile_samples: volFloorInfo.samples,
+            fee_per_musd_sol: feePerMusd(features.feesEarnedPoolSol, features.mcapUsd),
           },
-          candle_summary: features.dipBounce
-            ? { dip_pct: features.dipBounce.dipPct, bounce_pct: features.dipBounce.bouncePct }
-            : { dip_pct: null, bounce_pct: null },
+          candle_summary: {
+            spike_5m_pct: features.spike5mPct ?? null,
+            recent_range_pct: recentRange,
+            vol_peak_drop_pct: features.volPeakDropPct ?? null,
+            below_ath_pct: features.athBelowPct ?? null,
+            observed_min: features.observedMin ?? null,
+            open_plays_on_token: features.openPlaysOnToken ?? [],
+          },
           vet: {
             holder_top10_pct: vet.facts.top10Pct,
             single_holder_pct: vet.facts.singleHolderPct,
@@ -2676,6 +2704,9 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           fallbackVerdict: "yes",
           play: classified.play,
           qualifyingPlays,
+          // Soft-tier volume (between the dynamic floor and Eys's literal 100k/min) is
+          // offered to Jev with a STRICTER composite bar.
+          minComposite: classified.volTier === "soft" ? (cc.jev_eys_soft_bar ?? 0.65) : undefined,
           mint: cand.tokenMint,
           pool: cand.pool.address,
           question: `enter with play ${classified.play}?`,
@@ -2711,6 +2742,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           continue;
         }
         play = classified.play;
+        volThresholdOuter = classified.volThreshold ?? null;
         // Pool-share cap still binds the combo's own size (clamped above only
         // for the seed); skip if clamping would take it under combo's floor.
         if (comboSize > poolShareCapSol) {
@@ -2757,9 +2789,14 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         range,
         entryPrice,
         play: play ?? undefined,
-        side: play === "eys_ape" ? "token" : undefined,
-        source: play === "eys_ape" ? (apeSource ?? "meteora") : undefined,
+        side: play && isTokenSidedPlay(play) ? "token" : undefined,
+        source: play === "eys_ape" ? (apeSource ?? "meteora") : play === "eys_breakout" ? "breakout" : undefined,
       }));
+      // The per-minute volume threshold this entry cleared: eys_breakout later demands
+      // a multiple of the SEAT's (Eys: 100k -> 300k).
+      if (volThresholdOuter !== null) {
+        getDb().prepare("UPDATE positions SET vol_threshold = ? WHERE id = ?").run(volThresholdOuter, pos.id);
+      }
     } catch (e) {
       const err = e as Error & { code?: string; logs?: string[] };
       const msg = (err.message ?? String(e)).split("\n")[0]!.slice(0, 400);

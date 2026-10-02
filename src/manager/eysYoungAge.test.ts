@@ -4,9 +4,8 @@
  * before combo classification ever ran. A candidate aged in
  * [eys_age_min_minutes, age_min_minutes) is let through vetToken's age_min
  * gate (facts.ageEysOnly=true) ONLY to be considered for eys_seat/eys_ape —
- * anything else (molu_ladder, danko_trap, no play) still gets skipped with
- * the SAME "age_min" gate. Under eys_age_min_minutes is still an
- * unconditional hard fail.
+ * the hard-fail floor below eys_age_min_minutes is unchanged. Every play is an Eys play now
+ * (the molu/danko 45-minute floor exception no longer exists).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
@@ -20,6 +19,7 @@ vi.mock("../scanner/gmgn.js", () => ({
   trendingByMint: vi.fn(async () => new Map()),
   gmgnPerMinuteVolumeUsd: vi.fn(() => null),
 }));
+vi.mock("../strategy/combo/feeMode.js", () => ({ readOnchainCollectFeeMode: vi.fn(async () => 1) }));
 vi.mock("../scanner/stonkfun.js", () => ({ fetchStonkTokens: vi.fn(async () => []) }));
 vi.mock("../market.js", () => ({
   sol24hChangePct: vi.fn(async () => 0),
@@ -58,14 +58,6 @@ function eysCandidate(): Candidate {
     marketCapUsd: 200_000, tvlUsd: 200_000, feeTvl24hPct: 50, vol30mUsd: 3_500_000,
   });
   return { pool, tokenMint: pool.mintX, symbol: "YOUNG", score: 90, scoreParts: {}, gateFailures: [] };
-}
-
-function moluShapedCandidate(): Candidate {
-  const pool = makePool({
-    address: "Pool2222222222222222222222222222222222222",
-    marketCapUsd: 1_500_000, price: 0.77, vol30mUsd: 80_000,
-  });
-  return { pool, tokenMint: pool.mintX, symbol: "YOUNGMOLU", score: 90, scoreParts: {}, gateFailures: [] };
 }
 
 const skipped = () =>
@@ -114,20 +106,6 @@ describe("Eys-only young-age carve-out", () => {
     expect(exec.opens).toHaveLength(1);
     expect(exec.opens[0]!.play).toBe("eys_seat");
     expect(skipped()).not.toContain("age_min");
-  });
-
-  it("a 20-min-old candidate that fits molu_ladder's shape is skipped with age_min, not opened as molu", async () => {
-    vi.mocked(scan).mockResolvedValue({ candidates: [moluShapedCandidate()], rejected: [], sweptPools: 1 });
-    vi.mocked(vetToken).mockResolvedValue({
-      verdict: "pass", softScore: 50, hardFailures: [],
-      facts: { tokenAgeMinutes: 20, ageEysOnly: true },
-    } as any);
-    vi.mocked(fetchCandlesDeep).mockResolvedValue(MOLU_CANDLES);
-
-    await enterNewPositions(exec);
-
-    expect(exec.opens).toHaveLength(0);
-    expect(skipped()).toContain("age_min");
   });
 
   it("a 5-min-old candidate (under eys_age_min_minutes) is an unconditional age_min hard fail upstream — never reaches combo", async () => {

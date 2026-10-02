@@ -42,7 +42,7 @@ beforeEach(() => {
       enabled: true, model: "jev-1.13.0", timeout_ms: 500, max_concurrent: 4, max_consults_per_min: 100,
       redflag_veto: 0.6, play_prob_min: 0.3, uncertain_low: 0.45, uncertain_high: 0.55,
       weight_fresh_flow: 0.3, weight_fee_generation: 0.3, weight_bounce: 0.25, weight_narrative: 0.15,
-      entry_threshold_molu_ladder: 0.6, entry_threshold_danko_trap: 0.6, entry_threshold_eys_seat: 0.55, entry_threshold_eys_ape: 0.7,
+      entry_threshold_eys_seat: 0.55, entry_threshold_eys_tight: 0.55, entry_threshold_eys_breakout: 0.65, entry_threshold_eys_ape: 0.7, entry_threshold_eys_dump_bonus: 0.55,
     };
   });
 });
@@ -294,17 +294,17 @@ describe("jevConsult — uncertain-entry policy (owner's decision 2026-10-02: ag
     positive_fee_generation_sol: { type: "noul", noul: 0.5 },
     positive_bounce_confirmed: { type: "noul", noul: 0.5 },
     positive_narrative_strength: { type: "noul", noul: 0.5 },
-    // High probability for every SOL-side play so this fixture works
+    // High probability for every SOL-side Eys play so this fixture works
     // regardless of which rulePlay a given test asks about — only the
     // composite-score uncertainty is under test here, not play agreement.
-    play: { type: "choice", choice: "molu_ladder", probabilities: { molu_ladder: 0.9, danko_trap: 0.9, eys_seat: 0.9 }, confidence: 0.9 },
+    play: { type: "choice", choice: "eys_seat", probabilities: { eys_seat: 0.9, eys_tight: 0.9, eys_dump_bonus: 0.9 }, confidence: 0.9 },
   };
 
   it("defers to the play's own rules (enters) for a SOL-side play when uncertain_entry=rules (the default)", async () => {
     installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "rules" } as any; });
     vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
     vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: uncertainAnswers, usage: {} })));
-    const r = await jevConsult(enterInput({ play: "molu_ladder" }));
+    const r = await jevConsult(enterInput({ play: "eys_seat" }));
     expect(r.consulted).toBe(true);
     expect(r.fallback).toBe(false);
     expect(r.verdict).toBe("yes");
@@ -325,7 +325,7 @@ describe("jevConsult — uncertain-entry policy (owner's decision 2026-10-02: ag
     installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "skip" } as any; });
     vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
     vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: uncertainAnswers, usage: {} })));
-    const r = await jevConsult(enterInput({ play: "danko_trap" }));
+    const r = await jevConsult(enterInput({ play: "eys_tight" }));
     expect(r.verdict).toBe("no");
     expect(r.outcome).toBe("uncertain");
   });
@@ -335,7 +335,7 @@ describe("jevConsult — uncertain-entry policy (owner's decision 2026-10-02: ag
     vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
     const vetoAnswers = { ...uncertainAnswers, redflag_security: { type: "noul", noul: 0.9 } };
     vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: vetoAnswers, usage: {} })));
-    const r = await jevConsult(enterInput({ play: "molu_ladder" }));
+    const r = await jevConsult(enterInput({ play: "eys_seat" }));
     expect(r.verdict).toBe("no");
     expect(r.outcome).toBe("ok");
     expect(r.reason).toMatch(/redflag_veto/);

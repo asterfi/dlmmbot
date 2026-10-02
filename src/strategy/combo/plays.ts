@@ -1,213 +1,321 @@
 /**
- * Play classification — combo of Eys (fast), molu (core), and Danko (deep),
- * per the owner's decisions. Pure functions: given the metrics the scanner
- * already measures (STRATEGY.md §1-§2), decide which play (if any) a
- * candidate qualifies for. Reuses upstream's own field names/units
- * (PoolInfo, Candle, vetting facts) rather than inventing a parallel feature
- * set.
+ * Play classification — the combo is Eys-only (owner decision, 2026-10-03,
+ * re-read from Eys's "1 -> 100 SOL in 12 Days" and "0.1 -> 10 SOL ($CTO)"
+ * articles; molu_ladder and danko_trap were removed outright). Pure functions:
+ * given the metrics the scanner/candles already measure, decide which plays a
+ * candidate qualifies for, and pick one per config play_priority.
  *
- * Priority when more than one play's hard gates pass: danko_trap (strictest,
- * deepest, max 1 concurrent) > molu_ladder (core) > eys_seat (fast, widest
- * net). Checked in that order below.
+ * Plays (each recorded as positions.play):
+ *  - eys_seat       Spot, SOL-side, default range, FIRST entry on a qualifying token.
+ *  - eys_breakout   token-sided SECOND position on the same token while its
+ *                   seat is open: price broke above the seat's top, per-minute
+ *                   volume >= breakout_mult x the seat's entry threshold
+ *                   (Eys: 100k -> 300k) and a strong spike.
+ *  - eys_tight      Spot SOL-side tight range (10-20 bins): token watched >= 2
+ *                   min, no major dump, chart still chopping in a small range.
+ *  - eys_ape        token-sided fixed ticket into a SOL-fee (quote-only) pool.
+ *                   Classified in ape.ts and merged in by the entry pipeline.
+ *  - eys_dump_bonus wide Bid-Ask SOL-side (-85..-90%) once volume peaked/slows
+ *                   while price is still near its ATH.
  */
 import type { Candle } from "../../scanner/meteora.js";
-import { swing } from "../../ranges/planner.js";
 
-export type Play = "molu_ladder" | "eys_seat" | "danko_trap" | "eys_ape";
+export type Play = "eys_seat" | "eys_breakout" | "eys_tight" | "eys_ape" | "eys_dump_bonus";
 
-export interface DipBounce {
-  /** % the price fell from its local high within the lookback (positive number). */
-  dipPct: number;
-  /** % the price has bounced off its local low since (positive number). */
-  bouncePct: number;
+export const KNOWN_PLAYS: readonly Play[] = ["eys_seat", "eys_breakout", "eys_tight", "eys_ape", "eys_dump_bonus"];
+
+/**
+ * Historical rows may carry retired plays ('molu_ladder', 'danko_trap'); those
+ * are read-only labels. Anything that drives behaviour must go through this.
+ */
+export function isKnownPlay(p: unknown): p is Play {
+  return typeof p === "string" && (KNOWN_PLAYS as readonly string[]).includes(p);
+}
+
+/** Token-sided plays deposit the token above price (swap SOL -> token first). */
+export function isTokenSidedPlay(p: Play): boolean {
+  return p === "eys_ape" || p === "eys_breakout";
+}
+
+/** Owner's slot priority: breakout (for an open seat) > seat > tight > ape > dump bonus. */
+export const DEFAULT_PLAY_PRIORITY: Play[] = ["eys_breakout", "eys_seat", "eys_tight", "eys_ape", "eys_dump_bonus"];
+
+export type VolTier = "hard" | "soft";
+
+// ------------------------------------------------------------------ candle helpers (pure)
+
+/** Last 5m candle's % change (close vs open) — the "strong upward spike" read. null without candles. */
+export function lastCandleSpikePct(candles: Candle[]): number | null {
+  const c = candles[candles.length - 1];
+  if (!c || !(c.open > 0)) return null;
+  return ((c.close - c.open) / c.open) * 100;
+}
+
+/** True when any of the last `n` candles fell >= pctDrop% (close vs open) — a "major dump". */
+export function hasMajorDump(candles: Candle[], n: number, pctDrop: number): boolean {
+  return candles.slice(-n).some((c) => c.open > 0 && ((c.close - c.open) / c.open) * 100 <= -pctDrop);
+}
+
+/** High-to-low range of the last `n` candles in % of the low — "chopping in a small range". null if unknowable. */
+export function recentRangePct(candles: Candle[], n: number): number | null {
+  const w = candles.slice(-n);
+  if (w.length === 0) return null;
+  const hi = Math.max(...w.map((c) => c.high));
+  const lo = Math.min(...w.map((c) => c.low));
+  return lo > 0 ? ((hi - lo) / lo) * 100 : null;
 }
 
 /**
- * dip = price fell >= dipMinPct off the local high, then bounce = price has
- * recovered >= bounceMinPct off the resulting low. Reuses planner.swing()
- * (upstream's own 5m-candle high/low reader) rather than a new indicator.
+ * Volume peak vs now over the last `n` candles: how far the freshest candle's
+ * volume sits below the window's peak (%). null with too few candles.
  */
-export function detectDipBounce(candles: Candle[], currentPrice: number): DipBounce | null {
-  const sw = swing(candles);
-  if (!sw || sw.high <= 0 || sw.low <= 0 || sw.high <= sw.low) return null;
-  const dipPct = ((sw.high - sw.low) / sw.high) * 100;
-  const bouncePct = ((currentPrice - sw.low) / sw.low) * 100;
-  if (dipPct <= 0 || bouncePct <= 0) return null;
-  return { dipPct, bouncePct };
+export function volumePeakDropPct(candles: Candle[], n: number): number | null {
+  const w = candles.slice(-n);
+  if (w.length < 3) return null;
+  const peak = Math.max(...w.map((c) => c.volume));
+  if (!(peak > 0)) return null;
+  return (1 - w[w.length - 1]!.volume / peak) * 100;
+}
+
+/** How far `price` sits below the highest high of the last `n` candles (%). null without candles. */
+export function belowAthPct(candles: Candle[], n: number, price: number): number | null {
+  const w = candles.slice(-n);
+  if (w.length === 0 || !(price > 0)) return null;
+  const ath = Math.max(...w.map((c) => c.high));
+  return ath > 0 ? Math.max(0, ((ath - price) / ath) * 100) : null;
+}
+
+// ------------------------------------------------------------------ dynamic volume bar
+
+export interface DynamicVolFloor {
+  /** Soft-tier floor in USD/min, or null when the soft tier is off (too few samples / floor >= hard tier). */
+  floor: number | null;
+  /** The market percentile value itself (null with too few samples). */
+  percentileValue: number | null;
+  samples: number;
 }
 
 /**
- * Danko's "a token that still has buyers and volume after a dump" selection
- * (owner's strategy-fidelity fix, 2026-10-02, re-read from his Part 3 post):
- * how far CURRENT price sits below its recent high — not dip-to-low like
- * detectDipBounce (which measures the drawdown's full extent, not where price
- * is now). A fresh dump with price still near the bottom should qualify even
- * before any bounce has started; detectDipBounce's bouncePct>0 requirement
- * would wrongly reject that.
+ * Owner's "sweet spot... make it dynamic": soft floor = max(static floor, the
+ * `percentile` of per-minute volume among current GMGN 5m trending tokens with
+ * mcap >= $100k). Soft tier is OFF when the market read is blind (fewer than
+ * `minSamples` tokens) or the resulting floor is not below the hard tier.
  */
-export function detectDump(candles: Candle[], currentPrice: number): { dumpPct: number } | null {
-  const sw = swing(candles);
-  if (!sw || sw.high <= 0 || currentPrice <= 0) return null;
-  const dumpPct = ((sw.high - currentPrice) / sw.high) * 100;
-  if (dumpPct <= 0) return null;
-  return { dumpPct };
+export function dynamicVolFloor(
+  perMinVols: number[],
+  opts: { staticFloor: number; hard: number; percentile?: number; minSamples?: number },
+): DynamicVolFloor {
+  const p = opts.percentile ?? 0.8;
+  const minSamples = opts.minSamples ?? 5;
+  const v = perMinVols.filter((x) => Number.isFinite(x) && x >= 0).sort((a, b) => a - b);
+  if (v.length < minSamples) return { floor: null, percentileValue: null, samples: v.length };
+  const pos = (v.length - 1) * p;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  const pv = v[lo]! + (v[hi]! - v[lo]!) * (pos - lo);
+  const floor = Math.max(opts.staticFloor, pv);
+  return { floor: floor < opts.hard ? floor : null, percentileValue: pv, samples: v.length };
+}
+
+// ------------------------------------------------------------------ features / config
+
+export interface SeatContext {
+  /** Price just above the seat's top bin (one bin above its entry price). */
+  topPrice: number;
+  /** The per-minute volume threshold the seat entered under (hard tier, or the soft floor at the time). */
+  volThreshold: number;
 }
 
 export interface PlayCandidateFeatures {
   mcapUsd: number;
-  /** Mint age in minutes; null = unknown (treated conservatively, see each play). */
+  /** Mint age in minutes; null = unknown. */
   tokenAgeMinutes: number | null;
   tvlUsd: number;
   vol30mUsd: number;
   vol1hUsd: number;
   feeTvl24hPct: number;
-  /**
-   * Fees the pool has earned, lifetime, in SOL. Computed in manager/loop.ts
-   * from tvlUsd * feeTvl24hPct/100 (24h fee run-rate) scaled by the pool's
-   * observed age in days and converted at the live SOL/USD price, clamped to
-   * the pool's actual age when younger than 24h; null = unknown, which fails
-   * eys_seat's fee-floor closed rather than guessing.
-   */
+  /** Lifetime fees the pool has earned, in SOL (approximation, see loop.ts); null = unknown, fails closed. */
   feesEarnedPoolSol: number | null;
   /** True only when the dev's fee share is known to be exactly zero. */
   devFeesKnownZero: boolean;
-  /**
-   * Flow strength in USD/min — the strongest available volume-rate signal
-   * (GMGN smart-flow when present, else vol30mUsd/30 as the scanner's own
-   * proxy). Compared against the configured `eys_flow_usd_per_min_min`
-   * (owner's Eys threshold, default 100k USD/min) — see config.toml [combo]
-   * for the documented mapping.
-   */
+  /** Freshest per-minute volume in USD (GMGN 1m/5m, else the freshest datapi 5m candle, else the 30m average). */
   flowUsdPerMin: number;
-  dipBounce: DipBounce | null;
-  /** Can a one-sided SOL bid-ask actually be built within the bin/rent caps? */
+  /** flowUsdPerMin over the pool's trailing per-minute average (4h, else 1h). null = unknown. */
+  volAccel?: number | null;
+  /** Current dynamic soft floor (null = soft tier off). */
+  dynamicVolFloor?: number | null;
+  /** Can a one-sided bid-ask/spot range actually be built within the bin/rent caps? */
   oneSidedFeasible: boolean;
-  /**
-   * Danko's selection rules (owner, 2026-10-02, re-read from his Part 3 post):
-   * how far price sits below its recent high right now (see detectDump) —
-   * null = unknown (candles unavailable), fails closed.
-   */
-  dumpPct: number | null;
-  /**
-   * "Volume relative to active liquidity" (Danko's own words) — freshest
-   * available volume window (GMGN 1m/5m, else the vol30m proxy) divided by
-   * the active-range liquidity USD, or pool TVL when bin-level liquidity
-   * isn't available. null = unknown, fails closed.
-   */
-  flowRatio: number | null;
-  /**
-   * "A token that still has buyers... after a dump" — whether price has
-   * started recovering off its post-dump low at all (dipBounce != null,
-   * since detectDipBounce only returns non-null once bouncePct > 0).
-   */
-  buyersPresent: boolean;
+  /** Plays already OPEN on this token (any play). */
+  openPlaysOnToken?: Play[];
+  /** The token's open eys_seat, if any (eys_breakout needs it). */
+  seat?: SeatContext | null;
+  /** Current price (entry price) for the breakout trigger. */
+  price?: number;
+  /** Last 5m candle % change. */
+  spike5mPct?: number | null;
+  /** Minutes our own DB has been seeing this token (eys_tight). */
+  observedMin?: number | null;
+  /** No 5m candle <= -eys_tight_dump_pct inside the observation window. */
+  noMajorDump?: boolean;
+  /** Last candles chopping inside eys_tight_range_max_pct. */
+  choppy?: boolean;
+  /** eys_dump_bonus: how far the freshest candle's volume is below its window peak (%). */
+  volPeakDropPct?: number | null;
+  /** eys_dump_bonus: how far price sits below the window's ATH (%). */
+  athBelowPct?: number | null;
 }
 
 export interface ComboConfigLike {
-  molu_mcap_min_usd: number;
-  molu_age_max_h: number;
-  molu_dip_min_pct: number;
-  molu_bounce_min_pct: number;
   eys_mcap_min_usd: number;
   eys_fees_earned_min_sol: number;
+  /** Literal "ape immediately" tier (Eys: 100k/min). */
   eys_flow_usd_per_min_min: number;
-  eys_reject_mcap_lo_usd: number;
-  eys_reject_mcap_hi_usd: number;
-  danko_mcap_min_usd: number;
-  danko_age_min_h: number;
-  /** Price must sit at least this far below its recent high right now (see detectDump). */
-  danko_dump_min_pct: number;
-  /** Minimum flow_ratio (freshest volume / active liquidity) — "volume relative to active liquidity", Danko's own discovery rule. */
-  danko_flow_ratio_min: number;
-  /** Within-candidate resolution order (owner, 2026-10-03): when a candidate fits several plays the first one in this list wins. */
+  eys_vol_hard_usd_per_min?: number;
+  eys_vol_accel_min?: number;
+  /** Fake-volume rule: lifetime fees (SOL) per $1M of mcap must reach this. */
+  eys_fee_per_musd_min?: number;
+  eys_breakout_mult?: number;
+  eys_breakout_spike_pct?: number;
+  eys_tight_observe_min?: number;
+  eys_dump_peak_drop_pct?: number;
+  eys_dump_ath_within_pct?: number;
   play_priority?: Play[];
 }
-
-/** Owner's order: Eys is the most profitable, Danko the most patient/last. */
-export const DEFAULT_PLAY_PRIORITY: Play[] = ["eys_seat", "eys_ape", "molu_ladder", "danko_trap"];
 
 export interface PlayClassification {
   play: Play;
   reasons: string[];
+  /** SOL-side entry tier the volume qualified under (eys_seat / eys_tight). */
+  volTier?: VolTier;
+  /** The per-minute threshold the candidate cleared (stored so a later breakout can demand 3x it). */
+  volThreshold?: number;
 }
 
-function classifyDanko(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
-  if (!(f.mcapUsd >= c.danko_mcap_min_usd)) return null;
-  if (f.tokenAgeMinutes === null || f.tokenAgeMinutes < c.danko_age_min_h * 60) return null; // unknown age fails closed
-  if (!f.oneSidedFeasible) return null;
-  // Danko's own selection rules (Part 3, re-read 2026-10-02): a recent dump,
-  // live flow relative to active liquidity (not raw volume), and buyers still
-  // present. All three fail CLOSED on unknown data — a token we cannot verify
-  // is still trading after its dump is not Danko's setup, it's a dead pool.
-  if (f.dumpPct === null || f.dumpPct < c.danko_dump_min_pct) return null;
-  if (f.flowRatio === null || f.flowRatio < c.danko_flow_ratio_min) return null;
-  if (!f.buyersPresent) return null;
-  return {
-    play: "danko_trap",
-    reasons: [
-      `mcap $${f.mcapUsd.toFixed(0)} >= $${c.danko_mcap_min_usd}`,
-      `age ${(f.tokenAgeMinutes / 60).toFixed(1)}h >= ${c.danko_age_min_h}h (proven floor)`,
-      `dump ${f.dumpPct.toFixed(1)}% >= ${c.danko_dump_min_pct}% below recent high`,
-      `flow_ratio ${f.flowRatio.toFixed(3)} >= ${c.danko_flow_ratio_min} (volume/active-liquidity)`,
-      "buyers still present (bouncing off the post-dump low)",
-    ],
-  };
+const hardTier = (c: ComboConfigLike) => c.eys_vol_hard_usd_per_min ?? c.eys_flow_usd_per_min_min;
+
+/** Fees (SOL) per $1M of mcap — null when mcap or fees are unknown. */
+export function feePerMusd(feesEarnedPoolSol: number | null, mcapUsd: number): number | null {
+  if (feesEarnedPoolSol === null || !(mcapUsd > 0)) return null;
+  return feesEarnedPoolSol / (mcapUsd / 1_000_000);
 }
 
-function classifyMolu(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
-  if (!(f.mcapUsd >= c.molu_mcap_min_usd)) return null;
-  // Age < 48h is the molu window; unknown age is treated as young (passes this
-  // gate) since the risk here is entering on the initial vertical, which the
-  // dip+bounce requirement below already guards against independent of age.
-  if (f.tokenAgeMinutes !== null && f.tokenAgeMinutes >= c.molu_age_max_h * 60) return null;
-  if (!f.dipBounce) return null; // never enter on the initial vertical
-  if (f.dipBounce.dipPct < c.molu_dip_min_pct) return null;
-  if (f.dipBounce.bouncePct < c.molu_bounce_min_pct) return null;
-  if (!f.oneSidedFeasible) return null;
-  return {
-    play: "molu_ladder",
-    reasons: [
-      `mcap $${f.mcapUsd.toFixed(0)} >= $${c.molu_mcap_min_usd}`,
-      `dip ${f.dipBounce.dipPct.toFixed(1)}% >= ${c.molu_dip_min_pct}%`,
-      `bounce ${f.dipBounce.bouncePct.toFixed(1)}% >= ${c.molu_bounce_min_pct}%`,
-    ],
-  };
-}
-
-function classifyEys(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
-  if (!(f.mcapUsd >= c.eys_mcap_min_usd)) return null;
-  const feesKnown = f.feesEarnedPoolSol !== null;
-  if (!feesKnown) return null; // fail closed: can't verify the fee floor
-  if (f.feesEarnedPoolSol! < c.eys_fees_earned_min_sol) return null;
-  if (f.flowUsdPerMin < c.eys_flow_usd_per_min_min) return null;
-  // Reject the fake-volume band: 500k-1M mcap with less than the fee floor in
-  // earned fees. feesEarnedPoolSol already cleared the floor above, so this
-  // only ever rejects a candidate inside the band whose fees are STILL below
-  // floor via a different unit basis — kept as an explicit, auditable check
-  // rather than relying on the floor check alone to carry the intent.
-  if (f.mcapUsd >= c.eys_reject_mcap_lo_usd && f.mcapUsd < c.eys_reject_mcap_hi_usd
-    && f.feesEarnedPoolSol! < c.eys_fees_earned_min_sol) {
-    return null;
+/** Per-minute volume tier: hard (>= literal bar), soft (>= dynamic floor AND accelerating), else null. */
+export function eysVolTier(
+  f: PlayCandidateFeatures, c: ComboConfigLike,
+): { tier: VolTier; threshold: number } | null {
+  const hard = hardTier(c);
+  if (f.flowUsdPerMin >= hard) return { tier: "hard", threshold: hard };
+  const floor = f.dynamicVolFloor;
+  if (floor != null && floor < hard && f.flowUsdPerMin >= floor && (f.volAccel ?? 0) >= (c.eys_vol_accel_min ?? 2)) {
+    return { tier: "soft", threshold: floor };
   }
+  return null;
+}
+
+/** Eys's hard gates shared by every SOL-side entry: mcap, fees earned, and the fake-volume ratio. */
+function eysBaseOk(f: PlayCandidateFeatures, c: ComboConfigLike): string[] | null {
+  if (!(f.mcapUsd >= c.eys_mcap_min_usd)) return null;
+  if (f.feesEarnedPoolSol === null) return null; // fail closed: can't verify the fee floor
+  if (f.feesEarnedPoolSol < c.eys_fees_earned_min_sol) return null;
+  const ratio = feePerMusd(f.feesEarnedPoolSol, f.mcapUsd);
+  // "500K-1M MCAP but only around 8-10 SOL in fees... red flag" -> fees per $1M of
+  // mcap must clear the ratio implied by that flag (config eys_fee_per_musd_min).
+  if (c.eys_fee_per_musd_min !== undefined && (ratio === null || ratio < c.eys_fee_per_musd_min)) return null;
+  return [
+    `mcap $${f.mcapUsd.toFixed(0)} >= $${c.eys_mcap_min_usd}`,
+    `fees earned ${f.feesEarnedPoolSol.toFixed(2)} SOL >= ${c.eys_fees_earned_min_sol} SOL`,
+    ...(ratio !== null ? [`fees ${ratio.toFixed(1)} SOL per $1M mcap`] : []),
+  ];
+}
+
+function classifySeat(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
+  if (f.openPlaysOnToken?.includes("eys_seat")) return null; // one seat per token
+  const base = eysBaseOk(f, c);
+  if (!base) return null;
+  const tier = eysVolTier(f, c);
+  if (!tier) return null;
   return {
     play: "eys_seat",
+    volTier: tier.tier,
+    volThreshold: tier.threshold,
     reasons: [
-      `mcap $${f.mcapUsd.toFixed(0)} >= $${c.eys_mcap_min_usd}`,
-      `fees earned ${f.feesEarnedPoolSol!.toFixed(2)} SOL >= ${c.eys_fees_earned_min_sol} SOL`,
-      `flow $${f.flowUsdPerMin.toFixed(0)}/min >= $${c.eys_flow_usd_per_min_min}/min`,
+      ...base,
+      `flow $${f.flowUsdPerMin.toFixed(0)}/min >= $${tier.threshold.toFixed(0)}/min (${tier.tier} tier)`,
       f.devFeesKnownZero ? "dev fees known zero" : "dev fees unknown (not a blocking gate)",
     ],
   };
 }
 
+function classifyTight(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
+  if (f.openPlaysOnToken?.includes("eys_tight")) return null;
+  if (!f.oneSidedFeasible) return null;
+  const base = eysBaseOk(f, c);
+  if (!base) return null;
+  const tier = eysVolTier(f, c);
+  if (!tier) return null;
+  const minObserved = c.eys_tight_observe_min ?? 2;
+  if (f.observedMin == null || f.observedMin < minObserved) return null;
+  if (!f.noMajorDump || !f.choppy) return null;
+  return {
+    play: "eys_tight",
+    volTier: tier.tier,
+    volThreshold: tier.threshold,
+    reasons: [
+      ...base,
+      `flow $${f.flowUsdPerMin.toFixed(0)}/min >= $${tier.threshold.toFixed(0)}/min (${tier.tier} tier)`,
+      `watched ${f.observedMin.toFixed(1)}m >= ${minObserved}m, no major dump, chopping in a small range`,
+    ],
+  };
+}
+
+function classifyBreakout(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
+  const seat = f.seat;
+  if (!seat) return null; // only ever a SECOND position on a token whose seat is open
+  if (f.openPlaysOnToken?.includes("eys_breakout")) return null;
+  if (!f.oneSidedFeasible) return null;
+  if (f.price == null || !(f.price > seat.topPrice)) return null;
+  const threshold = (c.eys_breakout_mult ?? 3) * seat.volThreshold;
+  if (f.flowUsdPerMin < threshold) return null; // "If the volume isn't above 300K per minute, I won't use the token-sided strategy"
+  const spikeMin = c.eys_breakout_spike_pct ?? 10;
+  if (f.spike5mPct == null || f.spike5mPct < spikeMin) return null;
+  return {
+    play: "eys_breakout",
+    volThreshold: threshold,
+    reasons: [
+      `price broke above the seat's top (${seat.topPrice.toPrecision(4)})`,
+      `flow $${f.flowUsdPerMin.toFixed(0)}/min >= $${threshold.toFixed(0)}/min (${c.eys_breakout_mult ?? 3}x the seat's ${seat.volThreshold.toFixed(0)})`,
+      `strong spike: last 5m candle +${f.spike5mPct.toFixed(1)}% >= ${spikeMin}%`,
+    ],
+  };
+}
+
+function classifyDumpBonus(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
+  const open = f.openPlaysOnToken ?? [];
+  if (open.length === 0) return null; // a bonus ON an eys position's token
+  if (open.includes("eys_dump_bonus")) return null;
+  if (!f.oneSidedFeasible) return null;
+  const drop = c.eys_dump_peak_drop_pct ?? 50;
+  const within = c.eys_dump_ath_within_pct ?? 20;
+  if (f.volPeakDropPct == null || f.volPeakDropPct < drop) return null;
+  if (f.athBelowPct == null || f.athBelowPct > within) return null;
+  return {
+    play: "eys_dump_bonus",
+    reasons: [
+      `volume ${f.volPeakDropPct.toFixed(0)}% below its recent peak (>= ${drop}%)`,
+      `price within ${f.athBelowPct.toFixed(0)}% of the window ATH (<= ${within}%)`,
+      "bonus play: wide Bid-Ask SOL-side near the top",
+    ],
+  };
+}
+
 /**
- * Every SOL-side play this candidate qualifies for (eys_ape is token-sided
- * and classified separately in ape.ts; the entry pipeline merges it in).
- * Evaluating ALL of them, instead of stopping at the first in a fixed rule
- * order, is what lets config play_priority decide.
+ * Every SOL-side or stateful Eys play this candidate qualifies for (eys_ape is
+ * classified separately in ape.ts and merged in by the entry pipeline).
  */
 export function classifyAllPlays(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification[] {
-  return [classifyDanko(f, c), classifyMolu(f, c), classifyEys(f, c)].filter((x): x is PlayClassification => x !== null);
+  return [classifySeat(f, c), classifyTight(f, c), classifyBreakout(f, c), classifyDumpBonus(f, c)]
+    .filter((x): x is PlayClassification => x !== null);
 }
 
 /** Highest-priority entry of `qualifying` per `priority` (plays missing from the list rank last). */
@@ -217,7 +325,7 @@ export function pickByPriority<T extends { play: Play }>(qualifying: T[], priori
   return [...qualifying].sort((a, b) => rank(a.play) - rank(b.play))[0]!;
 }
 
-/** Classify a candidate into its highest-priority qualifying SOL-side play, or null if it fits none. */
+/** Classify a candidate into its highest-priority qualifying play, or null if it fits none. */
 export function classifyPlay(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
   return pickByPriority(classifyAllPlays(f, c), c.play_priority);
 }

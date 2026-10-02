@@ -45,21 +45,21 @@ describe("combo flowDead exit needs 3 continuous minutes", () => {
   });
   afterEach(() => { vi.useRealTimers(); resetTestDb(); restoreConfig(); vi.clearAllMocks(); });
 
-  function openMolu() {
+  function openSeat() {
     const id = insertOpenPosition({ entrySol: 0.1, entryTs: Math.floor(T0.getTime() / 1000) - 600 });
-    getDb().prepare("UPDATE positions SET play='molu_ladder', ever_filled=1 WHERE id=?").run(id);
+    getDb().prepare("UPDATE positions SET play='eys_seat', ever_filled=1 WHERE id=?").run(id);
     return id;
   }
 
   it("a single low-volume tick does NOT close (pos#7's exact failure)", async () => {
-    const id = openMolu();
+    const id = openSeat();
     exec.setMark(id, lowFlow);
     await managePositions(exec);
     expect(exec.closed).toHaveLength(0);
   });
 
   it("closes once the low-volume condition has held for 3 minutes", async () => {
-    const id = openMolu();
+    const id = openSeat();
     exec.setMark(id, lowFlow);
     await managePositions(exec);
     vi.setSystemTime(new Date(T0.getTime() + 2 * 60_000));
@@ -71,7 +71,7 @@ describe("combo flowDead exit needs 3 continuous minutes", () => {
   });
 
   it("a recovery tick resets the timer: 2 min low, 1 min ok, 2 min low does not close", async () => {
-    const id = openMolu();
+    const id = openSeat();
     exec.setMark(id, lowFlow);
     await managePositions(exec);
     vi.setSystemTime(new Date(T0.getTime() + 2 * 60_000));

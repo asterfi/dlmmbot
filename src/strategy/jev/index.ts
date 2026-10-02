@@ -55,6 +55,13 @@ export interface JevConsultInput {
   fallbackVerdict: JevVerdict;
   /** Entry lane: the rule-classified play (policy checks Jev's own `play` choice against this). Exit lane: the position's play, for logging only. */
   play: Play | string;
+  /**
+   * Entry lane: soft-tier volume bar (owner, 2026-10-03). A candidate that only
+   * cleared the DYNAMIC soft volume floor (not Eys's literal 100k/min) must
+   * score at least this composite — the play's own threshold is raised to it,
+   * never lowered.
+   */
+  minComposite?: number;
   /** Entry lane: every play the candidate qualifies for (owner, 2026-10-03). Jev's `play` choice question lists only these plus "none". */
   qualifyingPlays?: string[];
   positionId?: number | null;
@@ -117,10 +124,11 @@ function noul(answers: Record<string, unknown>, id: string): number {
 function entryPolicyConfig(): JevEntryPolicyConfig {
   const j = config().jev ?? ({} as NonNullable<Config["jev"]>);
   const thresholds = {
-    molu_ladder: j.entry_threshold_molu_ladder ?? 0.6,
-    danko_trap: j.entry_threshold_danko_trap ?? 0.6,
     eys_seat: j.entry_threshold_eys_seat ?? 0.55,
+    eys_tight: j.entry_threshold_eys_tight ?? j.entry_threshold_eys_seat ?? 0.55,
+    eys_breakout: j.entry_threshold_eys_breakout ?? 0.65, // token-sided second leg
     eys_ape: j.entry_threshold_eys_ape ?? 0.7, // stricter — riskiest (token-sided)
+    eys_dump_bonus: j.entry_threshold_eys_dump_bonus ?? j.entry_threshold_eys_seat ?? 0.55,
   };
   return {
     redflag_veto: j.redflag_veto ?? 0.6,
@@ -221,7 +229,12 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
         playProbabilities: playAns?.probabilities ?? {},
         playConfidence: playAns?.confidence ?? 0,
       };
-      const outcome = evaluateEntryPolicy(input.play as Play, answers, entryPolicyConfig());
+      const policyCfg = entryPolicyConfig();
+      if (input.minComposite !== undefined) {
+        const p = input.play as Play;
+        policyCfg.thresholds = { ...policyCfg.thresholds, [p]: Math.max(policyCfg.thresholds[p] ?? 0, input.minComposite) };
+      }
+      const outcome = evaluateEntryPolicy(input.play as Play, answers, policyCfg);
       let result: JevConsultResult;
       if (outcome.decision === "approve") {
         result = { consulted: true, verdict: "yes", fallback: false, outcome: "ok", latencyMs: res.latencyMs, slow, raw,
@@ -233,7 +246,7 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
         // composite defers to the play's own rules (enter) rather than
         // skipping; eys_ape (token-sided, no stop-loss) keeps the
         // conservative skip. Config-driven, per-play overridable.
-        const mode = input.play === "eys_ape"
+        const mode = input.play === "eys_ape" || input.play === "eys_breakout"
           ? (j.ape_uncertain_entry ?? "skip")
           : (j.uncertain_entry ?? "rules");
         if (mode === "rules") {

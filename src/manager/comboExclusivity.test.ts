@@ -40,11 +40,10 @@ import type { Candidate } from "../types.js";
 import { resetFollowStateForTests, hasActiveFollowChain } from "./follow.js";
 
 // Clears none of upstream's own gates (mcap 250k, vol30m 80k are the test
-// pool's defaults, same as entryScore.test.ts) but fits NONE of the four
-// combo plays: mcap is below molu_ladder/danko_trap's $1M floor, and
-// eys_seat's flow floor (vol30mUsd/30 >= $100k/min => vol30mUsd >= $3M) is
-// nowhere close at the default 80k. eys_ape never matches (stonkfun mocked
-// to an empty list).
+// pool's defaults, same as entryScore.test.ts) but fits NONE of the Eys
+// plays: eys_seat's per-minute volume bar (>= $100k/min) is nowhere close at
+// the default 80k vol30m, and the fee floor is not met either. No play is open
+// on the token, so breakout/dump-bonus cannot apply.
 function unclassifiableCandidate(): Candidate {
   const pool = makePool({ address: "ComboPool1111111111111111111111111111111" });
   return { pool, tokenMint: pool.mintX, symbol: "NOFIT", score: 90, scoreParts: {}, gateFailures: [] };

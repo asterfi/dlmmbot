@@ -16,7 +16,7 @@ export function poolGates(p: PoolInfo & { extras: RawPoolExtras }): GateFailure[
 
   // Stablecoins/majors/wrapped assets (2026-10-02): the USDC-SOL pool cleared
   // every gate below (mcap, tvl, fee/vol, quote_mint=SOL) and scored as a real
-  // candidate — combo's danko_trap happily classified it ("mcap >= $1M AND
+  // candidate — the combo happily classified it ("mcap >= $1M AND
   // age >= 48h"). Checked FIRST, before anything else, since nothing past
   // this point is meaningful for a pair that isn't a launch/memecoin at all.
   // Seeded list verified against Jupiter's live token API (tags include

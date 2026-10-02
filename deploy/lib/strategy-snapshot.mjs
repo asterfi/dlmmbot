@@ -16,7 +16,7 @@ import { parseConfig } from "./config-edit.mjs";
 import { REALIZED_PNL } from "./live-book-snapshot.mjs";
 import { resolveBotMode } from "./bot-mode.mjs";
 
-const PLAYS = ["molu_ladder", "danko_trap", "eys_seat", "eys_ape"];
+const PLAYS = ["eys_seat", "eys_breakout", "eys_tight", "eys_ape", "eys_dump_bonus"];
 
 function openDb(root) {
   const require = createRequire(resolve(root, "package.json"));

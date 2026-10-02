@@ -409,7 +409,7 @@ CREATE INDEX IF NOT EXISTS idx_error_log_ts ON error_log(ts DESC);
     database.exec("CREATE INDEX IF NOT EXISTS idx_error_log_active ON error_log(dismissed, ts DESC)");
   } catch { /* */ }
 
-  // Combo strategy (Eys + molu + Danko, Jev master gate): the play a position
+  // Combo strategy (Eys-only, Jev master gate): the play a position
   // was classified into, recorded at entry so it is visible in the DB and in
   // every log line that reads the position (2026-10-01).
   try {
@@ -418,6 +418,12 @@ CREATE INDEX IF NOT EXISTS idx_error_log_ts ON error_log(ts DESC);
   try {
     database.exec("CREATE INDEX IF NOT EXISTS idx_positions_play ON positions(play)");
   } catch { /* */ }
+  // Eys per-minute volume threshold (USD/min) a position's entry cleared: the
+  // hard tier, or the dynamic soft floor at the time. eys_breakout demands a
+  // multiple of the SEAT's value, so it must outlive the entry sweep.
+  try {
+    database.exec("ALTER TABLE positions ADD COLUMN vol_threshold REAL");
+  } catch { /* column already exists */ }
   // eys_ape discovery source (2026-10-02 widening): "stonks" | "meteora", so
   // the two sources can be compared against real P&L once there's a sample.
   try {
@@ -604,6 +610,52 @@ const EXIT_COOLDOWN_PREFIXES = ["P0 safety exit", "stop loss cooldown", "below r
 /** True when a blacklist reason came from an exit rather than from vetting. */
 export function isExitCooldown(reason: string): boolean {
   return EXIT_COOLDOWN_PREFIXES.some((p) => reason.startsWith(p));
+}
+
+/**
+ * datapi staleness (owner, 2026-10-03). Meteora's datapi documents no freshness
+ * guarantee and its pool payload carries no timestamp, so freshness is judged
+ * from OUR OWN pool_snapshots (one row per swept pool per sweep, shared sweep ts):
+ *  - the newest snapshot of the pool is older than `maxAgeS` -> stale; or
+ *  - the pool's last `polls` snapshots are identical in every volume/fee/tvl/price
+ *    field while the rest of the market moved (>= 20% of the other pools changed
+ *    vol_30m across the same sweeps) -> its feed is frozen, not quiet.
+ * Fewer than `polls` snapshots, or an idle market, is "not stale" (can't tell).
+ */
+export function poolDataStale(
+  pool: string,
+  opts: { maxAgeS?: number; polls?: number; nowTs?: number } = {},
+): { stale: boolean; reason?: string } {
+  const maxAgeS = opts.maxAgeS ?? 120;
+  const polls = opts.polls ?? 3;
+  const nowTs = opts.nowTs ?? now();
+  const db = getDb();
+  const rows = db.prepare(
+    "SELECT ts, tvl_usd, price, vol_30m, vol_1h, vol_24h, fee_tvl_30m, fee_tvl_24h FROM pool_snapshots WHERE pool = ? ORDER BY ts DESC LIMIT ?"
+  ).all(pool, polls) as Array<{ ts: number; tvl_usd: number; price: number; vol_30m: number; vol_1h: number; vol_24h: number; fee_tvl_30m: number; fee_tvl_24h: number }>;
+  if (rows.length === 0) return { stale: false };
+  const newest = rows[0]!;
+  if (nowTs - newest.ts > maxAgeS) {
+    return { stale: true, reason: `newest datapi reading is ${nowTs - newest.ts}s old (> ${maxAgeS}s)` };
+  }
+  if (rows.length < polls) return { stale: false };
+  const same = rows.every((r) =>
+    r.tvl_usd === newest.tvl_usd && r.price === newest.price && r.vol_30m === newest.vol_30m &&
+    r.vol_1h === newest.vol_1h && r.vol_24h === newest.vol_24h &&
+    r.fee_tvl_30m === newest.fee_tvl_30m && r.fee_tvl_24h === newest.fee_tvl_24h);
+  if (!same) return { stale: false };
+  const oldest = rows[rows.length - 1]!;
+  const others = db.prepare(
+    `SELECT a.vol_30m AS now_v, b.vol_30m AS then_v
+       FROM pool_snapshots a JOIN pool_snapshots b ON a.pool = b.pool
+      WHERE a.ts = ? AND b.ts = ? AND a.pool != ?`
+  ).all(newest.ts, oldest.ts, pool) as Array<{ now_v: number; then_v: number }>;
+  if (others.length < 5) return { stale: false };
+  const moved = others.filter((o) => o.now_v !== o.then_v).length;
+  if (moved / others.length >= 0.2) {
+    return { stale: true, reason: `volume/fee fields identical across ${polls} polls while ${moved}/${others.length} other pools moved` };
+  }
+  return { stale: false };
 }
 
 export function isBlacklisted(key: string): string | null {

@@ -1,29 +1,28 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import {
-  comboPositionSize, sizeComboPlay, checkAffordability, eysCostSkip,
+  comboPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, totalOpen,
   type ComboOpenCounts, type ComboSizingConfig, type CanarySizingConfig, type EysCostConfig,
 } from "./sizing.js";
 import type { Bankroll } from "../../risk/limits.js";
-
-// minPositionSol reads config() (risk/limits.ts) — install a config so the
-// equity-scaled floor behaves predictably across the test matrix.
 import { installConfig, restoreConfig } from "../../test/config.js";
 
 const CFG: ComboSizingConfig = {
   active_budget_pct: 30,
-  molu_share_pct: 100 / 3,
   eys_share_pct: 100 / 3,
-  danko_share_pct: 100 / 3,
   max_concurrent: 3,
   min_floor_sol: 0.05,
   fee_reserve_sol: 0.05,
 };
+const CANARY: CanarySizingConfig = {
+  canary_mode: true, canary_position_sol: 0.1, canary_max_concurrent: 2,
+  ape_sol: 0.1, fee_reserve_sol: 0.05, position_rent_est_sol: 0.065,
+};
 
-function bankroll(equitySol: number, deployableSol = equitySol): Bankroll {
-  return { walletSol: equitySol, bankedSol: 0, deployedSol: 0, deployableSol, effectiveSlots: 10 };
+function bankroll(equitySol: number, deployableSol = equitySol, deployedSol = 0): Bankroll {
+  return { walletSol: equitySol, bankedSol: 0, deployedSol, deployableSol, effectiveSlots: 10 };
 }
-
-const NO_OPEN: ComboOpenCounts = { moluLadder: 0, eysSeat: 0, dankoTrap: 0, eysApe: 0 };
+const open = (over: Partial<ComboOpenCounts> = {}): ComboOpenCounts =>
+  ({ eysSeat: 0, eysBreakout: 0, eysTight: 0, eysApe: 0, eysDumpBonus: 0, ...over });
 
 beforeEach(() => installConfig((c) => {
   c.sizing.min_position_sol = 0.3;
@@ -32,179 +31,100 @@ beforeEach(() => installConfig((c) => {
 }));
 afterEach(() => restoreConfig());
 
-describe("comboPositionSize — Eys 30/70", () => {
-  it("sizes molu/eys at ~1/3 of 30% of equity", () => {
-    const b = bankroll(100);
-    const size = comboPositionSize(b, "molu_ladder", NO_OPEN, CFG);
-    // active budget = 30, share = 1/3 -> 10 SOL
-    expect(size).toBeCloseTo(10, 4);
-  });
-
-  it("danko_trap sizes the same per-position share as molu/eys", () => {
-    const b = bankroll(100);
-    const size = comboPositionSize(b, "danko_trap", NO_OPEN, CFG);
-    expect(size).toBeCloseTo(10, 4);
-  });
-
-  it("70% of equity is never touched (deployable clamp)", () => {
-    // deployable is tiny relative to equity — combo size must clamp to it,
-    // never reach into the untouched 70%.
-    const b = bankroll(100, 1);
-    const size = comboPositionSize(b, "molu_ladder", NO_OPEN, CFG);
-    expect(size).toBeLessThanOrEqual(1 - CFG.fee_reserve_sol + 1e-9);
-  });
-
-  it("grows automatically with equity", () => {
-    const small = comboPositionSize(bankroll(10), "eys_seat", NO_OPEN, CFG);
-    const big = comboPositionSize(bankroll(1000), "eys_seat", NO_OPEN, CFG);
-    expect(big).toBeGreaterThan(small);
+describe("totalOpen", () => {
+  it("sums every play", () => {
+    expect(totalOpen(open({ eysSeat: 1, eysBreakout: 1, eysTight: 1, eysApe: 1, eysDumpBonus: 1 }))).toBe(5);
   });
 });
 
-describe("comboPositionSize — minimums", () => {
-  it("skips (returns 0) rather than oversizing when equity is too small", () => {
-    // equity=1 -> active budget 0.3, share/3 = 0.1 SOL; floor (min_position_sol
-    // scaled) at equity=1 is max(min(0.05,0.3), min(0.3, 1*1%)) = 0.01 -> but
-    // min_floor_sol=0.05 still applies as the combo-specific floor.
-    const b = bankroll(0.1);
-    const size = comboPositionSize(b, "eys_seat", NO_OPEN, CFG);
-    expect(size).toBe(0);
+describe("comboPositionSize — Eys 30/70 (normal mode)", () => {
+  it("sizes a SOL-side position at 1/3 of 30% of equity", () => {
+    expect(comboPositionSize(bankroll(100), open(), CFG)).toBeCloseTo(10, 4);
   });
-
-  it("never sizes below min_floor_sol", () => {
-    const b = bankroll(100);
-    const size = comboPositionSize(b, "molu_ladder", NO_OPEN, CFG);
-    expect(size).toBeGreaterThanOrEqual(CFG.min_floor_sol);
+  it("never touches the 70%: clamps to deployable minus the fee reserve", () => {
+    expect(comboPositionSize(bankroll(100, 3), open(), CFG)).toBeCloseTo(2.95, 4);
+  });
+  it("skips (0) when the clamped size falls under the floor", () => {
+    expect(comboPositionSize(bankroll(100, 0.08), open(), CFG)).toBe(0);
+  });
+  it("caps total concurrent combo positions", () => {
+    expect(comboPositionSize(bankroll(100), open({ eysSeat: 2, eysTight: 1 }), CFG)).toBe(0);
   });
 });
 
-describe("comboPositionSize — max concurrent", () => {
-  it("refuses a 4th combo position when 3 are already open", () => {
-    const b = bankroll(100);
-    const full: ComboOpenCounts = { moluLadder: 1, eysSeat: 1, dankoTrap: 1, eysApe: 0 };
-    expect(comboPositionSize(b, "molu_ladder", full, CFG)).toBe(0);
-  });
+describe("sizeComboPlay — canary mode: 2 slots, 0.1 SOL tickets", () => {
+  const rich = bankroll(5);
 
-  it("refuses a 2nd danko_trap even with concurrent slots free", () => {
-    const b = bankroll(100);
-    const oneDanko: ComboOpenCounts = { moluLadder: 0, eysSeat: 0, dankoTrap: 1, eysApe: 0 };
-    expect(comboPositionSize(b, "danko_trap", oneDanko, CFG)).toBe(0);
+  it("a SOL-side play takes the flat canary size", () => {
+    expect(sizeComboPlay(rich, "eys_seat", open(), CFG, CANARY)).toEqual({ sizeSol: 0.1, skipReason: null });
+    expect(sizeComboPlay(rich, "eys_dump_bonus", open({ eysSeat: 1 }), CFG, CANARY).sizeSol).toBe(0.1);
   });
-
-  it("allows molu/eys to fill remaining slots while danko_trap is held", () => {
-    const b = bankroll(100);
-    const oneDanko: ComboOpenCounts = { moluLadder: 0, eysSeat: 0, dankoTrap: 1, eysApe: 0 };
-    expect(comboPositionSize(b, "molu_ladder", oneDanko, CFG)).toBeGreaterThan(0);
+  it("token-sided plays (breakout, ape) take the fixed ape ticket", () => {
+    expect(sizeComboPlay(rich, "eys_breakout", open({ eysSeat: 1 }), CFG, { ...CANARY, ape_sol: 0.12 }).sizeSol).toBe(0.12);
+    expect(sizeComboPlay(rich, "eys_ape", open(), CFG, { ...CANARY, ape_sol: 0.12 }).sizeSol).toBe(0.12);
   });
-
-  it("allows exactly 3 total combo positions", () => {
-    const b = bankroll(100);
-    const two: ComboOpenCounts = { moluLadder: 1, eysSeat: 1, dankoTrap: 0, eysApe: 0 };
-    expect(comboPositionSize(b, "danko_trap", two, CFG)).toBeGreaterThan(0);
+  it("an open seat plus its breakout fills both slots: a third is canary_max_concurrent", () => {
+    const r = sizeComboPlay(rich, "eys_tight", open({ eysSeat: 1, eysBreakout: 1 }), CFG, CANARY);
+    expect(r).toEqual({ sizeSol: 0, skipReason: "canary_max_concurrent" });
+  });
+  it("one open position leaves the second slot free (breakout for an open seat)", () => {
+    expect(sizeComboPlay(rich, "eys_breakout", open({ eysSeat: 1 }), CFG, CANARY).skipReason).toBeNull();
+  });
+  it("canary_max_concurrent defaults to 2 when unset", () => {
+    const { canary_max_concurrent: _drop, ...noMax } = CANARY;
+    expect(sizeComboPlay(rich, "eys_seat", open({ eysSeat: 1 }), CFG, noMax).skipReason).toBeNull();
+    expect(sizeComboPlay(rich, "eys_seat", open({ eysSeat: 1, eysTight: 1 }), CFG, noMax).skipReason).toBe("canary_max_concurrent");
+  });
+  it("at most one eys_ape at a time", () => {
+    expect(sizeComboPlay(rich, "eys_ape", open({ eysApe: 1 }), CFG, CANARY).skipReason).toBe("ape_max_concurrent");
   });
 });
 
-const CANARY: CanarySizingConfig = {
-  canary_mode: true,
-  canary_position_sol: 0.1,
-  ape_sol: 0.1,
-  fee_reserve_sol: 0.05,
-  position_rent_est_sol: 0.065,
-};
-
-describe("checkAffordability", () => {
-  it("ok when equity and deployable both clear size+reserve+rent", () => {
-    const b = bankroll(1, 1);
-    expect(checkAffordability(b, 0.1, CANARY).ok).toBe(true);
+describe("affordability — skip, never oversize", () => {
+  it("equity must cover size + fee reserve + rent", () => {
+    // needs 0.1 + 0.05 + 0.065 = 0.215
+    expect(checkAffordability(bankroll(0.214), 0.1, CANARY).ok).toBe(false);
+    expect(checkAffordability(bankroll(0.2151), 0.1, CANARY).ok).toBe(true);
   });
-
-  it("fails on equity when size+reserve+rent exceeds total equity", () => {
-    const b = bankroll(0.2, 0.2);
-    const r = checkAffordability(b, 0.1, CANARY);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/equity/);
-  });
-
-  it("fails on deployable even when equity is sufficient", () => {
-    const b = bankroll(1, 0.1); // plenty of equity, but little deployable (already committed)
-    const r = checkAffordability(b, 0.1, CANARY);
+  it("deployable must cover size + rent (0.165)", () => {
+    const r = checkAffordability(bankroll(1, 0.16), 0.1, CANARY);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/deployable/);
+    expect(checkAffordability(bankroll(1, 0.165), 0.1, CANARY).ok).toBe(true);
   });
-});
-
-describe("sizeComboPlay — canary mode (~0.3 SOL account)", () => {
-  it("sizes a SOL-side play at the flat canary_position_sol", () => {
-    const b = bankroll(0.3, 0.3);
-    const r = sizeComboPlay(b, "eys_seat", NO_OPEN, CFG, CANARY);
-    expect(r.sizeSol).toBeCloseTo(0.1, 6);
-    expect(r.skipReason).toBeNull();
+  it("rent scales with the REAL position-account count: a 2-account range needs 0.1 + 2x0.065", () => {
+    const two = { fee_reserve_sol: 0.05, position_rent_est_sol: 0.065 * 2 };
+    expect(checkAffordability(bankroll(1, 0.2), 0.1, { fee_reserve_sol: 0.05, position_rent_est_sol: 0.065 }).ok).toBe(true);
+    expect(checkAffordability(bankroll(1, 0.2), 0.1, two).ok).toBe(false);
+    expect(checkAffordability(bankroll(1, 0.23), 0.1, two).ok).toBe(true);
   });
-
-  it("sizes eys_ape at ape_sol even in canary mode", () => {
-    const b = bankroll(0.3, 0.3);
-    const r = sizeComboPlay(b, "eys_ape", NO_OPEN, CFG, CANARY);
-    expect(r.sizeSol).toBeCloseTo(0.1, 6);
-  });
-
-  it("allows only 1 total combo position regardless of play mix", () => {
-    const b = bankroll(0.3, 0.3);
-    const oneOpen: ComboOpenCounts = { moluLadder: 1, eysSeat: 0, dankoTrap: 0, eysApe: 0 };
-    const r = sizeComboPlay(b, "eys_seat", oneOpen, CFG, CANARY);
-    expect(r.sizeSol).toBe(0);
-    expect(r.skipReason).toBe("canary_max_concurrent");
-  });
-
-  it("skips on affordability when equity is too thin for size+reserve+rent", () => {
-    const b = bankroll(0.1, 0.1); // 0.1 < 0.1 + 0.05 + 0.065
-    const r = sizeComboPlay(b, "eys_seat", NO_OPEN, CFG, CANARY);
+  it("sizeComboPlay returns skip_affordability instead of a smaller size", () => {
+    const r = sizeComboPlay(bankroll(0.2), "eys_seat", open(), CFG, CANARY);
     expect(r.sizeSol).toBe(0);
     expect(r.skipReason).toMatch(/^skip_affordability/);
   });
+});
 
-  it("falls back to normal 30/70 sizing when canary_mode is false", () => {
-    const b = bankroll(100, 100);
-    const normalCfg: CanarySizingConfig = { ...CANARY, canary_mode: false };
-    const r = sizeComboPlay(b, "molu_ladder", NO_OPEN, CFG, normalCfg);
-    expect(r.sizeSol).toBeCloseTo(10, 4); // same math as comboPositionSize
+describe("normal mode token-sided and SOL-side", () => {
+  const normal: CanarySizingConfig = { ...CANARY, canary_mode: false };
+  it("token-sided uses the fixed ticket and honours max_concurrent", () => {
+    expect(sizeComboPlay(bankroll(100), "eys_breakout", open({ eysSeat: 1 }), CFG, normal).sizeSol).toBe(0.1);
+    expect(sizeComboPlay(bankroll(100), "eys_breakout", open({ eysSeat: 2, eysTight: 1 }), CFG, normal).skipReason).toBe("combo_size_zero");
+  });
+  it("SOL-side is Eys 30/70 sized", () => {
+    expect(sizeComboPlay(bankroll(100), "eys_seat", open(), CFG, normal).sizeSol).toBeCloseTo(10, 4);
   });
 });
 
-describe("sizeComboPlay — eys_ape max 1 concurrent (both modes)", () => {
-  it("refuses a 2nd ape even outside canary mode", () => {
-    const b = bankroll(100, 100);
-    const normalCfg: CanarySizingConfig = { ...CANARY, canary_mode: false };
-    const oneApe: ComboOpenCounts = { moluLadder: 0, eysSeat: 0, dankoTrap: 0, eysApe: 1 };
-    const r = sizeComboPlay(b, "eys_ape", oneApe, CFG, normalCfg);
-    expect(r.sizeSol).toBe(0);
-    expect(r.skipReason).toBe("ape_max_concurrent");
+describe("eysCostSkip — take-profit plays must clear the round-trip cost", () => {
+  const COST: EysCostConfig = { eys_tp_pct: 2, eys_cost_tx_count: 4, eys_cost_tx_sol: 0.0003, eys_cost_slippage_bps: 50 };
+  it("a 0.1 SOL seat at a 2% target clears the 0.0003/tx estimate (expected win 0.002 > cost 0.0017)", () => {
+    expect(eysCostSkip(0.1, COST)).toBe(false);
   });
-});
-
-describe("eysCostSkip", () => {
-  const COST: EysCostConfig = {
-    eys_tp_pct: 2, eys_cost_tx_count: 4, eys_cost_tx_sol: 0.0006, eys_cost_slippage_bps: 50,
-  };
-
-  it("skips a position too small for its expected win to clear round-trip costs", () => {
-    // size=0.05: win=0.001, cost=4*0.0006 + 0.05*0.005=0.0024+0.00025=0.00265 -> skip
-    expect(eysCostSkip(0.05, COST)).toBe(true);
+  it("the old 0.0006/tx estimate skipped every 0.1 SOL seat (expected win 0.002 <= cost 0.0029)", () => {
+    expect(eysCostSkip(0.1, { ...COST, eys_cost_tx_sol: 0.0006 })).toBe(true);
   });
-
-  it("does not skip once size is large enough for the win to clear costs", () => {
-    // size=1: win=0.02, cost=0.0024+0.005=0.0074 -> win > cost, do not skip
-    expect(eysCostSkip(1, COST)).toBe(false);
-  });
-
-  it("boundary: skip is inclusive of equality (expected win <= cost)", () => {
-    // win = size*0.02; cost = 0.0024 + size*0.005 -> equal at size=0.16 (up to
-    // float rounding). Compute both sides with the function's own formula and
-    // assert the <= policy directly, so the test isn't hostage to which way a
-    // 1-ulp float rounding error falls.
-    const size = 0.16;
-    const expectedWin = size * (COST.eys_tp_pct / 100);
-    const estCost = COST.eys_cost_tx_count * COST.eys_cost_tx_sol + size * (COST.eys_cost_slippage_bps / 10_000);
-    expect(expectedWin).toBeCloseTo(estCost, 10);
-    expect(eysCostSkip(size, COST)).toBe(expectedWin <= estCost);
+  it("a tiny position never clears it", () => {
+    expect(eysCostSkip(0.02, COST)).toBe(true);
   });
 });

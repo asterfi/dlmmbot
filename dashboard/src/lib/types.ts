@@ -88,7 +88,7 @@ export interface LiveWatch {
     id: number; symbol: string; mint?: string; mode: string; state: string;
     /** meme | micro | majors */
     sleeve?: string | null;
-    /** Combo strategy play (molu_ladder | danko_trap | eys_seat | eys_ape), null outside combo. */
+    /** Combo strategy play (eys_seat | eys_breakout | eys_tight | eys_ape | eys_dump_bonus; historical rows may carry retired molu_ladder / danko_trap labels), null outside combo. */
     play?: string | null;
     follow?: boolean;
     name?: string | null;
@@ -355,7 +355,7 @@ export interface HistorySnap {
   ladder: Array<{
     id: number; symbol: string; mint?: string; exit_reason: string; at: string;
     exit_ts: number; pnl: number; entry_sol: number; pct?: number | null;
-    /** Combo strategy play (molu_ladder | danko_trap | eys_seat | eys_ape), null outside combo. */
+    /** Combo strategy play (eys_seat | eys_breakout | eys_tight | eys_ape | eys_dump_bonus; historical rows may carry retired molu_ladder / danko_trap labels), null outside combo. */
     play?: string | null;
     open_cost_sol?: number | null;
     close_return_sol?: number | null;
@@ -432,7 +432,7 @@ export interface AnalyticsStats {
 }
 
 /** Combo plays the Strategy page knows about — keep in sync with [combo] in config.toml. */
-export type ComboPlay = "molu_ladder" | "danko_trap" | "eys_seat" | "eys_ape";
+export type ComboPlay = "eys_seat" | "eys_breakout" | "eys_tight" | "eys_ape" | "eys_dump_bonus";
 
 /** GET /api/strategy/config — the [combo] and [jev] sections of the running config, read-only. */
 export interface StrategyConfig {

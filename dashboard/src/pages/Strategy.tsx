@@ -13,7 +13,7 @@ import { TokenSymbol } from "@/components/TokenSymbol";
 import { fmtSol, fmtPct } from "@/lib/format";
 import { shortTime } from "@/lib/utils";
 
-const PLAYS: ComboPlay[] = ["molu_ladder", "danko_trap", "eys_seat", "eys_ape"];
+const PLAYS: ComboPlay[] = ["eys_seat", "eys_breakout", "eys_tight", "eys_ape", "eys_dump_bonus"];
 
 function num(cfg: StrategyConfig["combo"] | StrategyConfig["jev"], key: string): number | null {
   const v = cfg[key];
@@ -28,60 +28,70 @@ function bool(cfg: StrategyConfig["combo"] | StrategyConfig["jev"], key: string)
 function playRules(play: ComboPlay, combo: StrategyConfig["combo"], jev: StrategyConfig["jev"]): string[] {
   const threshold = num(jev, `entry_threshold_${play}`);
   const thresholdLine = threshold != null ? `Jev composite score must clear ${threshold.toFixed(2)} to enter.` : null;
-
-  if (play === "molu_ladder") {
-    const mcap = num(combo, "molu_mcap_min_usd");
-    const ageMax = num(combo, "molu_age_max_h");
-    const dip = num(combo, "molu_dip_min_pct");
-    const bounce = num(combo, "molu_bounce_min_pct");
-    const tp = num(combo, "molu_tp_pct");
-    const tpTop = num(combo, "molu_tp_pct_top_tier");
-    const topTierSol = num(combo, "molu_top_tier_sol");
-    return [
-      mcap != null && ageMax != null
-        ? `Enter tokens worth >= $${(mcap / 1_000_000).toFixed(1)}M, younger than ${ageMax}h.`
-        : "Enter established, sub-48h-old tokens.",
-      dip != null && bounce != null
-        ? `Only after a dip of >= ${dip}% off the local high, then a bounce of >= ${bounce}% off the low — never the initial pump.`
-        : "Only after a dip-then-bounce, never the initial pump.",
-      tp != null
-        ? `Exit at +${tp}% position value${tpTop != null && topTierSol != null ? ` (+${tpTop}% once the position is >= ${topTierSol} SOL)` : ""}.`
-        : "Exit on a position-value bounce.",
-      thresholdLine,
-    ].filter(Boolean) as string[];
-  }
-
-  if (play === "danko_trap") {
-    const mcap = num(combo, "danko_mcap_min_usd");
-    const ageMin = num(combo, "danko_age_min_h");
-    const downMin = num(combo, "danko_down_min_pct");
-    const downMax = num(combo, "danko_down_max_pct");
-    const tp = num(combo, "danko_tp_pct");
-    return [
-      mcap != null && ageMin != null
-        ? `Enter proven tokens >= $${(mcap / 1_000_000).toFixed(1)}M mcap AND >= ${ageMin}h old (both required).`
-        : "Enter proven, established tokens only.",
-      downMin != null && downMax != null
-        ? `One-sided SOL bid from current price down to -${downMin}% to -${downMax}% — deliberately deep.`
-        : "Deep one-sided bid well below price.",
-      tp != null ? `Exit break-even-or-better after a bounce, or around +${tp}% if it runs.` : "Exit on a break-even bounce.",
-      "Max 1 concurrent.",
-      thresholdLine,
-    ].filter(Boolean) as string[];
-  }
+  const tp = num(combo, "eys_tp_pct");
+  const hard = num(combo, "eys_vol_hard_usd_per_min") ?? num(combo, "eys_flow_usd_per_min_min");
+  const mcap = num(combo, "eys_mcap_min_usd");
+  const fees = num(combo, "eys_fees_earned_min_sol");
+  const mult = num(combo, "eys_breakout_mult");
+  const spike = num(combo, "eys_breakout_spike_pct");
+  const k = (v: number) => `$${(v / 1000).toFixed(0)}k`;
 
   if (play === "eys_seat") {
-    const mcap = num(combo, "eys_mcap_min_usd");
-    const fees = num(combo, "eys_fees_earned_min_sol");
-    const flow = num(combo, "eys_flow_usd_per_min_min");
-    const tp = num(combo, "eys_tp_pct");
+    const floor = num(combo, "eys_vol_floor_usd_per_min");
+    const accel = num(combo, "eys_vol_accel_min");
+    const soft = num(combo, "jev_eys_soft_bar");
+    const below = num(combo, "eys_seat_range_below_pct");
+    const idle = num(combo, "eys_seat_idle_above_min");
     return [
-      mcap != null ? `Enter tokens >= $${(mcap / 1000).toFixed(0)}k mcap.` : "Enter mid-cap tokens.",
-      fees != null && flow != null
-        ? `Pool must have earned >= ${fees} SOL in lifetime fees and be trading >= $${(flow / 1000).toFixed(0)}k/min.`
-        : "Pool must show strong lifetime fees and high volume.",
-      "Spot, SOL-side only — narrow range, no token-sided leg.",
-      tp != null ? `Exit at +${tp}% green, or on flow death.` : "Exit fast on a small green move, or on flow death.",
+      "The first entry on a qualifying token: Spot, SOL-side, the default range" + (below != null ? ` (~${below}% below price, top bin = the active bin)` : "") + ".",
+      mcap != null && fees != null
+        ? `Token must be >= ${k(mcap)} mcap with >= ${fees} SOL of lifetime pool fees, and the fees must scale with the mcap (the fake-volume red flag).`
+        : "Token needs real mcap and lifetime fees, scaled to its mcap.",
+      hard != null
+        ? `Volume bar: >= ${k(hard)}/min is Eys's literal "ape immediately" tier. A softer, dynamic tier opens between a market-percentile floor${floor != null ? ` (never below ${k(floor)}/min)` : ""} and that bar only while volume is accelerating${accel != null ? ` (>= ${accel}x its trailing average)` : ""}, and Jev must then clear a stricter ${soft != null ? soft.toFixed(2) : "composite"} bar.`
+        : "Per-minute volume must clear Eys's bar (a dynamic soft tier exists for accelerating volume).",
+      tp != null ? `Exit when green by >= +${tp}% or when flow dies (held for a few minutes). Never a stop-loss.` : "Exit when green or when flow dies. Never a stop-loss.",
+      idle != null ? `A seat that sits above its range for ${idle} min with no breakout leg open is idle and gets closed.` : null,
+      thresholdLine,
+    ].filter(Boolean) as string[];
+  }
+
+  if (play === "eys_breakout") {
+    return [
+      "A token-sided SECOND position on a token whose seat is open — the seat is never closed on a breakout; it stays as the backup that catches a dump.",
+      `Fires only when price breaks above the top of the seat's range, volume is ${mult ?? 3}x the threshold the seat entered under (Eys: 100k -> 300k per minute) and the last 5m candle is up >= ${spike ?? 10}%.`,
+      "Swap SOL for the token and deposit it above price (a fixed ticket; token-sided money is money you are okay losing).",
+      tp != null ? `Exit when the range has fully converted to SOL, when green by >= +${tp}%, or when flow dies.` : "Exit when the range has fully converted to SOL, when green, or when flow dies.",
+      thresholdLine,
+    ].filter(Boolean) as string[];
+  }
+
+  if (play === "eys_tight") {
+    const bins = num(combo, "eys_tight_bins");
+    const obs = num(combo, "eys_tight_observe_min");
+    const dump = num(combo, "eys_tight_dump_pct");
+    const rng = num(combo, "eys_tight_range_max_pct");
+    return [
+      `Spot SOL-side tight range${bins != null ? ` (${bins} bins)` : ""} for a token still moving steadily inside a small pump-and-dump range.`,
+      `Volume must clear the seat's threshold; the token must have been watched >= ${obs ?? 2} min with no major dump (no 5m candle at or below -${dump ?? 15}%) and its recent candles chopping inside ${rng ?? 25}%.`,
+      tp != null ? `Exit when green by >= +${tp}% or when flow dies.` : "Exit when green or when flow dies.",
+      "Taken as an extra entry on a token that already has its seat open.",
+      thresholdLine,
+    ].filter(Boolean) as string[];
+  }
+
+  if (play === "eys_dump_bonus") {
+    const drop = num(combo, "eys_dump_peak_drop_pct");
+    const ath = num(combo, "eys_dump_ath_within_pct");
+    const downMin = num(combo, "eys_dump_down_min_pct");
+    const downMax = num(combo, "eys_dump_down_max_pct");
+    const idleH = num(combo, "eys_dump_idle_max_h");
+    return [
+      "A bonus play on a token you already hold an Eys position in, once its volume has peaked and is slowing.",
+      `Per-minute volume at least ${drop ?? 50}% below its recent peak while price is still within ${ath ?? 20}% of its high.`,
+      `Wide Bid-Ask SOL-side${downMin != null && downMax != null ? ` from -${downMin}% to -${downMax}%` : ""} — a trap for the dump.`,
+      tp != null ? `Exit when green by >= +${tp}% on a real fill. Flow dying is its premise, not an exit.` : "Exit when green on a real fill.",
+      idleH != null ? `A bonus ladder that never fills is closed after ${idleH}h.` : null,
       thresholdLine,
     ].filter(Boolean) as string[];
   }
@@ -92,21 +102,22 @@ function playRules(play: ComboPlay, combo: StrategyConfig["combo"], jev: Strateg
   const rangeUp = num(combo, "ape_range_up_pct");
   const live = bool(combo, "ape_live_enabled");
   return [
-    "Token-sided ape on fresh coins (<= 48h, >= $100k mcap, >= 10 SOL fees) in pools paying fees in SOL — from the whole Meteora sweep, Stonks Launchpad coins get priority.",
+    "Token-sided ape on fresh coins (<= 48h, >= $100k mcap, >= 10 SOL fees) whose pool collects fees in SOL only (read from the pool's on-chain fee mode) — from the whole Meteora sweep, Stonks Launchpad coins get priority.",
     sol != null ? `Fixed ${sol} SOL ticket — not a % of the active budget.` : "Fixed-size ticket.",
-    feeMin != null ? `Fallback fee-flow floor: >= ${feeMin} SOL when the pool's fee mode can't be detected.` : null,
+    feeMin != null ? `Lifetime fee floor: >= ${feeMin} SOL, and the same fees-per-mcap fake-volume rule as the seat.` : null,
     rangeUp != null ? `Token-sided range up to +${rangeUp}% above price.` : null,
     "Max 1 concurrent. Can go to zero — no stop loss, by design.",
-    live ? "Live trading is ON for this play." : "Live trading is OFF for this play (paper-only kill switch set).",
+    live ? "Live trading is ON for token-sided plays." : "Live trading is OFF for token-sided plays (paper-only kill switch set).",
     thresholdLine,
   ].filter(Boolean) as string[];
 }
 
 const PLAY_TITLE: Record<ComboPlay, string> = {
-  molu_ladder: "Molu ladder",
-  danko_trap: "Danko trap",
   eys_seat: "Eys seat",
+  eys_breakout: "Eys breakout",
+  eys_tight: "Eys tight",
   eys_ape: "Eys ape",
+  eys_dump_bonus: "Eys dump bonus",
 };
 
 function PlayCard({
@@ -287,7 +298,7 @@ export function StrategyPage({ watch }: { watch: LiveWatch | null }) {
         <div className="border border-danger/60 bg-panel px-3 py-2 text-danger text-[11px]">ERR // {err}</div>
       )}
 
-      <Panel title="Combo: molu ladder + danko trap + eys seat + eys ape — Jev master gate">
+      <Panel title="Combo: Eys-only (seat, breakout, tight, ape, dump bonus) — Jev master gate">
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={comboEnabled ? "ok" : "muted"}>{comboEnabled ? "combo on" : "combo off"}</Badge>
           <Badge tone={modeLive ? "accent" : "muted"}>{modeLive ? "LIVE" : "PAPER"}</Badge>
@@ -299,11 +310,11 @@ export function StrategyPage({ watch }: { watch: LiveWatch | null }) {
           thresholds live in code, never in the model. A red flag noul at or above{" "}
           {config ? (num(config.jev, "redflag_veto") ?? "—") : "—"} vetoes an entry outright; a composite
           score between {config ? (num(config.jev, "uncertain_low") ?? "—") : "—"} and{" "}
-          {config ? (num(config.jev, "uncertain_high") ?? "—") : "—"} is treated as uncertain: SOL-side plays (molu, Danko, Eys seat) then follow their own rules and enter; Eys ape skips.
+          {config ? (num(config.jev, "uncertain_high") ?? "—") : "—"} is treated as uncertain: SOL-side plays (Eys seat, tight, dump bonus) then follow their own rules and enter; the token-sided plays (Eys ape, breakout) skip. Slot priority is breakout (for an open seat), seat, tight, ape, dump bonus.
         </p>
       </Panel>
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {config && PLAYS.map((play) => (
           <PlayCard key={play} play={play} combo={config.combo} jev={config.jev} stats={statsByPlay[play]} />
         ))}

@@ -352,114 +352,111 @@ export interface Config {
    */
   candles?: { deep_source_enabled?: boolean; limit?: number; max_per_min?: number };
   /**
-   * Combo strategy — Eys (fast) + molu (core) + Danko (deep), owner's
-   * decision 2026-10-01. Optional section: entirely inert (no classification,
-   * no sizing override) unless `enabled = true`. See STRATEGY.md and the
-   * `[combo]` block in config.toml for the full rationale.
+   * Combo strategy — Eys-only (owner's decision 2026-10-03; molu_ladder and
+   * danko_trap were removed). Optional section: entirely inert (no
+   * classification, no sizing override) unless `enabled = true`. See the
+   * `[combo]` block in config.toml for the full rationale and Eys quotes.
    */
   combo?: {
     enabled: boolean;
     active_budget_pct: number;
-    molu_share_pct: number;
     eys_share_pct: number;
-    danko_share_pct: number;
     max_concurrent: number;
     min_floor_sol: number;
     fee_reserve_sol: number;
-    molu_mcap_min_usd: number;
-    molu_age_max_h: number;
-    molu_dip_min_pct: number;
-    molu_bounce_min_pct: number;
-    molu_tp_pct: number;
-    molu_tp_pct_top_tier: number;
-    molu_top_tier_sol: number;
-    molu_above_exit_min: number;
+    /** Within-candidate play resolution + slot priority. */
+    play_priority?: Array<"eys_seat" | "eys_breakout" | "eys_tight" | "eys_ape" | "eys_dump_bonus">;
+
+    // --- Eys token selection (hard gates) ---
     eys_mcap_min_usd: number;
+    eys_fees_earned_min_sol: number;
     /**
-     * Eys-only young-age carve-out (owner, 2026-10-02): upstream's
-     * vetting.age_min_minutes (45) rejects candidates before combo
-     * classification ever runs, but GMGN's hot tokens right now run 6-36min
-     * old and real Eys setups need to fire in that window. A candidate aged
-     * in [eys_age_min_minutes, age_min_minutes) is let through vetToken ONLY
-     * to be considered for eys_seat/eys_ape — molu_ladder/danko_trap still
-     * require the full 45min floor. See vetting/vet.ts's age_min check.
+     * Young-age carve-out (owner, 2026-10-02): upstream's vetting.age_min_minutes
+     * (45) rejects candidates before combo classification ever runs, but GMGN's
+     * hot tokens run 6-36min old. A candidate aged in [eys_age_min_minutes,
+     * age_min_minutes) is let through vetToken for the Eys plays (all of them are
+     * Eys plays now). See vetting/vet.ts's age_min check.
      */
     eys_age_min_minutes?: number;
-    eys_fees_earned_min_sol: number;
+    /** Literal "ape immediately" per-minute volume tier (Eys: 100k/min). Kept for ape.ts and older configs. */
     eys_flow_usd_per_min_min: number;
+    eys_vol_hard_usd_per_min?: number;
+    /** Dynamic soft tier: floor = max(this, market percentile of per-minute volume among GMGN 5m trending tokens with mcap >= 100k). */
+    eys_vol_floor_usd_per_min?: number;
+    eys_vol_percentile?: number;
+    /** A soft-tier candidate also needs vol_accel (5m per-minute vs trailing 4h/1h per-minute average) >= this to reach Jev. */
+    eys_vol_accel_min?: number;
+    /** Composite-score bar for soft-tier candidates (raises, never lowers, the play's own Jev threshold). */
+    jev_eys_soft_bar?: number;
+    /** Fake-volume rule: lifetime fees earned (SOL) per $1M of mcap must reach this (derived from Eys's "500K-1M mcap but only 8-10 SOL in fees" red flag). */
+    eys_fee_per_musd_min?: number;
     eys_reject_mcap_lo_usd: number;
     eys_reject_mcap_hi_usd: number;
+    /** Take profit once green by this much (Eys: "whether it's 1%, 2%, or 3%"). */
     eys_tp_pct: number;
-    danko_mcap_min_usd: number;
-    danko_age_min_h: number;
-    danko_down_min_pct: number;
-    danko_down_max_pct: number;
-    danko_tp_pct: number;
-    /**
-     * Danko's own selection rules (strategy-fidelity fix, 2026-10-02, re-read
-     * from his Part 3 post): a recent dump off the high, live flow relative
-     * to ACTIVE LIQUIDITY (not raw volume), and buyers still present. See
-     * strategy/combo/plays.ts classifyDanko.
-     */
-    danko_dump_min_pct: number;
-    danko_flow_ratio_min: number;
-    /** Flow-death exit (owner, 2026-10-02): "when 5m volume disappears, the fees disappear with it" — fraction of danko_flow_ratio_min below which flow counts as collapsed. Does NOT force a stop-loss; only unlocks a break-even exit. */
-    danko_flow_death_ratio: number;
-    /** Canary-mode idle timeout is shorter — one slot is too valuable to tie up for 6h on a ladder that never fills. */
-    danko_idle_max_h_canary: number;
-    /**
-     * Canary mode (1 slot): which play gets first claim on the single slot
-     * when more than one classifies in the same sweep. Danko is deliberately
-     * last — the owner's live evidence showed molu/eys candidates losing the
-     * slot to Danko every time. See manager/loop.ts's canary pre-sort.
-     */
-    play_priority?: Array<"eys_seat" | "eys_ape" | "molu_ladder" | "danko_trap">;
+    /** eys_seat default Spot range depth below price, % (top bin = active bin). */
+    eys_seat_range_below_pct?: number;
+    /** A seat sitting above its range (about all SOL) this long, with no breakout leg open on the mint, is closed (eys_seat_idle). */
+    eys_seat_idle_above_min?: number;
+
+    // --- eys_breakout (token-sided second position on an open seat) ---
+    /** Breakout volume bar = this x whichever per-minute threshold the seat entered under (Eys: 100k -> 300k). */
+    eys_breakout_mult?: number;
+    /** "Strong upward spike": the last 5m candle must be up at least this %. */
+    eys_breakout_spike_pct?: number;
+
+    // --- eys_tight (Spot SOL-side tight range) ---
+    eys_tight_bins?: number;
+    /** Token must have been seen by our own scanner this many minutes ("watching the token for 1-2 minutes"). */
+    eys_tight_observe_min?: number;
+    /** "No major dump": no 5m candle at or below -this% in the last eys_tight_candles candles. */
+    eys_tight_dump_pct?: number;
+    /** "Chopping in a small range": high-to-low of the last eys_tight_candles candles must stay under this %. */
+    eys_tight_range_max_pct?: number;
+    eys_tight_candles?: number;
+
+    // --- eys_dump_bonus (wide Bid-Ask SOL-side near the ATH as volume fades) ---
+    eys_dump_peak_drop_pct?: number;
+    eys_dump_ath_within_pct?: number;
+    eys_dump_window_candles?: number;
+    eys_dump_down_min_pct?: number;
+    eys_dump_down_max_pct?: number;
+    /** A never-filled bonus ladder is closed after this many hours (it is not a seat; nothing else frees its slot). */
+    eys_dump_idle_max_h?: number;
+
+    // --- sizing / slots ---
     /** Canary account sizing (owner addition 2026-10-01, ~0.3 SOL accounts). */
     canary_mode: boolean;
     canary_position_sol: number;
+    /** Max open combo positions in canary mode (default 2: a seat plus its breakout). */
+    canary_max_concurrent?: number;
     position_rent_est_sol: number;
-    /** eys_ape: Stonks-launchpad token-sided ape (owner addition 2026-10-01). */
+
+    // --- eys_ape (token-sided ape into a SOL-fee pool) ---
     ape_enabled?: boolean;
+    /** Fixed token-sided ticket for eys_ape AND eys_breakout. */
     ape_sol: number;
     ape_fee_min_sol: number;
     ape_range_up_pct: number;
-    /** Widened discovery (2026-10-02): any main-sweep candidate is ape-eligible, not just Stonks mints. */
     ape_age_max_h: number;
     ape_mcap_min_usd: number;
     /** Stonks-listed mints get a ranking boost for the single ape slot. Default true. */
     ape_stonks_priority?: boolean;
-    /** Kill switch for eys_ape's LIVE execution path (owner's decision, 2026-10-01: live from day one). Default true (missing key = enabled, matching the owner's decision); set false to force paper-only again. */
+    /** Kill switch for token-sided LIVE execution (eys_ape / eys_breakout). Default true. */
     ape_live_enabled?: boolean;
-    /** eys_seat cost-skip: expected win must clear the estimated round-trip cost. */
+
+    // --- cost skip, cooldowns, flow death ---
     eys_cost_tx_count: number;
     eys_cost_tx_sol: number;
     eys_cost_slippage_bps: number;
-    /**
-     * Live-churn fix (owner, 2026-10-02): danko_trap/molu_ladder ladders sit
-     * below price and can sit forever if price never dips into them. Upstream
-     * P1-P3/give_back/escape no longer touch combo positions at all (see
-     * loop.ts), so these are now the ONLY timeout for a ladder that never
-     * fills. "Never filled" = active bin has never gone strictly below the
-     * position's top bin (ever_in_range is NOT this signal — it is trivially
-     * true from bin 1 of entry).
-     */
-    danko_idle_max_h: number;
-    molu_idle_max_h: number;
     /** Per-mint re-entry cooldown after a combo close that was near-breakeven (+-0.5%) or never filled. */
     reentry_cooldown_h: number;
     /** Shorter per-mint cooldown after a genuine win/loss close, in minutes. */
     reentry_cooldown_after_trade_min: number;
-    /** Combo flow-death exits (generic flowDead and Danko's flowCollapsed) must hold continuously this many minutes before firing. Default 3. */
+    /** Combo flow-death exits must hold continuously this many minutes before firing. Default 3. */
     flow_dead_confirm_min?: number;
-    /** molu range (owner, 2026-10-03; molu's Book 1: ~100-125 bins below price): target/min/max bin count, top bin = active bin. Capped at -90%. */
-    molu_bins_target?: number;
-    molu_bins_min?: number;
-    molu_bins_max?: number;
-    /** molu pool choice for tokens under molu_age_max_h: the 5-10% base-fee pool if its 30m volume >= this, else the highest-30m-volume pool. */
-    molu_fee_pool_min_vol30m_usd?: number;
-    /** A never-filled molu/danko ladder whose price is >= left_behind_pct above its top bin closes after left_behind_min minutes (combo_left_behind). */
-    left_behind_pct?: number;
-    left_behind_min?: number;
+    /** Skip a candidate whose datapi reading is older than this (no feed timestamp: judged by our own snapshots). Default 120. */
+    datapi_max_age_s?: number;
   };
   /**
    * Jev — Typesafe System One decision layer for combo entries/exits.
@@ -486,10 +483,11 @@ export interface Config {
     weight_fee_generation?: number;
     weight_bounce?: number;
     weight_narrative?: number;
-    entry_threshold_molu_ladder?: number;
-    entry_threshold_danko_trap?: number;
     entry_threshold_eys_seat?: number;
+    entry_threshold_eys_tight?: number;
+    entry_threshold_eys_breakout?: number;
     entry_threshold_eys_ape?: number;
+    entry_threshold_eys_dump_bonus?: number;
     /** Owner's decision 2026-10-02: an uncertain composite on entry defers to the play's own rules ("rules", default) rather than skipping ("skip"). Per-play override below for eys_ape. */
     uncertain_entry?: "rules" | "skip";
     ape_uncertain_entry?: "rules" | "skip";

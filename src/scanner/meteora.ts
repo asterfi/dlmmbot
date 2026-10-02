@@ -134,6 +134,7 @@ function normalize(p: RawPool): PoolInfo & { extras: RawPoolExtras } {
     vol30mUsd: p.volume?.["30m"] ?? 0,
     vol1hUsd: p.volume?.["1h"] ?? 0,
     vol24hUsd: p.volume?.["24h"] ?? 0,
+    vol4hUsd: p.volume?.["4h"] ?? 0,
     feeTvl30mPct: p.fee_tvl_ratio?.["30m"] ?? 0,
     feeTvl1hPct: p.fee_tvl_ratio?.["1h"] ?? 0,
     feeTvl4hPct: p.fee_tvl_ratio?.["4h"] ?? 0,

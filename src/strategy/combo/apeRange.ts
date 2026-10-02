@@ -2,7 +2,7 @@
  * eys_ape range builder — token-sided, ABOVE current price (sells into the
  * pump, earning SOL fees as it does). Bottom = current price, top = current
  * price * (1 + ape_range_up_pct%), capped by the usual bin-account ceiling.
- * Reuses the main planner's bin-math helpers, same pattern as dankoRange.ts.
+ * Reuses the main planner's bin-math helpers, same pattern as deepBidAskRange.ts.
  */
 import { binArraysSpanned, binIdToPrice, priceToBinId } from "../../ranges/planner.js";
 import type { RangePlan } from "../../types.js";

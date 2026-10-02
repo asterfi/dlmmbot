@@ -1,13 +1,13 @@
 /**
- * danko_trap range builder — one-sided SOL bid-ask from current price down to
- * -85%/-90% (owner's decision). Deliberately bypasses the generic planner's
- * P0-safety-margin depth cap (ranges/planner.ts clamps `maxDownPct` to
- * `|safety_price_crash_pct| - 10`, ~50% at defaults): danko_trap is meant to
- * go deeper than that. P0's rug-safety exits (pool death, price crash, TVL
- * drain, rugcheck flip, holder watch) are untouched and still fire regardless
- * of how deep the LP range itself reaches — a price crash through -60% closes
- * the position before it can trade the deeper bins, which is a legitimate
- * safety behaviour, not a contradiction of the -85/-90% range intent.
+ * Deep Bid-Ask range builder — one-sided SOL bid-ask from current price down
+ * to -85%/-90%. Used by eys_dump_bonus (Eys's "wide-range Bid-Ask SOL-side
+ * position... around the ATH or close to the ATH... -85% to -90%... bonus
+ * play"). Deliberately bypasses the generic planner's P0-safety-margin depth
+ * cap (ranges/planner.ts clamps `maxDownPct` to `|safety_price_crash_pct| -
+ * 10`): this play is meant to go deeper than that cap allows. The owner's rule
+ * is no stop-loss, and the P0 price-crash trigger no longer applies to combo
+ * positions; the other P0 triggers (pool death, TVL drain, rugcheck flip,
+ * holder watch) remain active regardless of how deep the range reaches.
  *
  * Reuses the main planner's own bin-math helpers (priceToBinId/binIdToPrice/
  * binArraysSpanned) rather than re-deriving them.
@@ -18,7 +18,7 @@ import type { RangePlan } from "../../types.js";
 const BINS_PER_POSITION = 69;
 const BIN_ARRAY_RENT_SOL = 0.075;
 
-export function planDankoRange(
+export function planDeepBidAskRange(
   currentPrice: number,
   binStep: number,
   decimalsX: number,
@@ -29,7 +29,7 @@ export function planDankoRange(
   const maxBinId = priceToBinId(currentPrice, binStep, decimalsX);
   // Bottom-weighted toward the deep end of the band; the position itself is
   // bottom-weighted by DLMM's BidAsk strategy curve (more liquidity at the
-  // range edges), which every combo play already uses.
+  // range edges).
   const targetDownPct = Math.max(downMinPct, Math.min(downMaxPct, downMaxPct));
   let minBinId = priceToBinId(currentPrice * (1 - targetDownPct / 100), binStep, decimalsX);
 

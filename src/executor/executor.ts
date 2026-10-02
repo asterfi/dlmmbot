@@ -11,7 +11,7 @@ export interface OpenParams {
   range: RangePlan;
   entryPrice: number;
   trancheOf?: number;
-  /** Combo strategy play tag (molu_ladder | eys_seat | danko_trap); omitted for non-combo entries. */
+  /** Combo strategy play tag (eys_seat | eys_breakout | eys_tight | eys_ape | eys_dump_bonus); omitted for non-combo entries. */
   play?: string;
   /**
    * "sol" (default): one-sided SOL deposit (totalXAmount=0), the bot's normal

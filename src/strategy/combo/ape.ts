@@ -19,6 +19,8 @@
  * `fee_mode_unknown`) exists for completeness / defensive callers only.
  */
 
+import { feePerMusd } from "./plays.js";
+
 export type ApeSource = "stonks" | "meteora";
 
 export interface ApeCandidateFeatures {
@@ -45,6 +47,8 @@ export interface ApeConfigLike {
   ape_stonks_priority?: boolean;
   /** Reused: eys_seat's own high-volume floor is the ape flow requirement too. */
   eys_flow_usd_per_min_min: number;
+  /** Fake-volume rule shared with the seat (fees per $1M of mcap); skipped when undefined. */
+  eys_fee_per_musd_min?: number;
 }
 
 export interface ApeClassification {
@@ -63,6 +67,11 @@ export function classifyApe(f: ApeCandidateFeatures, c: ApeConfigLike): ApeClass
   if (f.tokenAgeMinutes === null || f.tokenAgeMinutes > c.ape_age_max_h * 60) return null;
   if (f.flowUsdPerMin < c.eys_flow_usd_per_min_min) return null;
   if (f.feesEarnedPoolSol === null || f.feesEarnedPoolSol < c.ape_fee_min_sol) return null;
+  if (c.eys_fee_per_musd_min !== undefined) {
+    // Eys's fake-volume red flag applies to the ape too: lots of volume, few fees for the mcap.
+    const ratio = feePerMusd(f.feesEarnedPoolSol, f.mcapUsd);
+    if (ratio === null || ratio < c.eys_fee_per_musd_min) return null;
+  }
   if (f.feeModeKnown && !f.quoteOnlyFee) return null;
 
   const feeModeUnknown = !f.feeModeKnown;

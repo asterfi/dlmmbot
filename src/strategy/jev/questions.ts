@@ -6,7 +6,7 @@
  * `state` by backticked path (e.g. `pool.fees_24h_sol`).
  *
  * ENTRY battery = atomic red-flag nouls + atomic positive nouls + one Choice
- * `play` (molu_ladder | danko_trap | eys_seat | eys_ape | none). Composite
+ * `play` (eys_seat | eys_breakout | eys_tight | eys_ape | eys_dump_bonus | none). Composite
  * scoring and the red-flag veto are policy, computed in code from these raw
  * answers (strategy/jev/policy.ts) — never asked of the model directly.
  */
@@ -39,10 +39,10 @@ const ENTRY: Record<string, JevQuestion> = {
   },
   redflag_exhausted_spike: {
     type: "noul",
-    instructions: "Judging `candle_summary` and `momentum`, has this token already made its move — an exhausted vertical spike rather than a position with room left to run, or (for the dip-then-bounce plays) a candidate being entered ON the initial vertical rather than after a real dip and bounce?",
+    instructions: "Judging `candle_summary` and `flow`, has this token already made its move and is now exhausted — a blow-off spike that is rolling over rather than one keeping an upward trend? (Eys wants strong upward spikes that maintain an upward trend; a fresh breakout is fine, a finished one is not.)",
     criteria: {
-      true: "The move already happened; this is chasing a top or buying the initial vertical.",
-      false: "There is a coherent, not-yet-exhausted setup (including, where the play calls for it, a genuine dip and bounce already completed).",
+      true: "The move already happened and is fading; this is chasing a top.",
+      false: "There is a coherent, not-yet-exhausted setup: an active spike or steady uptrend with volume still behind it.",
     },
   },
   redflag_insider_dumping: {
@@ -82,10 +82,10 @@ const ENTRY: Record<string, JevQuestion> = {
   },
   positive_bounce_confirmed: {
     type: "noul",
-    instructions: "For plays whose thesis needs a dip-then-bounce (molu_ladder, danko_trap), does `candle_summary` show a genuine dip followed by a confirmed bounce off the low — not a token still in free-fall nor one that never dipped at all? For plays that don't need a bounce (eys_seat, eys_ape), judge whether the current price action is at least stable enough to enter.",
+    instructions: "Judging `candle_summary`, is the current price action healthy enough to enter an Eys play — steady or trending up inside a pump, not free-falling or chaotic? For eys_dump_bonus (a wide Bid-Ask placed near the top as volume fades) judge only that price is still near its high and not already collapsing.",
     criteria: {
-      true: "A real dip-and-bounce is visible, or (for non-bounce plays) price action is stable.",
-      false: "Still falling, no dip ever happened, or price action is too chaotic to enter.",
+      true: "Price action is steady/uptrending (or, for the dump bonus, still near its high).",
+      false: "Free-fall, a collapse already under way, or too chaotic to enter.",
     },
   },
   positive_narrative_strength: {
@@ -103,11 +103,12 @@ const ENTRY: Record<string, JevQuestion> = {
       playbook: "`playbook`",
     },
     criteria: {
-      molu_ladder: "Core: proven mcap, young token, entering after a real dip+bounce, one-sided SOL bid-ask below price.",
-      danko_trap: "Deep: proven mcap AND proven age (>=48h), one-sided SOL bid-ask far below price (-85%/-90%), patient.",
-      eys_seat: "Fast: smaller mcap floor, real SOL fee income, high volume rate, narrow spot range, quick in-and-out.",
-      eys_ape: "Riskiest: token-sided ape into a Stonks-launchpad graduate paying SOL-only fees, selling into the pump above price. Token-sided, can go to zero.",
-      none: "No coherent play fits — this candidate is not worth entering under any of the four plays.",
+      eys_seat: "First entry: Spot SOL-side default range below price on a token with real SOL fee income and high per-minute volume; quick in-and-out at +1-3% green.",
+      eys_breakout: "Second, token-sided entry on a token whose seat is open: price broke above the seat's range on 3x volume and a strong spike; the seat stays as the backup.",
+      eys_tight: "Spot SOL-side tight range (10-20 bins) on a token watched 1-2 minutes with no major dump, still chopping in a small pump-and-dump range.",
+      eys_ape: "Riskiest: token-sided ape into a launchpad graduate whose pool collects SOL-only fees, selling into the pump above price. Token-sided, can go to zero.",
+      eys_dump_bonus: "Bonus: volume peaked and is slowing while price is still near its high — a wide -85%/-90% Bid-Ask SOL-side ladder, waiting for the bounce.",
+      none: "No coherent play fits — this candidate is not worth entering under any of the Eys plays.",
     },
   },
 };

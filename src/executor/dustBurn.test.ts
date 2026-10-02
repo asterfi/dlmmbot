@@ -1,6 +1,6 @@
 /**
  * Dust residual handling + close-sequence PnL attribution (owner, 2026-10-03).
- * pos#7 OCTO (molu_ladder): mark +1.05%, leftover token side quoted 0.00061 SOL,
+ * pos#7 OCTO (retired molu_ladder play): mark +1.05%, leftover token side quoted 0.00061 SOL,
  * exit swap "received -0.00254 SOL (-515%)", post-close ATA cleanup reclaimed
  * 0.004554 SOL. Ledger realized -0.00398 SOL; on-chain truth about +0.0006 SOL.
  */
@@ -48,10 +48,10 @@ describe("burnDustAndClose", () => {
     return { pubkey: acct, account: { owner, data: { parsed: { info: { tokenAmount: { amount, decimals: 6 } } } } } };
   }
 
-  it("burns the residual and closes the token account in ONE tx, via the account's own program (Token-2022)", async () => {
+  it("burns the residual and closes the token account in ONE tx, via the classic Token program", async () => {
     const sent: Array<{ programIds: string[]; keys0: string[] }> = [];
     const exec = makeExec({
-      connection: { getParsedTokenAccountsByOwner: vi.fn(async () => ({ value: [parsedAccount(TOKEN_2022_PROGRAM_ID, "54466782")] })) },
+      connection: { getParsedTokenAccountsByOwner: vi.fn(async () => ({ value: [parsedAccount(TOKEN_PROGRAM_ID, "54466782")] })) },
       send: vi.fn(async (tx: { instructions: Array<{ programId: PublicKey; keys: Array<{ pubkey: PublicKey }> }> }) => {
         sent.push({ programIds: tx.instructions.map((i) => i.programId.toBase58()), keys0: tx.instructions.map((i) => i.keys[0]!.pubkey.toBase58()) });
         return "sigBurn";
@@ -62,7 +62,7 @@ describe("burnDustAndClose", () => {
     const r = await exec.burnDustAndClose(MINT.toBase58(), id);
 
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.programIds).toEqual([TOKEN_2022_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()]); // Burn + CloseAccount
+    expect(sent[0]!.programIds).toEqual([TOKEN_PROGRAM_ID.toBase58(), TOKEN_PROGRAM_ID.toBase58()]); // Burn + CloseAccount
     expect(sent[0]!.keys0).toEqual([acct.toBase58(), acct.toBase58()]);
     expect(r!.burnedRaw).toBe(54466782n);
     expect(r!.reclaimedSol).toBeCloseTo(0.002034, 6);
@@ -71,25 +71,42 @@ describe("burnDustAndClose", () => {
     expect(ev[0]!.position_id).toBe(id);
   });
 
-  it("uses the legacy Token program for a legacy mint", async () => {
-    const programs: string[] = [];
+  it("Token-2022 mints are skipped UP FRONT (policy allowlist is the classic Token program): no send, dust_burn_skipped_t22 logged", async () => {
+    const send = vi.fn();
     const exec = makeExec({
-      connection: { getParsedTokenAccountsByOwner: vi.fn(async () => ({ value: [parsedAccount(TOKEN_PROGRAM_ID, "100")] })) },
-      send: vi.fn(async (tx: { instructions: Array<{ programId: PublicKey }> }) => { programs.push(...tx.instructions.map((i) => i.programId.toBase58())); return "s"; }),
-      walletDelta: vi.fn(async () => 0.002),
+      connection: { getParsedTokenAccountsByOwner: vi.fn(async () => ({ value: [parsedAccount(TOKEN_2022_PROGRAM_ID, "54466782")] })) },
+      send,
+      walletDelta: vi.fn(),
     });
-    await exec.burnDustAndClose(MINT.toBase58(), null);
-    expect(new Set(programs)).toEqual(new Set([TOKEN_PROGRAM_ID.toBase58()]));
+    const id = insertOpenPosition({});
+    expect(await exec.burnDustAndClose(MINT.toBase58(), id)).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(getDb().prepare("SELECT COUNT(*) AS c FROM events WHERE type='dust_burn_skipped_t22'").get()).toEqual({ c: 1 });
+    expect(getDb().prepare("SELECT COUNT(*) AS c FROM events WHERE type='dust_burn'").get()).toEqual({ c: 0 });
   });
 
-  it("propagates a rejected tx (policy denies Token-2022 / transfer-fee mint) so close() can leave the dust", async () => {
+  it("propagates a rejected tx on a classic mint so close() can leave the dust", async () => {
     const exec = makeExec({
-      connection: { getParsedTokenAccountsByOwner: vi.fn(async () => ({ value: [parsedAccount(TOKEN_2022_PROGRAM_ID, "5")] })) },
+      connection: { getParsedTokenAccountsByOwner: vi.fn(async () => ({ value: [parsedAccount(TOKEN_PROGRAM_ID, "5")] })) },
       send: vi.fn(async () => { throw new Error("privy policy denied"); }),
       walletDelta: vi.fn(),
     });
     await expect(exec.burnDustAndClose(MINT.toBase58(), null)).rejects.toThrow(/policy denied/);
     expect(getDb().prepare("SELECT COUNT(*) AS c FROM events WHERE type='dust_burn'").get()).toEqual({ c: 0 });
+  });
+
+  it("never burns a mint another open position uses (seat + breakout on one mint)", async () => {
+    const send = vi.fn();
+    const exec = makeExec({
+      connection: { getParsedTokenAccountsByOwner: vi.fn(async () => ({ value: [parsedAccount(TOKEN_PROGRAM_ID, "99")] })) },
+      send,
+      walletDelta: vi.fn(),
+    });
+    const closing = insertOpenPosition({ mode: "live" });
+    const other = insertOpenPosition({ mode: "live" });
+    getDb().prepare("UPDATE positions SET token_mint = ? WHERE id IN (?, ?)").run(MINT.toBase58(), closing, other);
+    expect(await exec.burnDustAndClose(MINT.toBase58(), closing)).toBeNull();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("returns null (nothing to do) when the wallet holds no account for the mint", async () => {

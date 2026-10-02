@@ -16,6 +16,8 @@ export interface PoolInfo {
   vol30mUsd: number;
   vol1hUsd: number;
   vol24hUsd: number;
+  /** 4h volume from the datapi (trailing per-minute average for vol_accel); optional — older callers/tests omit it. */
+  vol4hUsd?: number;
   feeTvl30mPct: number;     // ratio for the window, in %
   feeTvl1hPct: number;
   feeTvl4hPct: number;
@@ -33,8 +35,6 @@ export interface Candidate {
   score: number;                 // 0-100 opportunity score
   scoreParts: Record<string, number>;
   gateFailures: GateFailure[];   // empty = passed pool gates
-  /** All gate-passing DLMM SOL pools for this mint (incl. `pool`), set by scan when there is more than one — molu's pool choice picks among them. */
-  siblings?: PoolInfo[];
 }
 
 export type VetVerdict = "pass" | "fail" | "error";
@@ -106,10 +106,14 @@ export type PositionState =
   | "closed_win" | "closed_missed" | "closed_stop" | "closed_safety"
   | "closed_rotation" | "closed_below" | "closed_manual";
 
-export type ExitReason = "P0_safety" | "P1_stop" | "P2_rotation" | "P3_above" | "P5_below" | "give_back" | "escape" | "manual" | "combo_exit" | "combo_idle_timeout" | "combo_left_behind";
+export type ExitReason = "P0_safety" | "P1_stop" | "P2_rotation" | "P3_above" | "P5_below" | "give_back" | "escape" | "manual" | "combo_exit" | "combo_idle_timeout" | "eys_seat_idle";
 
-/** Combo strategy play tag (owner's Eys+molu+Danko combo, with Typesafe Jev as master gate). */
-export type Play = "molu_ladder" | "eys_seat" | "danko_trap" | "eys_ape";
+/**
+ * Combo strategy play tag (Eys-only combo, Typesafe Jev as master gate). Historical
+ * rows may carry retired plays ('molu_ladder', 'danko_trap'); they load as null here
+ * (see isKnownPlay) and are only ever shown as labels.
+ */
+export type Play = import("./strategy/combo/plays.js").Play;
 
 export interface Position {
   id: number;
@@ -136,7 +140,7 @@ export interface Position {
   closeRequestedAt?: number | null;
   /** Combo strategy play tag; null for positions opened outside the combo pipeline. */
   play?: Play | null;
-  /** Reused from upstream's escape-hatch tracking: has the position ever fallen deep below range? Combo's danko_trap exit uses this as its "after a bounce" signal. */
+  /** Reused from upstream's escape-hatch tracking: has the position ever fallen deep below range? */
   fellDeep?: boolean;
 }
 

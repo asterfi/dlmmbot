@@ -608,7 +608,7 @@ export function buildLiveBookSnapshot(root) {
         mode: r.mode,
         state: r.state,
         sleeve,
-        /** Combo strategy play (molu_ladder | danko_trap | eys_seat | eys_ape), null outside combo. */
+        /** Combo strategy play (eys_seat | eys_breakout | eys_tight | eys_ape | eys_dump_bonus), null outside combo. */
         play: r.play ?? null,
         follow: r.follow_chain_id != null,
         entry_sol: entry,

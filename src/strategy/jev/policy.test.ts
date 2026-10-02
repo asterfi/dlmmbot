@@ -7,7 +7,7 @@ const ENTRY_CFG: JevEntryPolicyConfig = {
   uncertain_low: 0.45,
   uncertain_high: 0.55,
   weights: { fresh_flow: 0.3, fee_generation: 0.3, bounce: 0.25, narrative: 0.15 },
-  thresholds: { molu_ladder: 0.6, danko_trap: 0.6, eys_seat: 0.55, eys_ape: 0.7 },
+  thresholds: { eys_seat: 0.55, eys_tight: 0.55, eys_breakout: 0.65, eys_ape: 0.7, eys_dump_bonus: 0.55 },
 };
 
 function answers(overrides: Partial<JevEntryAnswers> = {}): JevEntryAnswers {
@@ -59,7 +59,7 @@ describe("evaluateEntryPolicy — play agreement", () => {
   });
 
   it("accepts disagreement in choice when the rule's play still clears play_prob_min", () => {
-    const a = answers({ playChoice: "molu_ladder", playProbabilities: { eys_seat: 0.35, molu_ladder: 0.5 } });
+    const a = answers({ playChoice: "eys_tight", playProbabilities: { eys_seat: 0.35, eys_tight: 0.5 } });
     const r = evaluateEntryPolicy("eys_seat", a, ENTRY_CFG);
     expect(r.decision).not.toBe("reject");
   });
@@ -86,7 +86,7 @@ describe("evaluateEntryPolicy — composite threshold and uncertainty", () => {
   });
 
   it("applies a stricter threshold for eys_ape than eys_seat", () => {
-    // composite ~0.63: clears eys_seat (0.55) and molu/danko (0.6) but not eys_ape (0.7)
+    // composite ~0.63: clears eys_seat (0.55) and eys_tight (0.55) but not eys_ape (0.7)
     const a = answers({ positives: { positive_fresh_flow: 0.7, positive_fee_generation_sol: 0.7, positive_bounce_confirmed: 0.6, positive_narrative_strength: 0.3 }, playChoice: "eys_ape", playProbabilities: { eys_ape: 0.9 } });
     const seatVerdict = evaluateEntryPolicy("eys_seat", { ...a, playChoice: "eys_seat", playProbabilities: { eys_seat: 0.9 } }, ENTRY_CFG);
     const apeVerdict = evaluateEntryPolicy("eys_ape", a, ENTRY_CFG);

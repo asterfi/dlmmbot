@@ -200,20 +200,27 @@ export function SleeveBadge({
 }
 
 const PLAY_LABEL: Record<string, string> = {
-  molu_ladder: "molu ladder",
-  danko_trap: "danko trap",
   eys_seat: "eys seat",
+  eys_breakout: "eys breakout",
+  eys_tight: "eys tight",
   eys_ape: "eys ape",
+  eys_dump_bonus: "eys dump bonus",
+  // Retired plays: historical rows keep their label, read-only.
+  molu_ladder: "molu ladder (retired)",
+  danko_trap: "danko trap (retired)",
 };
 
 const PLAY_TIP: Record<string, string> = {
-  molu_ladder: "molu_ladder — dip-and-bounce entry on an established (mcap >= $1M, age < 48h) token",
-  danko_trap: "danko_trap — deep one-sided bid 85-90% below price on a proven (mcap >= $1M, age >= 48h) token",
-  eys_seat: "eys_seat — fast narrow-range spot entry on high fee/volume pools",
-  eys_ape: "eys_ape — fixed-ticket token-sided ape into Stonks Launchpad graduates",
+  eys_seat: "eys_seat — first entry: Spot SOL-side default range on a high-volume, high-fee token",
+  eys_breakout: "eys_breakout — token-sided second position above price on 3x volume while the seat stays open",
+  eys_tight: "eys_tight — Spot SOL-side tight range (10-20 bins) on a steadily chopping pump",
+  eys_ape: "eys_ape — fixed-ticket token-sided ape into a pool that collects SOL-only fees",
+  eys_dump_bonus: "eys_dump_bonus — wide -85..-90% Bid-Ask SOL-side as volume fades near the high",
+  molu_ladder: "molu_ladder — retired play (historical position)",
+  danko_trap: "danko_trap — retired play (historical position)",
 };
 
-/** Combo strategy play badge (molu_ladder / danko_trap / eys_seat / eys_ape). */
+/** Combo strategy play badge (the Eys plays; retired molu/danko labels still render for historical rows). */
 export function PlayBadge({ play }: { play?: string | null }) {
   if (!play) return null;
   return (

@@ -8,7 +8,7 @@ cards = true               # render Telegram alerts as dashboard-styled PNG card
 # Stablecoins/majors/wrapped assets (2026-10-02 fix — see the input-coverage
 # report): the base mint (mintX) is rejected outright ("excluded_mint") when
 # it's in this list, regardless of mcap/tvl/fee/volume — a USDC-SOL pool
-# cleared every other gate and combo's danko_trap classified it. Every address
+# cleared every other gate and the combo classified it. Every address
 # below was verified against Jupiter's live token API (lite-api.jup.ag/tokens/v2,
 # tags include "stable"/"lst"/"major") on 2026-10-02, not guessed. Backed up by
 # a price-pegged-to-$1 heuristic (scanner/gates.ts isPeggedToDollar) and a Jev
@@ -702,204 +702,183 @@ deep_source_enabled = true
 limit = 100            # bars per fetch (RSI needs 15+; ATH/swing want as many as possible)
 max_per_min = 25       # GeckoTerminal public limit is 30/min; results are cached 60s
 
-# --- Combo strategy: Eys (fast) + molu (core) + Danko (deep), with Typesafe
-# Jev as a final master yes/no on every entry and every rule-triggered exit
-# (owner's decisions, 2026-10-01). NO equity drawdown fuse and NO per-position
-# stop-loss — see circuit_daily_loss_pct and stop_loss_frac above, both
-# disabled rather than deleted. Risk here is controlled only by sizing below.
+# --- Combo strategy: EYS-ONLY (owner's decision, 2026-10-03), with Typesafe Jev as a
+# final master yes/no on every entry and every rule-triggered exit. molu_ladder and
+# danko_trap were removed outright; this is built from Eys's two articles ("1 -> 100
+# SOL in 12 Days" and "0.1 -> 10 SOL ($CTO)"; the multi-day Stonks/Fibonacci play is
+# skipped). NO equity drawdown fuse and NO per-position stop-loss — see
+# circuit_daily_loss_pct and stop_loss_frac above, both disabled rather than deleted,
+# and the P0 price-crash trigger is skipped for combo positions. Risk here is
+# controlled only by sizing below ("0.3 SOL for quick in-and-out plays... never used my
+# entire portfolio"; token-sided = "amount I'm okay with losing").
 #
-# Entirely additive: a candidate that fits no play falls through unchanged to
-# upstream's existing Kelly-sized meme/micro/majors pipeline (§1-§5 above),
-# which still enforces every pool/token hard gate and vetting check FIRST —
-# combo only reclassifies and resizes candidates upstream already considers
-# safe to trade, after a candidate already got there. Disable entirely with
-# `enabled = false`.
+# While combo.enabled no other entry lane (upstream's own Kelly pipeline, follow
+# re-entry, majors, tranches) may open a position; a candidate that fits no play is
+# skipped as `combo_no_play`. Upstream still enforces every pool/token hard gate and
+# vetting check FIRST. Disable entirely with `enabled = false`.
 [combo]
 enabled = true
 
-# Eys 30/70 sizing: 30% of current equity (wallet SOL + open position value,
-# same `equity` risk/limits.ts computeBankroll() already computes) is the
-# combo strategy's ENTIRE active budget; the other 70% is NEVER DEPLOYED —
-# while combo.enabled, no other entry lane (upstream's own Kelly pipeline,
-# follow re-entry, majors, tranches) may open a position at all (owner's
-# blocker fix, 2026-10-01: the plays' own sizing is the ONLY risk control in
-# effect). A candidate that fits no play is skipped as `combo_no_play`, never
-# handed to Kelly sizing. molu_ladder and eys_seat each get ~1/3 of the active budget per position;
-# danko_trap gets up to 1/3 (and is capped at 1 concurrent regardless).
-# Sizes grow automatically as equity grows (percentages, not flat SOL).
+# Plays (positions.play): eys_seat (Spot SOL-side default range, the FIRST entry),
+# eys_breakout (token-sided SECOND position on an open seat), eys_tight (Spot SOL-side
+# tight 10-20 bins), eys_ape (fixed token-sided ticket into a SOL-fee pool),
+# eys_dump_bonus (wide -85..-90% Bid-Ask SOL-side as volume fades near the ATH).
+# Within a candidate AND for the single remaining slot, priority is:
+# breakout (for an open seat) > seat > tight > ape > dump bonus.
+play_priority = ["eys_breakout", "eys_seat", "eys_tight", "eys_ape", "eys_dump_bonus"]
+
+# Eys 30/70 sizing (normal mode): 30% of current equity is the combo's ENTIRE active
+# budget, eys_share_pct of it per SOL-side position, at most max_concurrent open.
+# Sizes grow with equity (percentages, not flat SOL).
 active_budget_pct = 30
-molu_share_pct = 33.33
 eys_share_pct = 33.33
-danko_share_pct = 33.33
-max_concurrent = 3          # hard cap, all three SOL-side plays combined (canary mode below overrides to 1 total, incl. ape)
+max_concurrent = 3
 min_floor_sol = 0.05        # never size below this; SKIP the play rather than oversize
 fee_reserve_sol = 0.05      # always-free rent/fee buffer combo sizing will not touch, on top of [sizing] reserve_sol/reserve_pct above
 
-# Canary sizing (owner addition, 2026-10-01) — for a small account (~0.3 SOL)
-# where the normal 30/70 math would size everything below the viable floor.
-# While canary_mode is true: max 1 combo position TOTAL (all four plays
-# share the one slot — whichever play Jev approves first takes it), SOL-side
-# plays (molu_ladder/danko_trap/eys_seat) size flat at canary_position_sol,
-# and eys_ape always uses its own fixed ape_sol ticket. Every size (canary or
-# normal) is affordability-checked: equity must cover size + fee_reserve_sol
-# + position_rent_est_sol, or the play is SKIPPED (skip_affordability),
-# never force-sized under the floor. Flip to false to restore normal 30/70
-# sizing with max_concurrent slots once the account has grown.
+# Canary sizing — for a small account (~0.3 SOL) where the normal 30/70 math would
+# size everything below the viable floor. While canary_mode is true: at most
+# canary_max_concurrent combo positions TOTAL (2: an open seat plus its breakout fill
+# both slots), SOL-side plays size flat at canary_position_sol and token-sided plays
+# (eys_ape, eys_breakout) at the fixed ape_sol ticket. Every size is
+# affordability-checked: equity must cover size + fee_reserve_sol + position rent
+# (position_rent_est_sol PER POSITION ACCOUNT — re-checked with the real account count
+# once the range is built), or the play is SKIPPED (skip_affordability), never
+# force-sized under the floor. Flip canary_mode to false for normal 30/70 sizing.
 canary_mode = true
 canary_position_sol = 0.1
-position_rent_est_sol = 0.065   # DLMM position-account rent estimate (observed range ~0.06-0.07 SOL; see ranges/binRent.ts BIN_ARRAY_RENT_SOL=0.075/array)
+canary_max_concurrent = 2
+position_rent_est_sol = 0.065   # DLMM position-account rent estimate (observed ~0.06-0.07 SOL; see ranges/binRent.ts BIN_ARRAY_RENT_SOL=0.075/array)
 
-# molu_ladder (core): token age < 48h, mcap >= $1M, enter only AFTER a dip and
-# bounce (never on the initial vertical). Uses the same 5m-candle swing
-# high/low the main planner already reads (ranges/planner.ts swing()).
-molu_mcap_min_usd = 1000000
-molu_age_max_h = 48
-molu_dip_min_pct = 20       # dip = price fell >=20% off its local high...
-molu_bounce_min_pct = 5     # ...then bounced >=5% off the resulting low
-molu_tp_pct = 15            # exit: +15% position value bounce...
-molu_tp_pct_top_tier = 5    # ...or +5% when the position's entry size is in the top tier
-molu_top_tier_sol = 0.5     # "top tier" position-size threshold for the 5% exit
-molu_above_exit_min = 10    # filled ladder above its range this long -> close to the upside (molu: "close a pool to the upside to lock in profits")
-# Range shape (one-sided SOL bid-ask below price, ~100-125 bins) is built by
-# the existing planner/bin-rent machinery (ranges/planner.ts, ranges/binRent.ts)
-# under the normal [entry] min_down_pct/max_down_pct/max_position_accounts
-# knobs above — no separate range builder for molu.
-
-# eys_seat (fast): mcap >= $100k, >=10 SOL fees earned in the pool, high
-# volume. "High volume" is mapped to the scanner's own freshest volume-rate
-# signal: vol30mUsd / 30 (USD/min over the last 30 minutes), compared against
-# the owner's Eys threshold of >=100k USD/min. Spot, SOL-side only, default/
-# narrow range (upstream's existing spot-range code; combo does not widen it).
-# Token-sided legs are NOT included, per the owner's decision.
+# --- Eys token selection (hard gates; "never force a trade") ---
+# "100k+ MCAP, at least 10 SOL in fees, 100K+ volume per minute, 0 dev fees, and of
+# course, a good lore" — lore + KOL buys are Jev's narrative question and the GMGN
+# smart-flow state. "0 dev fees": not exposed by the datapi/GMGN trending data we
+# read, so it is NOT enforced beyond the token2022_extensions vetting gate (a
+# Token-2022 transfer fee fails it); `devFeesKnownZero` is plumbed for when a source exists.
 eys_mcap_min_usd = 100000
-eys_fees_earned_min_sol = 10        # lifetime fees earned in the pool (approximated, see strategy/combo/plays.ts)
-eys_flow_usd_per_min_min = 100000   # Eys threshold, mapped to vol30mUsd/30 above
-eys_reject_mcap_lo_usd = 500000     # reject the 500k-1M mcap band when fees earned < the floor above (fake volume)
+eys_fees_earned_min_sol = 10        # lifetime fees earned in the pool (approximated from the 24h run-rate x pool age, see loop.ts)
+# Fake volume: "500K-1M MCAP but only around 8-10 SOL in fees... red flag". Flagged
+# ratios are 8-20 SOL of fees per $1M of mcap (10/1M ... 10/0.5M); the upper edge is
+# the bar, so a token needs >= 20 SOL of lifetime fees per $1M of mcap (>= 10 SOL at
+# 500k, >= 20 SOL at 1M, >= 40 SOL at 2M).
+eys_fee_per_musd_min = 20
+eys_reject_mcap_lo_usd = 500000     # (legacy band keys; the ratio above replaces them)
 eys_reject_mcap_hi_usd = 1000000
-eys_tp_pct = 2                      # exit at +1-3% green (configurable), default 2%, or flow death
-# Eys-only young-age carve-out (owner, 2026-10-02): live GMGN 5m trending right
-# now shows hot tokens 6-36min old; upstream's age_min_minutes=45 (above)
-# rejects them before combo classification ever runs, so real Eys setups
-# ("watch 1-2 min, then ape") can never fire. A candidate aged in
-# [eys_age_min_minutes, age_min_minutes) is let through vetToken's age_min
-# gate ONLY to be considered for eys_seat/eys_ape -- molu_ladder/danko_trap
-# still require the full 45min floor, and under 10min is still an
-# unconditional hard fail. Unknown age is unaffected (still fails closed).
+# Young-age carve-out (owner, 2026-10-02): GMGN's hot tokens run 6-36min old while
+# upstream's age_min_minutes=45 rejects them before combo classification. A candidate
+# aged in [eys_age_min_minutes, age_min_minutes) is let through vetToken; under 10min
+# is still an unconditional hard fail; unknown age still fails closed.
 eys_age_min_minutes = 10
 
-# danko_trap (deep): mcap >= $1M AND token age >= 48h (a proven floor — both
-# required, not either/or). One-sided SOL bid-ask from current price down to
-# -85%/-90%, built by strategy/combo/dankoRange.ts (bypasses the generic
-# planner's P0-safety-margin depth cap, since this play deliberately goes
-# deeper than that cap allows; P0's rug-safety exits remain active regardless
-# of planned range depth). Max 1 concurrent, enforced in sizing.
-danko_mcap_min_usd = 1000000
-danko_age_min_h = 48
-danko_down_min_pct = 85
-danko_down_max_pct = 90
-danko_tp_pct = 17.5          # exit at break-even-or-better after a bounce, or +15-20% if it runs (midpoint default)
-# Danko's own selection rules (strategy-fidelity fix, 2026-10-02, re-read from
-# his Part 3 post): "a token that still has buyers and volume after a dump",
-# discovered by "volume relative to active liquidity" (not raw volume). Three
-# gates, all fail-closed on unknown data (see strategy/combo/plays.ts
-# classifyDanko): a recent dump (price now this far below its recent high),
-# live flow_ratio (freshest 5m volume / pool TVL — bin-level active liquidity
-# isn't exposed by the scanner today), and buyers still present (price has
-# started bouncing off the post-dump low at all).
-danko_dump_min_pct = 30
-# Default chosen without a live sample yet (none of the 6 observed live
-# trades had flow_ratio computed under the old rules) — 0.05 means 5m volume
-# at least 5% of pool TVL, a level that should separate "still trading" pools
-# from genuinely dead ones for typical meme-pool TVL ($20k-150k). Revisit once
-# a live distribution exists (see the read-only check in this round's report).
-danko_flow_ratio_min = 0.05
-# Flow-death exit (owner, 2026-10-02: "when 5m volume disappears, the fees
-# disappear with it... I manage positions based on flow"). Fraction of
-# danko_flow_ratio_min below which current flow counts as collapsed — unlocks
-# a break-even exit ONLY; Danko never stop-losses, so a flow-dead position
-# still below break-even just keeps holding the ladder.
-danko_flow_death_ratio = 0.3
-# Canary mode (1 slot): a never-filled Danko ladder ties up the only slot far
-# longer than it should. 6h stands when canary_mode is off.
-danko_idle_max_h_canary = 2
-# Canary priority (owner, 2026-10-02): live evidence showed molu-shaped
-# candidates (DvdmEnzt, D1YZZg9d) losing the single slot to Danko every
-# sweep. Danko only takes the slot when nothing higher in this list looked
-# eligible this sweep (see manager/loop.ts's canary pre-sort).
-play_priority = ["eys_seat", "eys_ape", "molu_ladder", "danko_trap"]
+# --- Dynamic per-minute volume bar (owner: "find a sweet spot... make it dynamic... let
+# Jev decide") ---
+# Hard tier = Eys's literal "ape immediately" bar: >= 100k USD/min (Jev is still
+# consulted, normal bar). Soft tier: between the dynamic floor and the hard tier,
+# AND accelerating (vol_accel >= eys_vol_accel_min), goes to Jev with a STRICTER bar
+# (jev_eys_soft_bar composite). Dynamic floor = max(eys_vol_floor_usd_per_min, the
+# eys_vol_percentile of per-minute volume among current GMGN 5m trending tokens with
+# mcap >= 100k), recomputed from the trending read each sweep (the 10-minute cached poll
+# — no extra GMGN calls); it is OFF (soft tier closed) when fewer than 5 trending
+# samples exist or the floor is not below the hard tier. vol_accel = freshest per-minute
+# volume / the pool's trailing per-minute average (datapi 4h, else 1h).
+eys_flow_usd_per_min_min = 100000   # legacy key, also used by eys_ape's flow bar
+eys_vol_hard_usd_per_min = 100000
+eys_vol_floor_usd_per_min = 15000
+eys_vol_percentile = 0.8
+eys_vol_accel_min = 2.0
+jev_eys_soft_bar = 0.65
+# Datapi has no documented freshness guarantee and no timestamp in its pool payload:
+# a candidate whose newest snapshot is older than this, or whose volume/fee fields
+# were identical across 3 consecutive polls while the rest of the market moved, is
+# skipped (gate stale_pool_data).
+datapi_max_age_s = 120
 
-# eys_ape (owner addition, 2026-10-01; widened 2026-10-02): token-sided ape,
-# range above price, SOL-fee pools (Eys "0.1->10 SOL" $CTO article). Re-read
-# 2026-10-02: Eys found candidates watching GMGN + Meteora directly (clicking
-# every coin posted in a DLMM Discord channel) — Stonks was a bonus ("fees can
-# get huge there"), never a requirement. Discovery is now ANY candidate from
-# the main Meteora sweep that already cleared upstream's gates + vetting +
-# exclude_mints, PLUS Stonks-feed mints as before; Stonks mints get a ranking
-# boost (ape_stonks_priority) for the single ape slot. Fixed ticket size, NOT
-# a % of the active budget. Max 1 concurrent regardless of canary_mode. Can go
-# to zero; no stop loss (owner's decision, same as every other play).
+# --- eys_seat: Spot SOL-side, default range below price (top bin = active bin) ---
+# Exit: green >= eys_tp_pct OR flow death (held flow_dead_confirm_min) — never a stop.
+eys_tp_pct = 2                      # "whether it's 1%, 2%, or 3%"
+eys_seat_range_below_pct = 12       # same depth as the Spot majors default range
+# A seat above its range (about all SOL, flat) for this long with no breakout leg open on
+# the mint is idle and blocks a slot: close it (eys_seat_idle). While a breakout leg is
+# open the seat stays as the backup; once the breakout closes the rule applies at once if
+# the 20 minutes above range already elapsed.
+eys_seat_idle_above_min = 20
+
+# --- eys_breakout: token-sided SECOND position while the same token's seat is open ---
+# Trigger: price breaks above the seat's top, per-minute volume >= eys_breakout_mult x the
+# threshold the seat entered under (Eys: 100k -> 300k; a soft-tier seat demands 3x its
+# floor), and a strong spike (last 5m candle up >= eys_breakout_spike_pct). The seat is
+# NOT closed on breakout. Exit: range fully converted to SOL, green >= eys_tp_pct, or flow
+# death. Fixed ape_sol ticket.
+eys_breakout_mult = 3
+eys_breakout_spike_pct = 10
+
+# --- eys_tight: Spot SOL-side tight range (Eys: 10-20 bins) ---
+# Trigger: volume clears the seat threshold, the token has been in OUR scanner's pool
+# snapshots >= eys_tight_observe_min minutes ("watching the token for 1-2 minutes"), no
+# 5m candle <= -eys_tight_dump_pct inside the last eys_tight_candles candles ("no major
+# dump"), and those candles chop inside eys_tight_range_max_pct high-to-low.
+eys_tight_bins = 15
+eys_tight_observe_min = 2
+eys_tight_dump_pct = 15
+eys_tight_range_max_pct = 25
+eys_tight_candles = 3
+
+# --- eys_dump_bonus: wide Bid-Ask SOL-side near the ATH as volume fades ---
+# Trigger: on a token with an open Eys position, the freshest candle's volume is
+# >= eys_dump_peak_drop_pct below its peak over the last eys_dump_window_candles candles
+# AND price is within eys_dump_ath_within_pct of the window's ATH. Range reaches
+# -eys_dump_down_min..max_pct. Exit: green on a real fill (never flow death — that is its
+# premise). A never-filled bonus ladder is closed after eys_dump_idle_max_h.
+eys_dump_peak_drop_pct = 50
+eys_dump_ath_within_pct = 20
+eys_dump_window_candles = 12
+eys_dump_down_min_pct = 85
+eys_dump_down_max_pct = 90
+eys_dump_idle_max_h = 2
+
+# eys_ape (owner addition, 2026-10-01; widened 2026-10-02): token-sided ape, range above
+# price, SOL-fee (quote-only) pools (Eys "0.1->10 SOL" $CTO article: "even if the token
+# ended up getting rugged, I would still be earning SOL fees"). Discovery is ANY candidate
+# from the main Meteora sweep that already cleared upstream's gates + vetting +
+# exclude_mints, PLUS Stonks-feed mints; Stonks mints get a ranking boost
+# (ape_stonks_priority). The pool's fee-collection mode is read from the on-chain LbPair
+# (SDK collectFeeMode) when available. Fixed 0.1 SOL ticket ("My risk management has
+# always been 0.1 SOL"), max 1 concurrent, can go to zero, no stop loss.
 ape_enabled = true
-ape_sol = 0.1                # fixed ape ticket (both canary and normal mode)
-ape_age_max_h = 48           # new coin only — a proven-floor token belongs to danko_trap/molu, not a token-sided no-stop-loss bet
+ape_sol = 0.1                # fixed token-sided ticket (eys_ape and eys_breakout, canary and normal mode)
+ape_age_max_h = 48           # new coin only
 ape_mcap_min_usd = 100000    # same floor as eys_seat
-ape_fee_min_sol = 10         # lifetime fees earned in the pool — ALWAYS required now, not just the fee_mode_unknown fallback
+ape_fee_min_sol = 10         # lifetime fees earned in the pool — ALWAYS required
 ape_range_up_pct = 50        # token-sided range above price, upper bound (bin/rent-capped like every other range)
 ape_stonks_priority = true   # Stonks-listed mints rank ahead of equal-score Meteora-only candidates for the single ape slot
 # LIVE from day one (owner's decision, 2026-10-01): the SOL->token swap and the
 # token-sided deposit were sign-only Privy policy smoke-tested ALLOW
-# (scripts/policy-smoke-real.ts); claim/close risk is identical across every
-# play and is accepted (backstopped off-box). Kill switch: set false to force
-# eys_ape back to paper-only without touching live.ts.
+# (scripts/policy-smoke-real.ts). Kill switch for ALL token-sided plays (eys_ape and
+# eys_breakout): false forces them back to paper-only without touching live.ts.
+# Token-2022 mints are skipped for token-sided plays (the Privy program allowlist does
+# not cover them; gate token2022_policy).
 ape_live_enabled = true
 
-# eys_seat cost-skip (owner addition, 2026-10-01): skip the play when its
-# expected win (eys_tp_pct x size) would not clear the estimated round-trip
-# cost — a position too small for the edge to survive tx/priority fees and
-# exit slippage. Logged as `skip_cost`.
+# Take-profit cost-skip (owner addition, 2026-10-01): skip a play when its expected win
+# (eys_tp_pct x size) would not clear the estimated round-trip cost. Logged as `skip_cost`.
+# 2026-10-03: eys_cost_tx_sol 0.0006 -> 0.0003. At the owner's 0.1 SOL tickets and a 2%
+# target the expected win is 0.002 SOL; with 0.0006/tx the estimated cost (0.0029) made
+# EVERY seat a skip_cost. Real per-tx cost (5000-lamport base fee + a small priority fee)
+# is ~0.0001-0.0003, so the estimate is now 4 x 0.0003 + 0.5% slippage = 0.0017 SOL.
 eys_cost_tx_count = 4           # ~4 txs/round trip: open, claim/close, exit swap, close-account
-eys_cost_tx_sol = 0.0006        # estimated SOL cost per tx (priority fee + base fee; matches PAPER_TX_COST_SOL order of magnitude)
+eys_cost_tx_sol = 0.0003        # estimated SOL cost per tx (priority fee + base fee)
 eys_cost_slippage_bps = 50      # expected swap slippage on the exit leg
 
-# Live-churn fix (owner, 2026-10-02): positions 1-6 (danko_trap, COCKROACH/HOOKED)
-# each opened a SOL-side ladder below price, price ran away before the ladder
-# ever filled, upstream's generic P3_above "missed" case closed them at 0 fees
-# every ~18min, and the bot immediately re-opened the same token — 5 cycles,
-# -0.0085 SOL + 5 stranded empty token accounts. Combo positions are now
-# managed ONLY by comboExitCheck + P0 rug-safety; upstream P1/P2/P3/give_back/
-# escape/displacement never touch a position with play set (see loop.ts). A
-# ladder that never fills needs its own timeout, since nothing else will ever
-# close it — "never filled" = active bin has never gone strictly below the
-# ladder's top bin (ever_in_range is NOT this signal; it is trivially true
-# from bin 1 of entry for a below-price ladder).
-danko_idle_max_h = 6
-molu_idle_max_h = 2
-# Per-mint re-entry cooldown after a combo close that was near-breakeven
-# (+-0.5% of entry, walletDelta-based) or that never filled at all.
+# Per-mint re-entry cooldown after a combo close that was near-breakeven (+-0.5% of
+# entry, walletDelta-based) or that never filled at all.
 reentry_cooldown_h = 3
-# Shorter cooldown after a genuine win/loss close, so the bot doesn't bounce
-# straight back into the same token on the very next sweep.
+# Shorter cooldown after a genuine win/loss close, so the bot doesn't bounce straight
+# back into the same token on the very next sweep.
 reentry_cooldown_after_trade_min = 30
-# Combo flow-death confirmation (owner, 2026-10-03): pos#7 OCTO closed on a single tick of
-# vol30m=4834 < 5000. The raw flow-death condition must now hold continuously this long.
+# Flow-death confirmation (owner, 2026-10-03): pos#7 OCTO closed on a single tick of
+# vol30m=4834 < 5000. The raw flow-death condition must hold continuously this long.
 flow_dead_confirm_min = 3
-# molu range (owner, 2026-10-03; molu's "Be the House" Book 1: SOL only below price,
-# Bid-Ask, ~100-125 bins on a new coin). Target bin count below the active bin
-# replaces upstream's min_down_pct/max_down_pct depth band; capped at -90%.
-# 110 bins span two position accounts (refundable rent, priced by the
-# affordability check).
-molu_bins_target = 110
-molu_bins_min = 100
-molu_bins_max = 125
-# Pool choice for molu on tokens under molu_age_max_h (Book 1: "fee tier 5 to 10% if
-# it's fresh, or use the pool with the most volume"): the 5-10% base-fee pool when
-# its 30m volume >= this, else the pool with the highest 30m volume (not deepest TVL).
-molu_fee_pool_min_vol30m_usd = 10000
-# Left-behind unfilled ladders (owner, 2026-10-03): price >= left_behind_pct above
-# the ladder's top bin for left_behind_min minutes -> close (combo_left_behind),
-# instead of waiting out the idle timeout. Idle timeouts still cover ladders
-# hovering just above range.
-left_behind_pct = 20
-left_behind_min = 30
 
 # --- Jev: Typesafe System One decision layer (api.typesafe.ai/v1/systemone) ---
 # Per docs.typesafe.ai: ONE request per decision (speculative fan-out — all
@@ -944,10 +923,11 @@ weight_narrative = 0.15
 # Per-play composite-score bar. eys_ape is stricter (0.70) than the other
 # three (0.55-0.60) because it is token-sided and can go to zero — the
 # riskiest play gets the highest bar to clear.
-entry_threshold_molu_ladder = 0.60
-entry_threshold_danko_trap = 0.60
 entry_threshold_eys_seat = 0.55
+entry_threshold_eys_tight = 0.55
+entry_threshold_eys_breakout = 0.65   # token-sided second leg
 entry_threshold_eys_ape = 0.70
+entry_threshold_eys_dump_bonus = 0.55
 
 # Owner's decision (2026-10-02): be aggressive like the authors, not
 # conservative. An uncertain composite (inside the uncertain band, above) on
@@ -956,5 +936,5 @@ entry_threshold_eys_ape = 0.70
 # job here is the red-flag veto, not an extra conservatism layer on a
 # genuinely ambiguous read. eys_ape (token-sided, no stop-loss) keeps the
 # conservative skip. Red-flag vetoes always reject regardless of this.
-uncertain_entry = "rules"        # molu_ladder / danko_trap / eys_seat
-ape_uncertain_entry = "skip"     # eys_ape override
+uncertain_entry = "rules"        # SOL-side Eys plays (eys_seat / eys_tight / eys_dump_bonus)
+ape_uncertain_entry = "skip"     # token-sided override (eys_ape, eys_breakout)
