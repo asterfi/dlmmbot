@@ -311,6 +311,16 @@ describe("jevConsult — uncertain-entry policy (owner's decision 2026-10-02: ag
     expect(r.outcome).toBe("jev_uncertain_rules_enter");
   });
 
+  it("skips an uncertain answer under a stricter bar (soft volume tier) even when uncertain_entry=rules", async () => {
+    installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "rules" } as any; });
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers: uncertainAnswers, usage: {} })));
+    const r = await jevConsult(enterInput({ play: "eys_seat", minComposite: 0.65 }));
+    expect(r.consulted).toBe(true);
+    expect(r.verdict).toBe("no");
+    expect(r.outcome).toBe("uncertain");
+  });
+
   it("still skips for eys_ape even when uncertain_entry=rules globally (per-play override defaults to skip)", async () => {
     installConfig((c) => { c.jev = { ...c.jev, uncertain_entry: "rules" } as any; });
     vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");

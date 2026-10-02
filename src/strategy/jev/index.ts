@@ -246,9 +246,14 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
         // composite defers to the play's own rules (enter) rather than
         // skipping; eys_ape (token-sided, no stop-loss) keeps the
         // conservative skip. Config-driven, per-play overridable.
-        const mode = input.play === "eys_ape" || input.play === "eys_breakout"
-          ? (j.ape_uncertain_entry ?? "skip")
-          : (j.uncertain_entry ?? "rules");
+        // A stricter bar (minComposite: soft volume tier, below Eys's literal
+        // 100k/min) means "only on a clear Jev yes" — an uncertain answer there
+        // must not slip through via the rules fallback (owner, 2026-10-03).
+        const mode = input.minComposite !== undefined
+          ? "skip"
+          : input.play === "eys_ape" || input.play === "eys_breakout"
+            ? (j.ape_uncertain_entry ?? "skip")
+            : (j.uncertain_entry ?? "rules");
         if (mode === "rules") {
           result = { consulted: true, verdict: "yes", fallback: false, outcome: "jev_uncertain_rules_enter", latencyMs: res.latencyMs, slow, raw,
             playChoice: answers.playChoice,
@@ -256,7 +261,7 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
         } else {
           result = { consulted: true, verdict: "no", fallback: false, outcome: "uncertain", latencyMs: res.latencyMs, slow, raw,
             playChoice: answers.playChoice,
-            reason: `uncertain (composite=${outcome.compositeScore.toFixed(3)} in band) — entry skipped (uncertain_entry=skip)` };
+            reason: `uncertain (composite=${outcome.compositeScore.toFixed(3)} in band) — entry skipped (${input.minComposite !== undefined ? "stricter soft-tier bar" : "uncertain_entry=skip"})` };
         }
       } else {
         result = { consulted: true, verdict: "no", fallback: false, outcome: "ok", latencyMs: res.latencyMs, slow, raw,
