@@ -17,7 +17,7 @@ const CFG: ComboConfigLike = {
   eys_flow_usd_per_min_min: 100_000,
   eys_vol_hard_usd_per_min: 100_000,
   eys_vol_accel_min: 2,
-  eys_fee_per_musd_min: 20,
+  eys_fee_per_musd_min: 10,
   eys_breakout_mult: 3,
   eys_breakout_spike_pct: 10,
   eys_tight_observe_min: 2,
@@ -120,14 +120,17 @@ describe("eys_seat — hard gates", () => {
     expect(playsOf(feats({ feesEarnedPoolSol: 9.99 }))).toEqual([]);
     expect(playsOf(feats({ feesEarnedPoolSol: null }))).toEqual([]);
   });
-  it("fake volume: 500k-1M mcap with only 8-10 SOL of fees is a red flag (fees per $1M mcap >= 20)", () => {
-    // 10 SOL at 700k = 14.3/M -> rejected; 15 SOL at 700k = 21.4/M -> accepted
-    expect(playsOf(feats({ mcapUsd: 700_000, feesEarnedPoolSol: 10 }))).toEqual([]);
-    expect(playsOf(feats({ mcapUsd: 700_000, feesEarnedPoolSol: 15 }))).toContain("eys_seat");
-    // 10 SOL at 500k = 20/M sits exactly on the bar
-    expect(playsOf(feats({ mcapUsd: 500_000, feesEarnedPoolSol: 10 }))).toContain("eys_seat");
-    expect(playsOf(feats({ mcapUsd: 1_000_000, feesEarnedPoolSol: 19 }))).toEqual([]);
-    expect(playsOf(feats({ mcapUsd: 1_000_000, feesEarnedPoolSol: 20 }))).toContain("eys_seat");
+  it("fake volume, per Eys: 500K-1M mcap with only 8-10 SOL of fees is a red flag", () => {
+    // Inside the band: <= 10 SOL is fake, above 10 is fine.
+    expect(playsOf(feats({ mcapUsd: 500_000, feesEarnedPoolSol: 10 }))).toEqual([]);
+    expect(playsOf(feats({ mcapUsd: 700_000, feesEarnedPoolSol: 9 }))).toEqual([]);
+    expect(playsOf(feats({ mcapUsd: 1_000_000, feesEarnedPoolSol: 10 }))).toEqual([]);
+    expect(playsOf(feats({ mcapUsd: 700_000, feesEarnedPoolSol: 12 }))).toContain("eys_seat");
+    // Above the band: fees per $1M mcap must reach 10 (the flag's lower edge at $1M).
+    expect(playsOf(feats({ mcapUsd: 2_900_000, feesEarnedPoolSol: 36.5 }))).toContain("eys_seat"); // 12.6/M, real token
+    expect(playsOf(feats({ mcapUsd: 5_000_000, feesEarnedPoolSol: 40 }))).toEqual([]);             // 8/M, too thin
+    // Below the band, the plain 10 SOL floor rules.
+    expect(playsOf(feats({ mcapUsd: 300_000, feesEarnedPoolSol: 10 }))).toContain("eys_seat");
   });
   it("feePerMusd math", () => {
     expect(feePerMusd(10, 500_000)).toBeCloseTo(20, 9);

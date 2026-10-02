@@ -175,6 +175,9 @@ export interface ComboConfigLike {
   eys_vol_accel_min?: number;
   /** Fake-volume rule: lifetime fees (SOL) per $1M of mcap must reach this. */
   eys_fee_per_musd_min?: number;
+  /** Eys's red-flag band: inside [lo, hi] mcap, fees must be strictly above 10 SOL. */
+  eys_reject_mcap_lo_usd?: number;
+  eys_reject_mcap_hi_usd?: number;
   eys_breakout_mult?: number;
   eys_breakout_spike_pct?: number;
   eys_tight_observe_min?: number;
@@ -222,6 +225,10 @@ function eysBaseOk(f: PlayCandidateFeatures, c: ComboConfigLike): string[] | nul
   // "500K-1M MCAP but only around 8-10 SOL in fees... red flag" -> fees per $1M of
   // mcap must clear the ratio implied by that flag (config eys_fee_per_musd_min).
   if (c.eys_fee_per_musd_min !== undefined && (ratio === null || ratio < c.eys_fee_per_musd_min)) return null;
+  // The flag itself names a band: 500K-1M mcap with 8-10 SOL is fake. Inside that
+  // band, fees must be strictly above 10 SOL (the 10 SOL floor alone would admit 10.0).
+  const lo = c.eys_reject_mcap_lo_usd ?? 500_000, hi = c.eys_reject_mcap_hi_usd ?? 1_000_000;
+  if (f.mcapUsd >= lo && f.mcapUsd <= hi && f.feesEarnedPoolSol <= 10) return null;
   return [
     `mcap $${f.mcapUsd.toFixed(0)} >= $${c.eys_mcap_min_usd}`,
     `fees earned ${f.feesEarnedPoolSol.toFixed(2)} SOL >= ${c.eys_fees_earned_min_sol} SOL`,

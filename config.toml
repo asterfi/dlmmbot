@@ -762,8 +762,8 @@ eys_fees_earned_min_sol = 10        # lifetime fees earned in the pool (approxim
 # ratios are 8-20 SOL of fees per $1M of mcap (10/1M ... 10/0.5M); the upper edge is
 # the bar, so a token needs >= 20 SOL of lifetime fees per $1M of mcap (>= 10 SOL at
 # 500k, >= 20 SOL at 1M, >= 40 SOL at 2M).
-eys_fee_per_musd_min = 20
-eys_reject_mcap_lo_usd = 500000     # (legacy band keys; the ratio above replaces them)
+eys_fee_per_musd_min = 10       # >= 10 SOL fees per $1M mcap: the lower edge of Eys's flag (8-10 SOL at $1M is fake); 20 rejected real tokens like a $2.9M / 36 SOL-fee pool
+eys_reject_mcap_lo_usd = 500000     # Eys's red-flag band: fees must be > 10 SOL inside 500K-1M mcap
 eys_reject_mcap_hi_usd = 1000000
 # Young-age carve-out (owner, 2026-10-02): GMGN's hot tokens run 6-36min old while
 # upstream's age_min_minutes=45 rejects them before combo classification. A candidate
