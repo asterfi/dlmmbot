@@ -168,6 +168,43 @@ export function gmgnPaceState(): { throttleLevel: number; budget: number; banned
   return { throttleLevel: (loadState(), decayThrottle(), throttleLevel), budget: gmgnSpendBudget(), bannedUntil };
 }
 
+// --- Call instrumentation (owner, 2026-10-03): the shared key still hit GMGN rate
+// limits ~1x/hour although a 3-min process capture saw only ~1 call/90s. One
+// cheap journal line per CLI call, plus a ring buffer so a rate_limit event can
+// print what immediately preceded it. Disable with GMGN_CALL_LOG=0.
+const LOG_CALLS = process.env.GMGN_CALL_LOG !== "0";
+const CALL_RING_MAX = 300;
+const callRing: Array<{ t: number; sub: string; bucket: GmgnBucketId; weight: number }> = [];
+
+function subOf(args: string[]): string {
+  return `${args[0] ?? "?"} ${args[1] ?? ""}`.trim();
+}
+
+function recordCall(args: string[], bucket: GmgnBucketId, weight: number, queued: number): void {
+  const t = Date.now();
+  callRing.push({ t, sub: subOf(args), bucket, weight });
+  if (callRing.length > CALL_RING_MAX) callRing.shift();
+  if (LOG_CALLS) {
+    console.log(`[gmgn/call] t=${new Date(t).toISOString()} sub="${subOf(args)}" bucket=${bucket} weight=${weight} queued=${queued} throttle=L${throttleLevel}`);
+  }
+}
+
+/** One line: calls per subcommand in the last `windowMs` — what preceded a rate-limit event. */
+export function gmgnRecentCallSummary(windowMs = 60_000, now = Date.now()): string {
+  const counts = new Map<string, number>();
+  for (const c of callRing) if (now - c.t <= windowMs) counts.set(c.sub, (counts.get(c.sub) ?? 0) + 1);
+  if (counts.size === 0) return "none";
+  return [...counts.entries()].map(([k, v]) => `${k}=${v}`).join(", ");
+}
+
+/** Weight-5 token-lane calls in the last minute — the optional enrichments (holders / traders). */
+function heavyTokenCallsLastMin(now = Date.now()): number {
+  return callRing.filter((c) => c.bucket === "token" && c.weight >= 5 && now - c.t <= 60_000).length;
+}
+
+/** Max optional weight-5 token calls per rolling minute (burst spreading). */
+export const GMGN_OPTIONAL_HEAVY_PER_MIN = 3;
+
 type Job = {
   args: string[];
   resolve: (s: string) => void;
@@ -257,6 +294,12 @@ export function gmgnSpendOk(
   const pending = queue.filter((j) => gmgnBucketId(j.args) === bucketId);
   const pendingWeight = pending.reduce((n, j) => n + gmgnRouteWeight(j.args), 0);
   if (opts.optional) {
+    // Burst spreading (owner, 2026-10-03): optional enrichments yield entirely
+    // while the adaptive throttle is above L0, and are capped per minute even
+    // when it isn't — several candidates vetted in one sweep used to fire a
+    // holders/traders call each, back to back.
+    if (throttleLevel >= 1) return false;
+    if (weight >= 5 && heavyTokenCallsLastMin() >= GMGN_OPTIONAL_HEAVY_PER_MIN) return false;
     if (pending.length >= 1 || pendingWeight + weight > GMGN_BUCKET_CAP) return false;
     if (bucketId === "token" && pending.length >= 2) return false;
   }
@@ -366,6 +409,7 @@ async function runOne(args: string[]): Promise<string> {
   const gap = Math.max(0, b.nextSlotAt - Date.now());
   if (gap > 0) await sleep(gap);
   await waitForBucketTokens(bucketId, weight);
+  recordCall(args, bucketId, weight, queue.length);
 
   try {
     // Own the cooldown — any CLI call during a ban extends RATE_LIMIT_BANNED (+5s each).
@@ -381,6 +425,7 @@ async function runOne(args: string[]): Promise<string> {
     });
     const combined = `${stdout}\n${stderr ?? ""}`;
     if (isGmgnRateLimitText(combined)) {
+      console.warn(`[gmgn/rate_limit_context] on "${subOf(args)}"; last 60s calls: ${gmgnRecentCallSummary()}; last 5m: ${gmgnRecentCallSummary(300_000)}`);
       enterBan(parseGmgnResetMs(combined) ?? Date.now() + DEFAULT_BAN_MS);
       throw new Error("gmgn 429");
     }
@@ -390,6 +435,7 @@ async function runOne(args: string[]): Promise<string> {
     const err = e as { stderr?: string; stdout?: string; message?: string };
     const text = `${err.message ?? ""}\n${err.stdout ?? ""}\n${err.stderr ?? ""}${String(e)}`;
     if (isGmgnRateLimitText(text)) {
+      console.warn(`[gmgn/rate_limit_context] on "${subOf(args)}"; last 60s calls: ${gmgnRecentCallSummary()}; last 5m: ${gmgnRecentCallSummary(300_000)}`);
       enterBan(parseGmgnResetMs(text) ?? Date.now() + DEFAULT_BAN_MS);
       throw new Error(BAN_ERR);
     }
@@ -461,6 +507,7 @@ export function _resetGmgnPaceForTests(): void {
   stateLoaded = true;   // tests never read or write the persisted pace file
   persistState = false;
   buckets.clear();
+  callRing.length = 0;
   cache = null;
   secCache.clear();
   tagCache.clear();

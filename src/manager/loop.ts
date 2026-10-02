@@ -142,6 +142,9 @@ const midBandLogged = new Set<number>();              // young-exit telemetry lo
 const rugcheckLastCheck = new Map<number, number>();  // P0 rugcheck-flip throttle
 const everInRange = new Set<number>();                // P3 win-vs-missed classification
 const fellDeep = new Set<number>();                   // escape hatch armed (also persisted)
+// combo flow-death confirmation (owner, 2026-10-03): the raw flowDead / flowCollapsed condition must hold continuously for combo.flow_dead_confirm_min before it may trigger an exit. In-memory: a restart just restarts the confirmation window, which is the safe direction.
+const comboFlowDeadSince = new Map<number, number>();
+const comboFlowCollapsedSince = new Map<number, number>();
 const comboAboveSince = new Map<number, number>();   // combo: when price last went above this position's range (unix s); cleared in/below range
 const everFilled = new Set<number>();                 // combo: has this ladder ever actually converted SOL->token? (also persisted)
 const peakPnl = new Map<number, number>();            // give-back telemetry: best fee-inclusive PnL (persisted)
@@ -240,6 +243,8 @@ export function resetManagerStateForTests(): void {
   everInRange.clear();
   fellDeep.clear();
   everFilled.clear();
+  comboFlowDeadSince.clear();
+  comboFlowCollapsedSince.clear();
   peakPnl.clear();
   giveBackLogged.clear();
   claimRetryAfter.clear();
@@ -288,6 +293,18 @@ async function writeHeartbeat(exec: Executor, openCount: number): Promise<void> 
 }
 let breakerAlerted = false;
 
+/**
+ * Continuous-hold confirmation: true only once `raw` has been true on every
+ * tick for `confirmS` seconds. The first true tick arms the timer; any false
+ * tick clears it.
+ */
+export function flowConfirmed(timers: Map<number, number>, id: number, raw: boolean, nowS: number, confirmS: number): boolean {
+  if (!raw) { timers.delete(id); return false; }
+  const since = timers.get(id);
+  if (since === undefined) { timers.set(id, nowS); return confirmS <= 0; }
+  return nowS - since >= confirmS;
+}
+
 function clearRangeTimers(posId: number): void {
   aboveRangeSince.delete(posId);
   belowRangeSince.delete(posId);
@@ -308,6 +325,8 @@ function clearRangeTimers(posId: number): void {
   everInRange.delete(posId);
   fellDeep.delete(posId);
   everFilled.delete(posId);
+  comboFlowDeadSince.delete(posId);
+  comboFlowCollapsedSince.delete(posId);
   clearHolderWatch(posId);
 }
 
@@ -1148,15 +1167,21 @@ export async function managePositions(exec: Executor): Promise<void> {
         const cc = comboCfgExit;
         const pnlFrac = pos.entrySol > 0 ? (mark.valueSol + pos.feesClaimedSol - pos.entrySol) / pos.entrySol : 0;
         const feeDaily = mark.feeTvl30mPct * 48;
-        const flowDead = feeDaily < pm.rotation_fee_daily_min_pct || mark.vol30mUsd < pm.rotation_vol_30m_min_usd;
+        const flowDeadRaw = feeDaily < pm.rotation_fee_daily_min_pct || mark.vol30mUsd < pm.rotation_vol_30m_min_usd;
         // Danko's own flow-death signal (strategy-fidelity fix, 2026-10-02):
         // "when 5m volume disappears, the fees disappear with it". mark only
         // carries vol30mUsd (positions aren't re-polled with fresh 5m candles
         // every tick), so vol30m/6 is used as a 5m proxy — same unit basis as
         // the entry gate's flowRatio (vol5mUsd/tvlUsd), just smoothed.
         const currentFlowRatio = mark.tvlUsd > 0 ? (mark.vol30mUsd / 6) / mark.tvlUsd : null;
-        const flowCollapsed = pos.play === "danko_trap" && currentFlowRatio !== null
+        const flowCollapsedRaw = pos.play === "danko_trap" && currentFlowRatio !== null
           && currentFlowRatio < cc.danko_flow_ratio_min * cc.danko_flow_death_ratio;
+        // pos#7 OCTO (2026-10-03) was closed by ONE tick of vol30m=4834 < 5000.
+        // Both flow-death signals now need to hold continuously for
+        // flow_dead_confirm_min; the timer resets the moment the condition clears.
+        const confirmS = (cc.flow_dead_confirm_min ?? 3) * 60;
+        const flowDead = flowConfirmed(comboFlowDeadSince, pos.id, flowDeadRaw, now(), confirmS);
+        const flowCollapsed = flowConfirmed(comboFlowCollapsedSince, pos.id, flowCollapsedRaw, now(), confirmS);
         const trig = comboExitCheck(
           {
             play: pos.play, entrySol: pos.entrySol, pnlFrac, flowDead, everDrawn: !!pos.fellDeep,

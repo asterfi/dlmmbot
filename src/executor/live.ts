@@ -3,7 +3,7 @@ import {
   SendTransactionError,
 } from "@solana/web3.js";
 import type { ParsedTransactionWithMeta } from "@solana/web3.js";
-import { createCloseAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { createBurnCheckedInstruction, createCloseAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import bs58 from "bs58";
 import BN from "bn.js";
 import { createRequire } from "node:module";
@@ -263,6 +263,29 @@ export function landedTxError(
   const detail = txErrorDetail({ message: JSON.stringify(meta?.err ?? ""), logs: meta?.logMessages ?? [] });
   const reason = meta ? detail.summary : "tx not retrievable";
   return Object.assign(new Error(`tx landed with on-chain error: ${sig} — ${reason}`), { logs: detail.logs, code: detail.code });
+}
+
+/**
+ * True when the exit-swap quote for a leftover token side is below what the
+ * swap itself costs (owner, 2026-10-03). `null` (no quote) is NOT dust.
+ */
+export function isDustQuote(quoteLamports: number | null): boolean {
+  if (quoteLamports === null) return false;
+  const ex = config().exec;
+  const floor = Math.max(ex.dust_swap_min_sol ?? 0.002, ex.dust_swap_cost_est_sol ?? 0.0025);
+  return quoteLamports / 1e9 < floor;
+}
+
+/**
+ * Fold SOL reclaimed after a close (post-close ATA cleanup, dust-burn rent)
+ * into the position's close_return_sol — the column REALIZED_PNL_SQL reads —
+ * so the ledger matches the wallet delta for the whole close sequence.
+ */
+export function attributeReclaimToPosition(positionId: number, deltaSol: number): void {
+  if (!Number.isFinite(deltaSol) || deltaSol === 0) return;
+  getDb().prepare(
+    "UPDATE positions SET close_return_sol = COALESCE(close_return_sol, 0) + ? WHERE id = ? AND close_return_sol IS NOT NULL"
+  ).run(deltaSol, positionId);
 }
 
 export class LiveExecutor implements Executor {
@@ -1366,9 +1389,33 @@ export class LiveExecutor implements Executor {
     // failure is just a null in the audit trail.
     let quotePromise: Promise<number | null> = Promise.resolve(null);
     if (toSell > 0n) {
-      quotePromise = quoteToSolLamports(position.tokenMint, toSell);
-      const swap = await this.tokenToSol(position.tokenMint, toSell, slippageBps);
-      if (swap) { sigs.push(swap.signature); swapSig = swap.signature; }
+      // Dust residual handling (owner, 2026-10-03): pos#7 OCTO's leftover quoted
+      // 0.00061 SOL, but swapping it cost tx fees + route-created token accounts
+      // and RETURNED -0.00254 SOL. Quote first; if the swap can't pay for itself,
+      // burn the tokens and close the token account (rent back to the wallet) in
+      // one tx instead. An unquotable residual (null) still takes the swap path
+      // as before — a quote failure is not evidence of dust.
+      const quoteLamports = await quoteToSolLamports(position.tokenMint, toSell).catch(() => null);
+      quotePromise = Promise.resolve(quoteLamports);
+      if (isDustQuote(quoteLamports)) {
+        try {
+          const burned = await this.burnDustAndClose(position.tokenMint, position.id);
+          if (burned) {
+            sigs.push(burned.sig); // so closeReturnSol (walletDelta over sigs) carries the rent reclaim
+            console.log(
+              `[live] pos#${position.id} ${position.symbol}: dust residual (quoted ${((quoteLamports ?? 0) / 1e9).toFixed(5)} SOL) ` +
+              `burned + token account closed, reclaimed ${burned.reclaimedSol.toFixed(6)} SOL`
+            );
+          }
+        } catch (e) {
+          // Token-2022 not allowed by policy / transfer-fee mint refusing close / RPC error:
+          // leave the dust (swapping it would lose money) and let the close finish.
+          console.error(`[live] pos#${position.id}: dust burn failed — leaving the dust in the wallet:`, (e as Error).message.split("\n")[0]);
+        }
+      } else {
+        const swap = await this.tokenToSol(position.tokenMint, toSell, slippageBps);
+        if (swap) { sigs.push(swap.signature); swapSig = swap.signature; }
+      }
     }
     const preSwapQuoteLamports = await quotePromise.catch(() => null);
     const preSwapQuoteSol = preSwapQuoteLamports === null ? null : preSwapQuoteLamports / 1e9;
@@ -1534,8 +1581,14 @@ export class LiveExecutor implements Executor {
     // Best-effort, non-blocking: never let housekeeping fail a real exit.
     if (position.play) {
       try {
-        const reclaimed = await this.cleanupEmptyTokenAccounts();
-        if (reclaimed > 0) console.log(`[live] pos#${position.id}: post-close ATA cleanup reclaimed ${reclaimed.toFixed(6)} SOL`);
+        const reclaimed = await this.cleanupEmptyTokenAccounts(position.id);
+        if (reclaimed !== 0) {
+          // Fold the reclaim into THIS position's realized result so the positions
+          // table / dashboard / CLOSED card match the on-chain wallet delta for the
+          // whole close sequence (pos#7 OCTO: ledger -0.00398, wallet +0.0006).
+          attributeReclaimToPosition(position.id, reclaimed);
+          console.log(`[live] pos#${position.id}: post-close ATA cleanup reclaimed ${reclaimed.toFixed(6)} SOL (attributed to this position)`);
+        }
       } catch (e) {
         console.error(`[live] pos#${position.id}: post-close ATA cleanup failed (non-blocking):`, (e as Error).message.split("\n")[0]);
       }
@@ -1564,7 +1617,7 @@ export class LiveExecutor implements Executor {
    * any account's close failing (e.g. a race with an in-flight swap still
    * using it) is logged and skipped, never thrown.
    */
-  async cleanupEmptyTokenAccounts(): Promise<number> {
+  async cleanupEmptyTokenAccounts(positionId: number | null = null): Promise<number> {
     const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
     const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     const wsolAta = getAssociatedTokenAddressSync(new PublicKey(SOL_MINT), this.wallet.publicKey).toBase58();
@@ -1606,7 +1659,7 @@ export class LiveExecutor implements Executor {
         getDb().prepare(
           "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, tx_cost_sol, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
         ).run(
-          null, now(), "ata_cleanup", sig, delta, 0.001,
+          positionId, now(), "ata_cleanup", sig, delta, 0.001,
           JSON.stringify({ closed: batch.map((c) => ({ account: c.pubkey.toBase58(), mint: c.mint })) })
         );
         console.log(`[live] ATA cleanup: closed ${batch.length} empty account(s), reclaimed ${delta.toFixed(6)} SOL (${sig.slice(0, 8)}…)`);
@@ -1615,6 +1668,43 @@ export class LiveExecutor implements Executor {
       }
     }
     return totalReclaimed;
+  }
+
+  /**
+   * Burn a dust residual and close its token account(s) in ONE transaction,
+   * through the WalletSigner (both Burn and CloseAccount-to-wallet are allowed
+   * by the Privy policy). Uses BurnChecked + CloseAccount against each account's
+   * OWN token program, so Token-2022 mints burn through Token-2022. Throws on
+   * any failure (policy rejection, transfer-fee mint refusing close, RPC) —
+   * the caller leaves the dust and carries on.
+   */
+  async burnDustAndClose(mint: string, positionId: number | null): Promise<{ sig: string; burnedRaw: bigint; reclaimedSol: number } | null> {
+    const mintPk = new PublicKey(mint);
+    const accs = await this.connection.getParsedTokenAccountsByOwner(this.wallet.publicKey, { mint: mintPk });
+    const tx = new Transaction();
+    let burnedRaw = 0n;
+    let closes = 0;
+    for (const acc of accs.value) {
+      const info = acc.account.data.parsed.info as { tokenAmount: { amount: string; decimals: number } };
+      const raw = BigInt(info.tokenAmount.amount);
+      const programId = acc.account.owner;
+      if (raw > 0n) {
+        tx.add(createBurnCheckedInstruction(acc.pubkey, mintPk, this.wallet.publicKey, raw, info.tokenAmount.decimals, [], programId));
+        burnedRaw += raw;
+      }
+      tx.add(createCloseAccountInstruction(acc.pubkey, this.wallet.publicKey, this.wallet.publicKey, [], programId));
+      closes++;
+    }
+    if (closes === 0) return null;
+    const sig = await this.send(tx);
+    const reclaimedSol = (await this.walletDelta([sig])) ?? 0;
+    getDb().prepare(
+      "INSERT INTO events (position_id, ts, type, tx_sig, sol_delta, token_amount, tx_cost_sol, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(
+      positionId, now(), "dust_burn", sig, reclaimedSol, Number(burnedRaw), 0.001,
+      JSON.stringify({ mint, burnedRaw: burnedRaw.toString(), accountsClosed: closes, reclaimedSol }),
+    );
+    return { sig, burnedRaw, reclaimedSol };
   }
 
   async walletSol(): Promise<number> {

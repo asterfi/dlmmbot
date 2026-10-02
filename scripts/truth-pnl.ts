@@ -102,8 +102,10 @@ async function otherTokensValueSol(connection: Connection, owner: PublicKey): Pr
  * WHERE to look; if the DB is missing or empty (fresh install, nothing ever
  * opened), this is a no-op rather than a hard failure.
  */
-async function openPositionsValueSol(connection: Connection, owner: PublicKey, dbPath: string | undefined): Promise<number> {
-  if (!dbPath || !existsSync(dbPath)) return 0;
+async function openPositionsValueSol(
+  connection: Connection, owner: PublicKey, dbPath: string | undefined,
+): Promise<{ valueSol: number; rentSol: number }> {
+  if (!dbPath || !existsSync(dbPath)) return { valueSol: 0, rentSol: 0 };
   let pools: string[] = [];
   try {
     const DatabaseCtor = (await import("better-sqlite3")).default;
@@ -115,14 +117,16 @@ async function openPositionsValueSol(connection: Connection, owner: PublicKey, d
     pools = rows.map((r) => r.pool);
   } catch (e) {
     console.warn(`[truth-pnl] could not read open positions from ${dbPath}: ${(e as Error).message.split("\n")[0]}`);
-    return 0;
+    return { valueSol: 0, rentSol: 0 };
   }
-  if (pools.length === 0) return 0;
+  if (pools.length === 0) return { valueSol: 0, rentSol: 0 };
 
   let total = 0;
+  let rentLamports = 0;
   const DLMM = (await import("@meteora-ag/dlmm")).default as unknown as {
     create(connection: Connection, pool: PublicKey): Promise<{
       getPositionsByUserAndLbPair(user: PublicKey): Promise<{ userPositions: Array<{
+        publicKey: PublicKey;
         positionData: { totalXAmount: string; totalYAmount: string; feeX: { toString(): string }; feeY: { toString(): string } };
       }> }>;
       getActiveBin(): Promise<{ price: string | number }>;
@@ -135,6 +139,11 @@ async function openPositionsValueSol(connection: Connection, owner: PublicKey, d
       const pool = await DLMM.create(connection, new PublicKey(poolAddr));
       const { userPositions } = await pool.getPositionsByUserAndLbPair(owner);
       if (userPositions.length === 0) continue;
+      // Refundable rent: every open position account holds ~0.04-0.07 SOL of
+      // lamports that come back at close. Counting only liquidity+fees made
+      // equity under-read by that much per position account while open.
+      const infos = await connection.getMultipleAccountsInfo(userPositions.map((p) => p.publicKey), "confirmed");
+      for (const info of infos) rentLamports += info?.lamports ?? 0;
       const activeBin = await pool.getActiveBin();
       const priceYperX = Number(pool.fromPricePerLamport(Number(activeBin.price)));
       const xDecimals = pool.tokenX.mint.decimals;
@@ -149,7 +158,7 @@ async function openPositionsValueSol(connection: Connection, owner: PublicKey, d
       console.warn(`[truth-pnl] skipping pool ${poolAddr}: ${(e as Error).message.split("\n")[0]}`);
     }
   }
-  return total;
+  return { valueSol: total, rentSol: rentLamports / 1e9 };
 }
 
 /**
@@ -243,7 +252,7 @@ async function main(): Promise<void> {
 
   const connection = new Connection(e.rpcUrl, "confirmed");
 
-  const [sol, wsol, otherTokens, positionsSol, flows] = await Promise.all([
+  const [sol, wsol, otherTokens, positions, flows] = await Promise.all([
     solBalance(connection, owner),
     wsolBalance(connection, owner),
     otherTokensValueSol(connection, owner),
@@ -251,7 +260,9 @@ async function main(): Promise<void> {
     externalFlowsSol(connection, owner, sinceTs, coldWallet),
   ]);
 
-  const equitySol = sol + wsol + otherTokens.valueSol + positionsSol;
+  const positionsSol = positions.valueSol;
+  const positionRentSol = positions.rentSol;
+  const equitySol = sol + wsol + otherTokens.valueSol + positionsSol + positionRentSol;
   const netDepositsSol = flows.depositsSol - flows.coldWithdrawalsSol;
   const pnlSol = equitySol - netDepositsSol;
   const pnlPct = netDepositsSol > 0 ? (pnlSol / netDepositsSol) * 100 : 0;
@@ -264,6 +275,7 @@ async function main(): Promise<void> {
     wsol_balance: wsol,
     other_tokens_sol: otherTokens.valueSol,
     open_positions_sol: positionsSol,
+    position_rent_sol: positionRentSol,
     equity_sol: equitySol,
     deposits_sol: flows.depositsSol,
     cold_withdrawals_sol: flows.coldWithdrawalsSol,

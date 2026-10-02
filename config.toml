@@ -616,6 +616,13 @@ mode = "live"                    # paper | live (live also requires FARMER_MODE=
 # incidents in three days. A stale use_zap key in this file is ignored.
 exit_slippage_bps = 50
 safety_exit_slippage_bps = 1000
+# Dust residual handling (owner, 2026-10-03): pos#7 OCTO's leftover token side quoted
+# 0.00061 SOL but the swap (tx fees + route-created token accounts) returned -0.00254.
+# When the exit-swap quote is below max(dust_swap_min_sol, dust_swap_cost_est_sol)
+# the bot burns the residual and closes the token account (rent back to the wallet)
+# instead of swapping.
+dust_swap_min_sol = 0.002
+dust_swap_cost_est_sol = 0.0025
 tx_retries = 3
 paper_promotion_days = 7
 # --- Priority fee & compute budget (src/executor/priorityFee.ts) ---
@@ -872,6 +879,9 @@ reentry_cooldown_h = 3
 # Shorter cooldown after a genuine win/loss close, so the bot doesn't bounce
 # straight back into the same token on the very next sweep.
 reentry_cooldown_after_trade_min = 30
+# Combo flow-death confirmation (owner, 2026-10-03): pos#7 OCTO closed on a single tick of
+# vol30m=4834 < 5000. The raw flow-death condition must now hold continuously this long.
+flow_dead_confirm_min = 3
 
 # --- Jev: Typesafe System One decision layer (api.typesafe.ai/v1/systemone) ---
 # Per docs.typesafe.ai: ONE request per decision (speculative fan-out — all

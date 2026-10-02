@@ -318,6 +318,9 @@ export interface Config {
   exec: {
     mode: "paper" | "live";
     exit_slippage_bps: number; safety_exit_slippage_bps: number;
+    /** Dust residual handling (owner, 2026-10-03): if the exit-swap quote for the leftover token side is below max(dust_swap_min_sol, dust_swap_cost_est_sol) the swap costs more than it returns — burn the tokens and close the ATA instead. */
+    dust_swap_min_sol?: number;
+    dust_swap_cost_est_sol?: number;
     tx_retries: number; paper_promotion_days: number;
     /**
      * Priority fee + compute budget (see src/executor/priorityFee.ts). Optional:
@@ -446,6 +449,8 @@ export interface Config {
     reentry_cooldown_h: number;
     /** Shorter per-mint cooldown after a genuine win/loss close, in minutes. */
     reentry_cooldown_after_trade_min: number;
+    /** Combo flow-death exits (generic flowDead and Danko's flowCollapsed) must hold continuously this many minutes before firing. Default 3. */
+    flow_dead_confirm_min?: number;
   };
   /**
    * Jev — Typesafe System One decision layer for combo entries/exits.
