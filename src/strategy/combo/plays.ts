@@ -119,7 +119,12 @@ export interface ComboConfigLike {
   danko_dump_min_pct: number;
   /** Minimum flow_ratio (freshest volume / active liquidity) — "volume relative to active liquidity", Danko's own discovery rule. */
   danko_flow_ratio_min: number;
+  /** Within-candidate resolution order (owner, 2026-10-03): when a candidate fits several plays the first one in this list wins. */
+  play_priority?: Play[];
 }
+
+/** Owner's order: Eys is the most profitable, Danko the most patient/last. */
+export const DEFAULT_PLAY_PRIORITY: Play[] = ["eys_seat", "eys_ape", "molu_ladder", "danko_trap"];
 
 export interface PlayClassification {
   play: Play;
@@ -195,7 +200,24 @@ function classifyEys(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassifi
   };
 }
 
-/** Classify a candidate into a play, or null if it fits none. */
+/**
+ * Every SOL-side play this candidate qualifies for (eys_ape is token-sided
+ * and classified separately in ape.ts; the entry pipeline merges it in).
+ * Evaluating ALL of them, instead of stopping at the first in a fixed rule
+ * order, is what lets config play_priority decide.
+ */
+export function classifyAllPlays(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification[] {
+  return [classifyDanko(f, c), classifyMolu(f, c), classifyEys(f, c)].filter((x): x is PlayClassification => x !== null);
+}
+
+/** Highest-priority entry of `qualifying` per `priority` (plays missing from the list rank last). */
+export function pickByPriority<T extends { play: Play }>(qualifying: T[], priority: Play[] = DEFAULT_PLAY_PRIORITY): T | null {
+  if (qualifying.length === 0) return null;
+  const rank = (p: Play) => { const i = priority.indexOf(p); return i < 0 ? priority.length : i; };
+  return [...qualifying].sort((a, b) => rank(a.play) - rank(b.play))[0]!;
+}
+
+/** Classify a candidate into its highest-priority qualifying SOL-side play, or null if it fits none. */
 export function classifyPlay(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassification | null {
-  return classifyDanko(f, c) ?? classifyMolu(f, c) ?? classifyEys(f, c);
+  return pickByPriority(classifyAllPlays(f, c), c.play_priority);
 }

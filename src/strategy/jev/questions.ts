@@ -141,6 +141,21 @@ const EXIT: Record<string, JevQuestion> = {
 
 const BATTERIES: Record<JevLane, Record<string, JevQuestion>> = { enter: ENTRY, exit: EXIT };
 
-export function questionsFor(lane: JevLane): Record<string, JevQuestion> {
-  return BATTERIES[lane];
+/**
+ * Question battery for a lane. For the entry lane, `qualifyingPlays` (owner,
+ * 2026-10-03) narrows the `play` choice to the plays the rule engine says the
+ * candidate actually qualifies for, plus "none" — Jev is not offered plays the
+ * candidate cannot be entered under. Omitted/empty = the full menu.
+ */
+export function questionsFor(lane: JevLane, qualifyingPlays?: string[]): Record<string, JevQuestion> {
+  const base = BATTERIES[lane];
+  if (lane !== "enter" || !qualifyingPlays || qualifyingPlays.length === 0) return base;
+  const play = base["play"];
+  if (!play || play.type !== "choice") return base;
+  const criteria = play.criteria as Record<string, string>;
+  const narrowed: Record<string, string> = {};
+  for (const [k, v] of Object.entries(criteria)) {
+    if (k === "none" || qualifyingPlays.includes(k)) narrowed[k] = v;
+  }
+  return { ...base, play: { ...play, criteria: narrowed } as JevQuestion };
 }

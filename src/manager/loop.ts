@@ -33,9 +33,12 @@ import { manageForSleeve } from "../risk/majorsManage.js";
 import { sleeveAtEntry } from "../risk/sleeve.js";
 import type { Candidate, ExitReason, Position } from "../types.js";
 import { vetToken } from "../vetting/vet.js";
-import { classifyPlay, detectDipBounce, detectDump, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
+import { classifyAllPlays, pickByPriority, DEFAULT_PLAY_PRIORITY, detectDipBounce, detectDump, type Play, type PlayCandidateFeatures } from "../strategy/combo/plays.js";
+import { planMoluRange } from "../strategy/combo/moluRange.js";
+import { chooseMoluPool } from "../strategy/combo/moluPool.js";
+import { priceDivergenceGate } from "../scanner/priceGate.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
-import { sizeComboPlay, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
+import { sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
 import { comboExitCheck } from "../strategy/combo/exits.js";
 import { planDankoRange } from "../strategy/combo/dankoRange.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
@@ -143,6 +146,8 @@ const rugcheckLastCheck = new Map<number, number>();  // P0 rugcheck-flip thrott
 const everInRange = new Set<number>();                // P3 win-vs-missed classification
 const fellDeep = new Set<number>();                   // escape hatch armed (also persisted)
 // combo flow-death confirmation (owner, 2026-10-03): the raw flowDead / flowCollapsed condition must hold continuously for combo.flow_dead_confirm_min before it may trigger an exit. In-memory: a restart just restarts the confirmation window, which is the safe direction.
+const comboLeftBehindSince = new Map<number, number>(); // unfilled ladder with price >= left_behind_pct above its top bin: when that began
+const p0CrashSkippedLogged = new Set<number>();          // p0_crash_skipped_combo logged once per position
 const comboFlowDeadSince = new Map<number, number>();
 const comboFlowCollapsedSince = new Map<number, number>();
 const comboAboveSince = new Map<number, number>();   // combo: when price last went above this position's range (unix s); cleared in/below range
@@ -245,6 +250,8 @@ export function resetManagerStateForTests(): void {
   everFilled.clear();
   comboFlowDeadSince.clear();
   comboFlowCollapsedSince.clear();
+  comboLeftBehindSince.clear();
+  p0CrashSkippedLogged.clear();
   peakPnl.clear();
   giveBackLogged.clear();
   claimRetryAfter.clear();
@@ -327,6 +334,8 @@ function clearRangeTimers(posId: number): void {
   everFilled.delete(posId);
   comboFlowDeadSince.delete(posId);
   comboFlowCollapsedSince.delete(posId);
+  comboLeftBehindSince.delete(posId);
+  p0CrashSkippedLogged.delete(posId);
   clearHolderWatch(posId);
 }
 
@@ -1100,8 +1109,23 @@ export async function managePositions(exec: Executor): Promise<void> {
       // Majors are allowlisted / discovery-gated at entry — RugCheck "Danger" is often a
       // permanent score on established tokens (PUMP etc.), not a flip. Applying the meme
       // veto here false-closed pos#61 in 7s. Keep hard P0 (dead/crash/TVL) for majors.
-      const crashed = mark.price > 0 && pos.entryPrice > 0 &&
+      const crashedRaw = mark.price > 0 && pos.entryPrice > 0 &&
         ((mark.price - pos.entryPrice) / pos.entryPrice) * 100 <= m.safety_price_crash_pct;
+      // Hidden stop-loss (owner, 2026-10-03): the owner's rule is NO stop-loss, but
+      // this P0 price-crash trigger (-60% from entry, any age) would force-close a
+      // Danko trap (ladder to -90%) or a molu ladder mid-fill. It is skipped for
+      // positions with a combo play ONLY; every other P0 trigger (pool death, TVL
+      // drain, rugcheck flip, holder/whale dump, authority changes) still applies
+      // to them exactly as before. Non-combo positions are untouched.
+      const crashed = crashedRaw && !pos.play;
+      if (crashedRaw && pos.play && !p0CrashSkippedLogged.has(pos.id)) {
+        p0CrashSkippedLogged.add(pos.id);
+        recordDecision(pos.tokenMint, pos.poolAddress, "skipped", "p0_crash_skipped_combo", null, {
+          play: pos.play, entryPrice: pos.entryPrice, price: mark.price,
+          changePct: ((mark.price - pos.entryPrice) / pos.entryPrice) * 100, thresholdPct: m.safety_price_crash_pct,
+        });
+        console.log(`[manager] pos#${pos.id} ${pos.symbol}: price crash condition seen but skipped for combo play ${pos.play} (no stop-loss rule; other P0 triggers still active)`);
+      }
       const drain = mark.tvlUsd > 0
         ? tvlDropTriggered(pos.id, mark.tvlUsd, mark.price, mark.poolAgeS ?? null)
         : { triggered: false, evidence: null } satisfies TvlDrainCheck;
@@ -1260,6 +1284,26 @@ export async function managePositions(exec: Executor): Promise<void> {
           : null;
         const filled = everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
           .get(pos.id) as { f: number } | undefined)?.f === 1;
+        // Left-behind (owner, 2026-10-03): a never-filled molu/danko ladder whose
+        // price has run >= left_behind_pct above its top bin (top bin = the active
+        // bin at entry) is not coming back soon — free the slot after
+        // left_behind_min continuous minutes instead of waiting out the idle
+        // timeout. Ladders hovering just above range still ride the idle timeouts.
+        const lbPct = comboCfgExit.left_behind_pct ?? 20;
+        const lbMin = comboCfgExit.left_behind_min ?? 30;
+        const leftBehindRaw = (pos.play === "molu_ladder" || pos.play === "danko_trap") && !filled
+          && pos.entryPrice > 0 && mark.price >= pos.entryPrice * (1 + lbPct / 100);
+        if (flowConfirmed(comboLeftBehindSince, pos.id, leftBehindRaw, now(), lbMin * 60)) {
+          await closeAndReport(exec, pos, "combo_left_behind" as ExitReason, config().exec.exit_slippage_bps, "close",
+            `combo left behind: ${pos.play} never filled, price ${(((mark.price / pos.entryPrice) - 1) * 100).toFixed(0)}% above its top bin for ${lbMin}m`);
+          clearRangeTimers(pos.id);
+          const cooldownH = comboCfgExit.reentry_cooldown_h ?? 3;
+          if (cooldownH > 0) blacklist(pos.tokenMint, "token", "combo left behind — never filled", cooldownH);
+          recordDecision(pos.tokenMint, pos.poolAddress, "exited", "combo_left_behind", null, {
+            play: pos.play, ageH, lbPct, lbMin, price: mark.price, entryPrice: pos.entryPrice, mark,
+          });
+          continue;
+        }
         if (idleMaxH && !filled && ageH > idleMaxH) {
           // Jev is NOT consulted for idle timeouts — there is nothing to judge
           // (the ladder never earned a cent either way) and no reason to spend
@@ -1909,7 +1953,9 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
   // Gates below re-run on every tick for the same candidate, so they write one
   // row per episode (recordSkip). Events — vet_error, quote_stale, open
   // failures — and counterfactual telemetry stay one row each (recordDecision).
-  for (const cand of candidates) {
+  for (const candIn of candidates) {
+    // `let`: molu's pool choice may swap the candidate's pool mid-pipeline.
+    let cand = candIn;
     const opened = openPositionCount();
     // Cheap admission pre-check before spending vetting calls: when the normal
     // book is full, only candidates that could plausibly reach alpha (pre-vet
@@ -2304,6 +2350,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
     // the normal Kelly-sized entry below.
     let play: Play | null = null;
     let apeSource: ApeSource | null = null;
+    let qualifyingPlaysOuter: Play[] = [];
     const comboCfgEntry = config().combo;
     if (comboCfgEntry?.enabled) {
       const cc = comboCfgEntry;
@@ -2360,14 +2407,19 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         flowRatio,
         buyersPresent: dipBounce !== null,
       };
-      let classified = classifyPlay(features, cc);
+      // Within-candidate resolution (owner, 2026-10-03): evaluate EVERY play the
+      // candidate qualifies for and pick the highest-priority one per config
+      // play_priority (eys_seat > eys_ape > molu_ladder > danko_trap), instead of
+      // the old fixed danko > molu > eys_seat rule order. The full list is
+      // recorded (decision features + Jev state) as qualifying_plays.
+      const qualifying: Array<{ play: Play; reasons: string[] }> = classifyAllPlays(features, cc);
+      let apeClassifiedFull: ReturnType<typeof classifyApe> = null;
+      let apeFeaturesFull: ApeCandidateFeatures | null = null;
       // eys_ape (widened 2026-10-02): ANY candidate from the main sweep is
-      // eligible now, not just Stonks mints — only when no SOL-side play
-      // already fit (rule-priority order stays danko > molu > eys_seat >
-      // eys_ape). Stonks-listed mints are tagged source="stonks" and get the
-      // ranking boost applied via the candidates re-sort above; everything
-      // else is source="meteora".
-      if (!classified && cc.ape_enabled !== false) {
+      // eligible, not just Stonks mints. Stonks-listed mints are tagged
+      // source="stonks" and get the ranking boost applied via the candidates
+      // re-sort above; everything else is source="meteora".
+      if (cc.ape_enabled !== false) {
         const source: ApeSource = apeStonkMints?.has(cand.tokenMint) ? "stonks" : "meteora";
         const apeFeatures: ApeCandidateFeatures = {
           mcapUsd: cand.pool.marketCapUsd,
@@ -2382,11 +2434,25 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         };
         const apeClassified = classifyApe(apeFeatures, cc);
         if (apeClassified) {
-          classified = { play: "eys_ape", reasons: apeClassified.reasons };
-          apeSource = apeClassified.source;
-          if (apeClassified.feeModeUnknown) {
-            recordDecision(cand.tokenMint, cand.pool.address, "skipped", "fee_mode_unknown", score, { apeFeatures, symbol: cand.symbol });
-          }
+          qualifying.push({ play: "eys_ape", reasons: apeClassified.reasons });
+          apeClassifiedFull = apeClassified;
+          apeFeaturesFull = apeFeatures;
+        }
+      }
+      // A young-but-Eys-eligible candidate (ageEysOnly, see below) may only use
+      // the Eys plays — drop the rest BEFORE picking, so a priority list that
+      // ranked molu above eys can't strand an Eys-qualifying candidate.
+      const qualifyingPool = vet.facts.ageEysOnly
+        ? qualifying.filter((q) => q.play === "eys_seat" || q.play === "eys_ape")
+        : qualifying;
+      let classified: { play: Play; reasons: string[] } | null =
+        pickByPriority(qualifyingPool, cc.play_priority ?? DEFAULT_PLAY_PRIORITY);
+      const qualifyingPlays = qualifying.map((q) => q.play);
+      qualifyingPlaysOuter = qualifyingPlays;
+      if (classified?.play === "eys_ape" && apeClassifiedFull) {
+        apeSource = apeClassifiedFull.source;
+        if (apeClassifiedFull.feeModeUnknown) {
+          recordDecision(cand.tokenMint, cand.pool.address, "skipped", "fee_mode_unknown", score, { apeFeatures: apeFeaturesFull, symbol: cand.symbol });
         }
       }
       // Young-but-Eys-eligible (owner, 2026-10-02): vetToken let this
@@ -2410,7 +2476,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         const sizeResult = sizeComboPlay(bankroll, classified.play, counts, cc, canaryCfg);
         if (sizeResult.sizeSol <= 0) {
           recordSkip(cand.tokenMint, cand.pool.address, sizeResult.skipReason ?? "combo_size_zero", score, {
-            play: classified.play, counts, bankroll, features,
+            play: classified.play, qualifyingPlays, counts, bankroll, features,
           });
           continue;
         }
@@ -2450,6 +2516,68 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           range = dankoRent.range;
         }
 
+        // molu_ladder (owner, 2026-10-03; molu's Book 1): pool choice for young
+        // tokens + a ~110-bin ladder below price instead of upstream's depth band.
+        if (classified.play === "molu_ladder") {
+          let moluPoolReason: string = "single_pool";
+          const youngEnough = ageMin !== null && ageMin < cc.molu_age_max_h * 60;
+          if (youngEnough && cand.siblings && cand.siblings.length > 1) {
+            const choice = chooseMoluPool(
+              cand.siblings, { molu_fee_pool_min_vol30m_usd: cc.molu_fee_pool_min_vol30m_usd ?? 10_000 }, cand.pool,
+            );
+            moluPoolReason = choice.reason;
+            if (choice.pool.address !== cand.pool.address) {
+              const freshAlt = await fetchPool(choice.pool.address).catch(() => null);
+              const divergence = freshAlt && freshAlt.price > 0
+                ? await priceDivergenceGate(cand.tokenMint, freshAlt.price) : null;
+              if (freshAlt && freshAlt.price > 0 && !divergence) {
+                const from = cand.pool;
+                cand = { ...cand, pool: freshAlt };
+                entryPrice = freshAlt.price;
+                if (solUsd !== null && solUsd > 0) poolShareCapSol = (cand.pool.tvlUsd * (g.max_pool_share_pct / 100)) / solUsd;
+                recordDecision(cand.tokenMint, cand.pool.address, "skipped", "molu_pool_choice", score, {
+                  reason: choice.reason, from: from.address, to: cand.pool.address,
+                  fromBaseFeePct: from.baseFeePct, toBaseFeePct: cand.pool.baseFeePct,
+                  fromVol30m: from.vol30mUsd, toVol30m: cand.pool.vol30mUsd, siblings: cand.siblings?.length,
+                });
+                console.log(`[combo] ${cand.symbol}: molu pool choice ${choice.reason} — ${from.address.slice(0, 6)} (fee ${from.baseFeePct}%, vol30m $${from.vol30mUsd.toFixed(0)}) -> ${cand.pool.address.slice(0, 6)} (fee ${cand.pool.baseFeePct}%, vol30m $${cand.pool.vol30mUsd.toFixed(0)})`);
+              } else {
+                moluPoolReason = `${choice.reason}_alt_unusable_kept_scanner_pool`;
+              }
+            }
+          }
+          const moluPlanned = planMoluRange(
+            entryPrice, cand.pool.binStep, cand.pool.decimalsX,
+            cc.molu_bins_target ?? 110, cc.molu_bins_min ?? 100, cc.molu_bins_max ?? 125,
+            config().entry.max_position_accounts,
+          );
+          // The sizing affordability check priced ONE position account; a ~110-bin
+          // ladder usually needs two (refundable rent) — re-check with the real count.
+          const moluAfford = checkAffordability(bankroll, comboSize, {
+            fee_reserve_sol: cc.fee_reserve_sol,
+            position_rent_est_sol: cc.position_rent_est_sol * moluPlanned.positionAccounts,
+          });
+          if (!moluAfford.ok) {
+            recordSkip(cand.tokenMint, cand.pool.address, "skip_affordability", score, {
+              play: classified.play, positionAccounts: moluPlanned.positionAccounts, reason: moluAfford.reason,
+            });
+            continue;
+          }
+          const moluRent = await applyBinRentGate({
+            range: moluPlanned, score, poolAddress: cand.pool.address,
+            price: entryPrice, binStep: cand.pool.binStep, decimalsX: cand.pool.decimalsX,
+            minDownPct: Math.min(config().entry.min_down_pct, 30), sizeSol: comboSize,
+          });
+          if (!moluRent.ok) {
+            recordSkip(cand.tokenMint, cand.pool.address, "combo_molu_bin_rent", score, {
+              range: moluRent.range, rent: moluRent.meta, poolChoice: moluPoolReason,
+            });
+            continue;
+          }
+          range = moluRent.range;
+          console.log(`[combo] ${cand.symbol}: molu ladder ${range.binCount} bins (${range.positionAccounts} account(s), bottom ${range.bottomPricePct.toFixed(0)}%), pool choice: ${moluPoolReason}`);
+        }
+
         // eys_ape: token-sided range ABOVE current price.
         if (classified.play === "eys_ape") {
           const apePlanned = planApeRange(
@@ -2477,6 +2605,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         const jevState = {
           candidate: {
             rule_play: classified.play,
+            qualifying_plays: qualifyingPlays,
             symbol: cand.symbol,
             name_or_socials: null as string | null, // not tracked by the scanner today
             mcap_usd: cand.pool.marketCapUsd,
@@ -2546,6 +2675,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           state: jevState,
           fallbackVerdict: "yes",
           play: classified.play,
+          qualifyingPlays,
           mint: cand.tokenMint,
           pool: cand.pool.address,
           question: `enter with play ${classified.play}?`,
@@ -2678,6 +2808,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       risk: { young, whale, riskCut },
       sleeve: isMicro ? "micro" : "meme",
       play,
+      qualifyingPlays: qualifyingPlaysOuter,
       entryOfSwingHigh: ofSwingHigh,
       experiment: { feePath, isMicro, baseScore, trendingBonus, flowBonus, flowPenalty },
     });

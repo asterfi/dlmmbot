@@ -451,6 +451,15 @@ export interface Config {
     reentry_cooldown_after_trade_min: number;
     /** Combo flow-death exits (generic flowDead and Danko's flowCollapsed) must hold continuously this many minutes before firing. Default 3. */
     flow_dead_confirm_min?: number;
+    /** molu range (owner, 2026-10-03; molu's Book 1: ~100-125 bins below price): target/min/max bin count, top bin = active bin. Capped at -90%. */
+    molu_bins_target?: number;
+    molu_bins_min?: number;
+    molu_bins_max?: number;
+    /** molu pool choice for tokens under molu_age_max_h: the 5-10% base-fee pool if its 30m volume >= this, else the highest-30m-volume pool. */
+    molu_fee_pool_min_vol30m_usd?: number;
+    /** A never-filled molu/danko ladder whose price is >= left_behind_pct above its top bin closes after left_behind_min minutes (combo_left_behind). */
+    left_behind_pct?: number;
+    left_behind_min?: number;
   };
   /**
    * Jev — Typesafe System One decision layer for combo entries/exits.

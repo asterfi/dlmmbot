@@ -882,6 +882,24 @@ reentry_cooldown_after_trade_min = 30
 # Combo flow-death confirmation (owner, 2026-10-03): pos#7 OCTO closed on a single tick of
 # vol30m=4834 < 5000. The raw flow-death condition must now hold continuously this long.
 flow_dead_confirm_min = 3
+# molu range (owner, 2026-10-03; molu's "Be the House" Book 1: SOL only below price,
+# Bid-Ask, ~100-125 bins on a new coin). Target bin count below the active bin
+# replaces upstream's min_down_pct/max_down_pct depth band; capped at -90%.
+# 110 bins span two position accounts (refundable rent, priced by the
+# affordability check).
+molu_bins_target = 110
+molu_bins_min = 100
+molu_bins_max = 125
+# Pool choice for molu on tokens under molu_age_max_h (Book 1: "fee tier 5 to 10% if
+# it's fresh, or use the pool with the most volume"): the 5-10% base-fee pool when
+# its 30m volume >= this, else the pool with the highest 30m volume (not deepest TVL).
+molu_fee_pool_min_vol30m_usd = 10000
+# Left-behind unfilled ladders (owner, 2026-10-03): price >= left_behind_pct above
+# the ladder's top bin for left_behind_min minutes -> close (combo_left_behind),
+# instead of waiting out the idle timeout. Idle timeouts still cover ladders
+# hovering just above range.
+left_behind_pct = 20
+left_behind_min = 30
 
 # --- Jev: Typesafe System One decision layer (api.typesafe.ai/v1/systemone) ---
 # Per docs.typesafe.ai: ONE request per decision (speculative fan-out — all

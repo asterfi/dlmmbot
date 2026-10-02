@@ -55,6 +55,8 @@ export interface JevConsultInput {
   fallbackVerdict: JevVerdict;
   /** Entry lane: the rule-classified play (policy checks Jev's own `play` choice against this). Exit lane: the position's play, for logging only. */
   play: Play | string;
+  /** Entry lane: every play the candidate qualifies for (owner, 2026-10-03). Jev's `play` choice question lists only these plus "none". */
+  qualifyingPlays?: string[];
   positionId?: number | null;
   mint?: string | null;
   pool?: string | null;
@@ -172,7 +174,7 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
   }
 
   const timeoutMs = Math.min(j.timeout_ms ?? DEFAULT_TIMEOUT_MS, HARD_MAX_TIMEOUT_MS);
-  const questions = questionsFor(input.lane);
+  const questions = questionsFor(input.lane, input.qualifyingPlays);
   const model = j.model ?? PINNED_MODEL;
 
   consultTimestamps.push(Date.now());
