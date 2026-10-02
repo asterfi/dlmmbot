@@ -18,6 +18,7 @@
  */
 import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import {
   Connection,
   PublicKey,
@@ -123,7 +124,10 @@ async function openPositionsValueSol(
 
   let total = 0;
   let rentLamports = 0;
-  const DLMM = (await import("@meteora-ag/dlmm")).default as unknown as {
+  // CJS require (as in executor/live.ts): the SDK's ESM build crashes on
+  // anchor's CJS named exports ("does not provide an export named BN").
+  const dlmmMod = createRequire(import.meta.url)("@meteora-ag/dlmm");
+  const DLMM = (dlmmMod.default ?? dlmmMod) as unknown as {
     create(connection: Connection, pool: PublicKey): Promise<{
       getPositionsByUserAndLbPair(user: PublicKey): Promise<{ userPositions: Array<{
         publicKey: PublicKey;
