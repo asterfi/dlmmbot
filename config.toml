@@ -125,7 +125,7 @@ bin_step_min_new = 80            # for tokens < 7 days old
 # "any": no gate, no bonus.
 fee_collection = "prefer_quote"
 quote_mints = ["So11111111111111111111111111111111111111112"]  # SOL only (meme mode)
-price_divergence_max_pct = 2.0   # pool price vs Jupiter quote
+price_divergence_max_pct = 5.0   # pool vs Jupiter; was 2.0 — every top fee pool (2-7%) was rejected; >5% arb loss would exceed the +3% target
 max_pool_share_pct = 20          # skip if our position would exceed this % of pool TVL
 
 [vetting]                  # STRATEGY.md §2.2 — token hard gates
@@ -785,9 +785,10 @@ eys_age_min_minutes = 10
 # volume / the pool's trailing per-minute average (datapi 4h, else 1h).
 eys_flow_usd_per_min_min = 100000   # legacy key, also used by eys_ape's flow bar
 eys_vol_hard_usd_per_min = 100000
-eys_vol_floor_usd_per_min = 15000
-eys_vol_percentile = 0.8
-eys_vol_accel_min = 2.0
+eys_vol_floor_usd_per_min = 1000  # soft-tier floor; data 2026-10-03: best-paying DLMM pools ran $0.8-3k/min at 20-55%/h fee/TVL
+eys_vol_percentile = 0.9         # floor rises with the market: p90 of per-minute volume across this sweep's DLMM pools (mcap >= floor)
+eys_vol_accel_min = 0            # acceleration optional (0 = off); passed to Jev as info
+eys_soft_fee_tvl_per_hour_min = 1.5  # soft tier must be paying >= 1.5%/h of TVL (our +3% within ~2h)
 jev_eys_soft_bar = 0.65
 # Datapi has no documented freshness guarantee and no timestamp in its pool payload:
 # a candidate whose newest snapshot is older than this, or whose volume/fee fields

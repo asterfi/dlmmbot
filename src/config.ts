@@ -385,6 +385,7 @@ export interface Config {
     eys_vol_floor_usd_per_min?: number;
     eys_vol_percentile?: number;
     /** A soft-tier candidate also needs vol_accel (5m per-minute vs trailing 4h/1h per-minute average) >= this to reach Jev. */
+    eys_soft_fee_tvl_per_hour_min?: number;
     eys_vol_accel_min?: number;
     /** Composite-score bar for soft-tier candidates (raises, never lowers, the play's own Jev threshold). */
     jev_eys_soft_bar?: number;

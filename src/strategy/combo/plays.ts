@@ -142,6 +142,8 @@ export interface PlayCandidateFeatures {
   flowUsdPerMin: number;
   /** flowUsdPerMin over the pool's trailing per-minute average (4h, else 1h). null = unknown. */
   volAccel?: number | null;
+  /** Pool fees over the last 30m as % of TVL (datapi). x2 = per hour: can it pay our target soon? */
+  feeTvl30mPct?: number | null;
   /** Current dynamic soft floor (null = soft tier off). */
   dynamicVolFloor?: number | null;
   /** Can a one-sided bid-ask/spot range actually be built within the bin/rent caps? */
@@ -173,6 +175,8 @@ export interface ComboConfigLike {
   eys_flow_usd_per_min_min: number;
   eys_vol_hard_usd_per_min?: number;
   eys_vol_accel_min?: number;
+  /** Soft tier also needs the pool to be paying >= this % of its TVL per hour (fee/TVL 30m x 2). */
+  eys_soft_fee_tvl_per_hour_min?: number;
   /** Fake-volume rule: lifetime fees (SOL) per $1M of mcap must reach this. */
   eys_fee_per_musd_min?: number;
   /** Eys's red-flag band: inside [lo, hi] mcap, fees must be strictly above 10 SOL. */
@@ -210,7 +214,12 @@ export function eysVolTier(
   const hard = hardTier(c);
   if (f.flowUsdPerMin >= hard) return { tier: "hard", threshold: hard };
   const floor = f.dynamicVolFloor;
-  if (floor != null && floor < hard && f.flowUsdPerMin >= floor && (f.volAccel ?? 0) >= (c.eys_vol_accel_min ?? 2)) {
+  // Soft tier (owner, 2026-10-03: "find a sweet spot… make it dynamic"): volume above the
+  // market-relative floor AND the pool actually paying LPs fast enough to reach our target
+  // (fee/TVL per hour). Acceleration is optional (eys_vol_accel_min, 0 = off).
+  const feePerHour = f.feeTvl30mPct != null ? f.feeTvl30mPct * 2 : null;
+  const feeOk = (c.eys_soft_fee_tvl_per_hour_min ?? 0) <= 0 || (feePerHour != null && feePerHour >= (c.eys_soft_fee_tvl_per_hour_min ?? 0));
+  if (floor != null && floor < hard && f.flowUsdPerMin >= floor && feeOk && (f.volAccel ?? 0) >= (c.eys_vol_accel_min ?? 2)) {
     return { tier: "soft", threshold: floor };
   }
   return null;

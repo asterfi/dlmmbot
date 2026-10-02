@@ -154,7 +154,12 @@ describe("eys_seat — hard and soft volume tiers", () => {
     expect(j.state.pool.vol_tier).toBe("hard");
   });
 
+  const pinLegacySoftTier = () => installConfig((c) => {
+    const cc = c.combo!;
+    cc.eys_vol_floor_usd_per_min = 15_000; cc.eys_vol_percentile = 0.8; cc.eys_vol_accel_min = 2; cc.eys_soft_fee_tvl_per_hour_min = 0;
+  });
   it("soft tier: between the dynamic floor and 100k/min AND accelerating -> Jev with the stricter 0.65 bar and the market context", async () => {
+    pinLegacySoftTier();
     // market: 6 trending tokens at 10k..60k per minute -> p80 = 50k, floor = max(15k, 50k) = 50k
     vi.mocked(trendingByMint).mockResolvedValue(new Map(
       [10_000, 20_000, 30_000, 40_000, 50_000, 60_000].map((v, i) => [`T${i}`, presence(200_000, v)]),
@@ -174,6 +179,7 @@ describe("eys_seat — hard and soft volume tiers", () => {
   });
 
   it("soft tier without acceleration (vol_accel < 2) is not offered to Jev at all", async () => {
+    pinLegacySoftTier();
     vi.mocked(trendingByMint).mockResolvedValue(new Map(
       [10_000, 20_000, 30_000, 40_000, 50_000, 60_000].map((v, i) => [`T${i}`, presence(200_000, v)]),
     ));
@@ -185,7 +191,34 @@ describe("eys_seat — hard and soft volume tiers", () => {
     expect(skippedGates()).toContain("combo_no_play");
   });
 
+  it("sweet spot: floor comes from this sweep's DLMM pools (p90), and the pool must pay >= 1.5%/h fee/TVL", async () => {
+    installConfig((c) => { const cc = c.combo!; cc.eys_vol_floor_usd_per_min = 1000; cc.eys_vol_percentile = 0.9; cc.eys_vol_accel_min = 0; cc.eys_soft_fee_tvl_per_hour_min = 1.5; });
+    vi.mocked(trendingByMint).mockResolvedValue(new Map());
+    // 6 rejected DLMM pools at 300..1800 $/min + the candidate itself (80k/30 = 2667) -> p90 = 2146.67
+    const rej = [300, 600, 900, 1200, 1500, 1800].map((v, i) => cand(pool({ address: `Rej${i}1111111111111111111111111111111111`, vol30mUsd: v * 30 })));
+    vi.mocked(fetchCandlesDeep).mockResolvedValue(candlesWithLast(2_500 * 5)); // 2.5k/min: above the floor, far below 100k
+    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ feeTvl30mPct: 10 }))], rejected: rej, sweptPools: 7 }); // 20%/h
+    await enterNewPositions(exec);
+    expect(exec.opens).toHaveLength(1);
+    const j = jevCalls()[0]!;
+    expect(j.state.pool.vol_tier).toBe("soft");
+    expect(j.state.pool.dynamic_vol_floor_usd_per_min).toBeCloseTo(2146.667, 2);
+    expect(j.state.pool.pool_fee_tvl_per_hour_pct).toBeCloseTo(20, 6);
+  });
+
+  it("sweet spot: a pool paying < 1.5%/h of TVL is not offered even with enough volume", async () => {
+    installConfig((c) => { const cc = c.combo!; cc.eys_vol_floor_usd_per_min = 1000; cc.eys_vol_percentile = 0.9; cc.eys_vol_accel_min = 0; cc.eys_soft_fee_tvl_per_hour_min = 1.5; });
+    vi.mocked(trendingByMint).mockResolvedValue(new Map());
+    const rej = [300, 600, 900, 1200, 1500, 1800].map((v, i) => cand(pool({ address: `Rej${i}1111111111111111111111111111111111`, vol30mUsd: v * 30 })));
+    vi.mocked(fetchCandlesDeep).mockResolvedValue(candlesWithLast(2_500 * 5));
+    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ feeTvl30mPct: 0.5 }))], rejected: rej, sweptPools: 7 }); // 1%/h
+    await enterNewPositions(exec);
+    expect(exec.opens).toHaveLength(0);
+    expect(jevCalls()).toHaveLength(0);
+  });
+
   it("below the dynamic floor nothing qualifies", async () => {
+    pinLegacySoftTier();
     vi.mocked(trendingByMint).mockResolvedValue(new Map(
       [10_000, 20_000, 30_000, 40_000, 50_000, 60_000].map((v, i) => [`T${i}`, presence(200_000, v)]),
     ));

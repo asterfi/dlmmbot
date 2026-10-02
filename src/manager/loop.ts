@@ -1924,11 +1924,21 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
   // the market read is blind (< 5 samples) or the floor is not below the hard tier.
   let volFloorInfo: DynamicVolFloor = { floor: null, percentileValue: null, samples: 0 };
   if (comboCfgTick?.enabled) {
+    // Market reference = the DLMM pools this sweep actually saw (tradeable on Meteora),
+    // not GMGN trending (mostly bonding-curve tokens with no DLMM pool, which read
+    // ~$2.9k/min while the best-paying DLMM pools ran $0.8-3k/min). GMGN is the fallback.
     const vols: number[] = [];
-    for (const pres of trendingMap.values()) {
-      if (pres.token.marketCapUsd < comboCfgTick.eys_mcap_min_usd) continue;
-      const r = gmgnPerMinuteVolumeUsd(pres);
-      if (r) vols.push(r.usdPerMin);
+    for (const cnd of [...(candidates ?? []), ...rejected]) {
+      if ((cnd.pool.marketCapUsd ?? 0) < comboCfgTick.eys_mcap_min_usd) continue;
+      if (cnd.pool.vol30mUsd > 0) vols.push(cnd.pool.vol30mUsd / 30);
+    }
+    if (vols.length < 5) {
+      vols.length = 0; // too few DLMM pools to read the market: use GMGN alone, not a mix
+      for (const pres of trendingMap.values()) {
+        if (pres.token.marketCapUsd < comboCfgTick.eys_mcap_min_usd) continue;
+        const r = gmgnPerMinuteVolumeUsd(pres);
+        if (r) vols.push(r.usdPerMin);
+      }
     }
     volFloorInfo = dynamicVolFloor(vols, {
       staticFloor: comboCfgTick.eys_vol_floor_usd_per_min ?? 15_000,
@@ -2457,6 +2467,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         devFeesKnownZero: false,
         flowUsdPerMin,
         volAccel,
+        feeTvl30mPct: cand.pool.feeTvl30mPct,
         dynamicVolFloor: volFloorInfo.floor,
         oneSidedFeasible: reach.ok,
         openPlaysOnToken: openOnToken.map((p) => p.play),
@@ -2648,6 +2659,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             vol_tier: classified.volTier ?? volTierInfo?.tier ?? null,
             vol_threshold_usd_per_min: classified.volThreshold ?? volTierInfo?.threshold ?? null,
             vol_accel: features.volAccel ?? null,
+            pool_fee_tvl_per_hour_pct: cand.pool.feeTvl30mPct != null ? cand.pool.feeTvl30mPct * 2 : null,
             dynamic_vol_floor_usd_per_min: volFloorInfo.floor,
             market_percentile_usd_per_min: volFloorInfo.percentileValue,
             market_percentile_samples: volFloorInfo.samples,
