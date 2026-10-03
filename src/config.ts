@@ -101,6 +101,8 @@ export interface Config {
     fee_collection: "prefer_quote" | "quote_only" | "both_only" | "any";
     quote_mints: string[]; price_divergence_max_pct: number;
     max_pool_share_pct: number;
+    /** Pool gates ignored while [combo] is enabled (upstream fee/TVL filters that are not in the Eys playbook). */
+    combo_skip_gates?: string[];
   };
   vetting: {
     /** When false, skip that hard fail (thresholds still stored for when re-enabled). */
@@ -397,6 +399,12 @@ export interface Config {
     eys_tp_pct: number;
     /** eys_seat default Spot range depth below price, % (top bin = active bin). */
     eys_seat_range_below_pct?: number;
+    /** eys_seat range as a bin count below the active bin (Meteora's default range, 69). Overrides eys_seat_range_below_pct when set. */
+    eys_seat_bins?: number;
+    /** Read per-minute volume from GMGN 1m candles (Eys watches the 1m chart). Default false. */
+    eys_vol_1m_enabled?: boolean;
+    /** Per-minute volume = the highest of the last N 1m candles (current one included). Default 3. */
+    eys_vol_1m_bars?: number;
     /** A seat sitting above its range (about all SOL) this long, with no breakout leg open on the mint, is closed (eys_seat_idle). */
     eys_seat_idle_above_min?: number;
 
@@ -440,6 +448,8 @@ export interface Config {
     ape_sol: number;
     ape_fee_min_sol: number;
     ape_range_up_pct: number;
+    /** Token-sided range as a bin count above the active bin (Meteora's default range, 69). Overrides ape_range_up_pct when set. */
+    ape_bins?: number;
     ape_age_max_h: number;
     ape_mcap_min_usd: number;
     /** Stonks-listed mints get a ranking boost for the single ape slot. Default true. */

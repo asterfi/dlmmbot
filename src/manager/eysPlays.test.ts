@@ -418,6 +418,8 @@ describe("slots and affordability", () => {
     expect(skippedGates().some((g) => g.startsWith("skip_affordability"))).toBe(true);
   });
   it("prices the REAL position-account count: a 2-account Spot range on a fine-step pool needs 0.1 + 2x0.045 + 0.04", async () => {
+    // % depth on a fine step needs two accounts; the default 69-bin seat (eys_seat_bins) never does.
+    installConfig((c) => { c.combo!.eys_seat_bins = undefined; });
     exec.wallet = 0.21; // enough for one account (0.185), not for two (0.23)
     vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ binStep: 10 }))], rejected: [], sweptPools: 1 });
     await enterNewPositions(exec);
@@ -427,6 +429,8 @@ describe("slots and affordability", () => {
     expect(JSON.parse(row!.features_json)).toMatchObject({ positionAccounts: 2 });
   });
   it("the same range IS taken when equity covers both accounts", async () => {
+    // % depth on a fine step needs two accounts; the default 69-bin seat (eys_seat_bins) never does.
+    installConfig((c) => { c.combo!.eys_seat_bins = undefined; });
     exec.wallet = 0.5;
     vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ binStep: 10 }))], rejected: [], sweptPools: 1 });
     await enterNewPositions(exec);

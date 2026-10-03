@@ -193,6 +193,7 @@ export async function buildApeDepositTx(
   tokenAmountRaw: bigint,
   minBinId: number,
   maxBinId: number,
+  shape: "spot" | "bidask" = "spot",
 ): Promise<{ tx: Transaction; positionKp: Keypair }> {
   const positionKp = Keypair.generate();
   const tx: Transaction = await pool.initializePositionAndAddLiquidityByStrategy({
@@ -200,7 +201,8 @@ export async function buildApeDepositTx(
     user,
     totalXAmount: new BN(tokenAmountRaw.toString()),
     totalYAmount: new BN(0),
-    strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk },
+    // Spot per Eys ("For pumping tokens, I always use Spot") — token-sided included.
+    strategy: { minBinId, maxBinId, strategyType: shape === "spot" ? StrategyType.Spot : StrategyType.BidAsk },
   });
   return { tx, positionKp };
 }
@@ -1093,7 +1095,7 @@ export class LiveExecutor implements Executor {
     let positionKp: Keypair;
     try {
       const pool = await this.pool(params.poolAddress);
-      const built = await buildApeDepositTx(pool, this.wallet.publicKey, tokenRaw, minBinId, maxBinId);
+      const built = await buildApeDepositTx(pool, this.wallet.publicKey, tokenRaw, minBinId, maxBinId, params.range.shape === "bidask" ? "bidask" : "spot");
       positionKp = built.positionKp;
       // this.send() already retries up to config().exec.tx_retries with fee
       // escalation — the same ladder every other open/close uses.

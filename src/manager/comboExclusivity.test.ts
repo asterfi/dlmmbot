@@ -12,7 +12,7 @@ vi.mock("../scanner/meteora.js", async (importOriginal) => {
   return { ...actual, fetchPool: vi.fn(async () => null) };
 });
 vi.mock("../scanner/candles.js", () => ({ fetchCandlesDeep: vi.fn(async () => []) }));
-vi.mock("../scanner/gmgn.js", () => ({ trendingByMint: vi.fn(async () => new Map()), gmgnPerMinuteVolumeUsd: vi.fn(() => null) }));
+vi.mock("../scanner/gmgn.js", () => ({ trendingByMint: vi.fn(async () => new Map()), gmgnPerMinuteVolumeUsd: vi.fn(() => null), gmgnOneMinutePeakUsd: vi.fn(async () => null) }));
 vi.mock("../scanner/stonkfun.js", () => ({ fetchStonkTokens: vi.fn(async () => []) }));
 vi.mock("../market.js", () => ({
   sol24hChangePct: vi.fn(async () => 0),

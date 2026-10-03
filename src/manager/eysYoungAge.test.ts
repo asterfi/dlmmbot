@@ -18,6 +18,7 @@ vi.mock("../scanner/candles.js", () => ({ fetchCandlesDeep: vi.fn(async () => []
 vi.mock("../scanner/gmgn.js", () => ({
   trendingByMint: vi.fn(async () => new Map()),
   gmgnPerMinuteVolumeUsd: vi.fn(() => null),
+  gmgnOneMinutePeakUsd: vi.fn(async () => null),
 }));
 vi.mock("../strategy/combo/feeMode.js", () => ({ readOnchainCollectFeeMode: vi.fn(async () => 1) }));
 vi.mock("../scanner/stonkfun.js", () => ({ fetchStonkTokens: vi.fn(async () => []) }));

@@ -18,7 +18,7 @@ import { planRange, planTrancheRange, depthReachable } from "../ranges/planner.j
 import { applyBinRentGate } from "../ranges/binRent.js";
 import { fetchPool } from "../scanner/meteora.js";
 import { fetchCandlesDeep } from "../scanner/candles.js";
-import { trendingByMint, gmgnPerMinuteVolumeUsd } from "../scanner/gmgn.js";
+import { trendingByMint, gmgnPerMinuteVolumeUsd, gmgnOneMinutePeakUsd } from "../scanner/gmgn.js";
 import { feeMomentumPart, opportunityScore, structurePart, turnoverPart } from "../scanner/score.js";
 import { scan } from "../scanner/scan.js";
 import { flowFor, startSmartFlow } from "../scanner/smartflow.js";
@@ -2423,9 +2423,17 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       const vol5mUsd = freshestCandle ? freshestCandle.volume : null;
       const datapiUsdPerMin = vol5mUsd !== null ? vol5mUsd / 5 : null;
       const gmgnRate = gmgnPerMinuteVolumeUsd(trendingMap.get(cand.tokenMint));
+      // Eys reads the 1-minute bar on GMGN's chart ("100K+ volume per minute",
+      // "strong upward spikes"); the 5m trending window is a 5-minute average
+      // up to 10 minutes stale and put PRINTR ($164k 1m peak), HOTBOT ($136k),
+      // HOOKED ($123k) and Agency ($115k) below the bar (2026-10-03 check).
+      const gmgn1m = cc.eys_vol_1m_enabled
+        ? await gmgnOneMinutePeakUsd(cand.tokenMint, cc.eys_vol_1m_bars ?? 3).catch(() => null)
+        : null;
       let flowUsdPerMin: number;
       let volWindow: string;
-      if (gmgnRate !== null) { flowUsdPerMin = gmgnRate.usdPerMin; volWindow = `gmgn_${gmgnRate.window}`; }
+      if (gmgn1m !== null) { flowUsdPerMin = gmgn1m; volWindow = `gmgn_1m_peak${cc.eys_vol_1m_bars ?? 3}`; }
+      else if (gmgnRate !== null) { flowUsdPerMin = gmgnRate.usdPerMin; volWindow = `gmgn_${gmgnRate.window}`; }
       else if (datapiUsdPerMin !== null) { flowUsdPerMin = datapiUsdPerMin; volWindow = "datapi_5m"; }
       else { flowUsdPerMin = cand.pool.vol30mUsd / 30; volWindow = "vol30m_avg_fallback"; }
       // ---- Eys context (owner, 2026-10-03) ----
@@ -2596,10 +2604,14 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
             break;
           case "eys_ape":
           case "eys_breakout":
-            plannedRange = planApeRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.ape_range_up_pct, maxAccts);
+            plannedRange = planApeRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.ape_range_up_pct, maxAccts, cc.ape_bins);
             break;
           default:
-            plannedRange = planSeatRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.eys_seat_range_below_pct ?? 12, maxAccts);
+            // Eys: "Spot SOL-side using the default range" — Meteora's default is
+            // a bin count (eys_seat_bins, 69), not a % depth; same geometry as tight.
+            plannedRange = cc.eys_seat_bins
+              ? planTightRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.eys_seat_bins, maxAccts)
+              : planSeatRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.eys_seat_range_below_pct ?? 12, maxAccts);
         }
         const rentRes = await applyBinRentGate({
           range: plannedRange, score, poolAddress: cand.pool.address,

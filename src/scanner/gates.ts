@@ -78,7 +78,12 @@ export function poolGates(p: PoolInfo & { extras: RawPoolExtras }): GateFailure[
   if (!p.extras.freezeAuthorityDisabled)
     fail("freeze_authority_listing", "enabled", "disabled");
 
-  return fails;
+  // Eys-only combo (owner, 2026-10-03): upstream's fee/TVL and volume-trend
+  // filters are not in the Eys playbook (his fee rules — >=10 SOL earned and
+  // the fake-volume check — run in the combo classifier) and dropped coins he
+  // would trade (PEPE at ~$53k/min on fee_tvl_24h). Safety gates still apply.
+  const skip = config().combo?.enabled ? g.combo_skip_gates : undefined;
+  return skip?.length ? fails.filter((f) => !skip.includes(f.gate)) : fails;
 }
 
 /**

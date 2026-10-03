@@ -511,6 +511,7 @@ export function _resetGmgnPaceForTests(): void {
   cache = null;
   secCache.clear();
   tagCache.clear();
+  klineCache.clear();
 }
 
 async function cli(args: string[]): Promise<string> {
@@ -590,6 +591,65 @@ export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
 
   cache = { at: Date.now(), byMint };
   return byMint;
+}
+
+// --- 1-minute volume (Eys's chart reading, owner 2026-10-03) ---
+// Eys reads "100K+ volume per minute" off the 1m bar of GMGN's chart. One
+// `market kline` call (weight 2) per candidate mint, cached a minute; an
+// optional call, so it yields to the throttle and the caller falls back to the
+// trending 5m window.
+
+const KLINE_TTL_MS = 60_000;
+const KLINE_STALE_MS = 180_000;
+const klineCache = new Map<string, { at: number; v: number | null }>();
+
+/**
+ * Exported for tests: highest USD volume among the 1m candles of a raw
+ * `market kline` payload whose open time is at or after `sinceMs` (GMGN skips
+ * empty minutes, so the window is by time, not by bar count). No candle in the
+ * window = 0 (nothing traded); an unrecognizable payload = null.
+ */
+export function parseKlinePeakUsd(raw: string, sinceMs: number): number | null {
+  let list: unknown;
+  try { list = (JSON.parse(raw) as { list?: unknown })?.list; } catch { return null; }
+  if (!Array.isArray(list)) return null;
+  let peak = 0;
+  for (const k of list as Array<{ time?: unknown; volume?: unknown }>) {
+    const t = Number(k?.time);
+    const v = Number(k?.volume);
+    if (Number.isFinite(t) && Number.isFinite(v) && v >= 0 && t >= sinceMs) peak = Math.max(peak, v);
+  }
+  return peak;
+}
+
+/** Highest 1m volume (USD) over the last `bars` minutes, current minute included. null = unavailable. */
+export async function gmgnOneMinutePeakUsd(mint: string, bars = 3): Promise<number | null> {
+  if (!config().gmgn.enabled || !env().gmgnApiKey) return null;
+  const hit = klineCache.get(mint);
+  const age = hit ? Date.now() - hit.at : Infinity;
+  if (hit && age < KLINE_TTL_MS) return hit.v;
+  if (!gmgnSpendOk(gmgnRouteWeight(["market", "kline"]), "market", { optional: true })) {
+    return hit && age < KLINE_STALE_MS ? hit.v : null;
+  }
+  const nowMs = Date.now();
+  const sinceMs = Math.floor(nowMs / 60_000) * 60_000 - (Math.max(1, bars) - 1) * 60_000;
+  let v: number | null = null;
+  try {
+    const raw = await cli([
+      "market", "kline",
+      "--chain", "sol",
+      "--address", mint,
+      "--resolution", "1m",
+      "--from", String(Math.floor(sinceMs / 1000) - 60),
+      "--to", String(Math.ceil(nowMs / 1000)),
+      "--raw",
+    ]);
+    v = parseKlinePeakUsd(raw, sinceMs);
+  } catch {
+    v = null;
+  }
+  klineCache.set(mint, { at: Date.now(), v });
+  return v;
 }
 
 // --- Vetting enrichment (phase 1 of GMGN adoption, 2026-08-07) ---

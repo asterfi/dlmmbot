@@ -127,6 +127,7 @@ fee_collection = "prefer_quote"
 quote_mints = ["So11111111111111111111111111111111111111112"]  # SOL only (meme mode)
 price_divergence_max_pct = 5.0   # pool vs Jupiter; was 2.0 — every top fee pool (2-7%) was rejected; >5% arb loss would exceed the +3% target
 max_pool_share_pct = 20          # skip if our position would exceed this % of pool TVL
+combo_skip_gates = ["fee_tvl_24h", "fee_tvl_30m_daily", "vol_trend", "tvl_max"]  # not Eys rules; ignored while [combo] is on (safety gates still apply)
 
 [vetting]                  # STRATEGY.md §2.2 — token hard gates
 # Master switches (Settings UI). Off = skip that hard fail; thresholds still apply when on.
@@ -788,6 +789,8 @@ eys_vol_hard_usd_per_min = 100000
 eys_vol_floor_usd_per_min = 1000  # soft-tier floor; data 2026-10-03: best-paying DLMM pools ran $0.8-3k/min at 20-55%/h fee/TVL
 eys_vol_percentile = 0.9         # floor rises with the market: p90 of per-minute volume across this sweep's DLMM pools (mcap >= floor)
 eys_vol_accel_min = 0            # acceleration optional (0 = off); passed to Jev as info
+eys_vol_1m_enabled = true        # per-minute volume from GMGN 1m candles (Eys reads the 1m bar); 5m trending window is the fallback
+eys_vol_1m_bars = 3              # highest of the last 3 one-minute bars (current minute included)
 eys_soft_fee_tvl_per_hour_min = 1.5  # soft tier must be paying >= 1.5%/h of TVL (our +3% within ~2h)
 jev_eys_soft_bar = 0.65
 # Datapi has no documented freshness guarantee and no timestamp in its pool payload:
@@ -800,6 +803,7 @@ datapi_max_age_s = 120
 # Exit: green >= eys_tp_pct OR flow death (held flow_dead_confirm_min) — never a stop.
 eys_tp_pct = 3                      # Eys: "whether it's 1%, 2%, or 3%". 3% while tickets are ~0.08 SOL: 2% (0.0016) only equals the round-trip cost estimate
 eys_seat_range_below_pct = 12       # same depth as the Spot majors default range
+eys_seat_bins = 69                  # Eys: "Spot SOL-side using the default range" = Meteora default 69 bins below price (overrides the % depth)
 # A seat above its range (about all SOL, flat) for this long with no breakout leg open on
 # the mint is idle and blocks a slot: close it (eys_seat_idle). While a breakout leg is
 # open the seat stays as the backup; once the breakout closes the rule applies at once if
@@ -853,6 +857,7 @@ ape_age_max_h = 48           # new coin only
 ape_mcap_min_usd = 100000    # same floor as eys_seat
 ape_fee_min_sol = 10         # lifetime fees earned in the pool — ALWAYS required
 ape_range_up_pct = 50        # token-sided range above price, upper bound (bin/rent-capped like every other range)
+ape_bins = 69                # Eys: Meteora default range, 69 bins above price (overrides ape_range_up_pct); Spot, held while SOL fees flow
 ape_stonks_priority = true   # Stonks-listed mints rank ahead of equal-score Meteora-only candidates for the single ape slot
 # LIVE from day one (owner's decision, 2026-10-01): the SOL->token swap and the
 # token-sided deposit were sign-only Privy policy smoke-tested ALLOW

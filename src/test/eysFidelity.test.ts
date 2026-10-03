@@ -1,0 +1,81 @@
+import { describe, it, expect, afterEach } from "vitest";
+import { poolGates } from "../scanner/gates.js";
+import { parseKlinePeakUsd } from "../scanner/gmgn.js";
+import { planApeRange } from "../strategy/combo/apeRange.js";
+import { planTightRange } from "../strategy/combo/eysRanges.js";
+import { installConfig, restoreConfig } from "./config.js";
+import { makePool } from "./pool.js";
+
+// Eys-fidelity fixes (owner, 2026-10-03): 1m volume, no non-Eys pool gates,
+// default 69-bin ranges, Spot token-sided.
+
+const SKIP = ["fee_tvl_24h", "fee_tvl_30m_daily", "vol_trend", "tvl_max"];
+const COLD = { feeTvl24hPct: 0.1, feeTvl30mPct: 0.001, feeTvl1hPct: 0.001, tvlUsd: 5_000_000 };
+
+describe("combo_skip_gates", () => {
+  afterEach(() => restoreConfig());
+
+  it("ignores the listed upstream gates while combo is on", () => {
+    installConfig((c) => { c.combo!.enabled = true; c.gates.combo_skip_gates = SKIP; });
+    const gates = poolGates(makePool(COLD)).map((f) => f.gate);
+    for (const g of SKIP) expect(gates).not.toContain(g);
+  });
+
+  it("still applies them when combo is off", () => {
+    installConfig((c) => { c.combo!.enabled = false; c.gates.combo_skip_gates = SKIP; });
+    const gates = poolGates(makePool(COLD)).map((f) => f.gate);
+    expect(gates).toContain("fee_tvl_24h");
+    expect(gates).toContain("tvl_max");
+  });
+
+  it("never skips safety gates", () => {
+    installConfig((c) => { c.combo!.enabled = true; c.gates.combo_skip_gates = SKIP; });
+    const gates = poolGates(makePool({ marketCapUsd: 1_000, tvlUsd: 100 })).map((f) => f.gate);
+    expect(gates).toContain("mcap_min");
+    expect(gates).toContain("tvl_min");
+  });
+});
+
+describe("parseKlinePeakUsd", () => {
+  const T = 1_790_947_260_000;
+  const raw = JSON.stringify({ list: [
+    { time: T - 600_000, volume: "500000" },      // 10 min ago: outside the window
+    { time: T - 60_000, volume: "97456.2" },
+    { time: T, volume: "42708" },
+  ] });
+
+  it("takes the highest bar inside the window", () => {
+    expect(parseKlinePeakUsd(raw, T - 120_000)).toBeCloseTo(97456.2);
+  });
+  it("is 0 when nothing traded in the window (GMGN skips empty minutes)", () => {
+    expect(parseKlinePeakUsd(raw, T + 60_000)).toBe(0);
+  });
+  it("is null for an unrecognizable payload", () => {
+    expect(parseKlinePeakUsd("not json", 0)).toBeNull();
+    expect(parseKlinePeakUsd(JSON.stringify({ code: 429 }), 0)).toBeNull();
+  });
+});
+
+describe("default 69-bin ranges", () => {
+  it("seat: 69 bins ending at the active bin, one position account", () => {
+    const r = planTightRange(0.77, 100, 6, 69, 2);
+    expect(r.binCount).toBe(69);
+    expect(r.positionAccounts).toBe(1);
+    expect(r.shape).toBe("spot");
+    expect(r.bottomPricePct).toBeLessThan(-45); // 1% step: ~-49%
+  });
+
+  it("ape: 69 bins above price, Spot, one account (bins override the % cap)", () => {
+    const r = planApeRange(0.77, 100, 6, 50, 2, 69);
+    expect(r.binCount).toBe(69);
+    expect(r.positionAccounts).toBe(1);
+    expect(r.shape).toBe("spot");
+    expect(r.topPricePct).toBeGreaterThan(90); // 1% step: ~+97%
+  });
+
+  it("ape without bins keeps the % range", () => {
+    const r = planApeRange(0.77, 100, 6, 50, 2);
+    expect(r.topPricePct).toBeGreaterThan(45);
+    expect(r.topPricePct).toBeLessThan(55);
+  });
+});
