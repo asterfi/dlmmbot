@@ -41,16 +41,30 @@ function playRules(play: ComboPlay, combo: StrategyConfig["combo"], jev: Strateg
     const accel = num(combo, "eys_vol_accel_min");
     const soft = num(combo, "jev_eys_soft_bar");
     const below = num(combo, "eys_seat_range_below_pct");
+    const seatBins = num(combo, "eys_seat_bins");
     const idle = num(combo, "eys_seat_idle_above_min");
+    const feeEntry = num(combo, "eys_fee_entry_pct_per_h");
+    const softFee = num(combo, "eys_soft_fee_tvl_per_hour_min");
+    const oneMin = bool(combo, "eys_vol_1m_enabled");
+    const hold = combo["eys_seat_exit"] === "fee_hold";
+    const holdFee = num(combo, "eys_hold_fee_min_pct_per_h");
+    const holdMin = num(combo, "eys_hold_min_minutes");
     return [
-      "The first entry on a qualifying token: Spot, SOL-side, the default range" + (below != null ? ` (~${below}% below price, top bin = the active bin)` : "") + ".",
+      "The first entry on a qualifying token: Spot, SOL-side, the default range" +
+        (seatBins != null ? ` (${seatBins} bins below price, top bin = the active bin)` : below != null ? ` (~${below}% below price, top bin = the active bin)` : "") + ".",
       mcap != null && fees != null
         ? `Token must be >= ${k(mcap)} mcap with >= ${fees} SOL of lifetime pool fees, and the fees must scale with the mcap (the fake-volume red flag).`
         : "Token needs real mcap and lifetime fees, scaled to its mcap.",
       hard != null
-        ? `Volume bar: >= ${k(hard)}/min is Eys's literal "ape immediately" tier. A softer, dynamic tier opens between a market-percentile floor${floor != null ? ` (never below ${k(floor)}/min)` : ""} and that bar only while volume is accelerating${accel != null ? ` (>= ${accel}x its trailing average)` : ""}, and Jev must then clear a stricter ${soft != null ? soft.toFixed(2) : "composite"} bar.`
-        : "Per-minute volume must clear Eys's bar (a dynamic soft tier exists for accelerating volume).",
-      tp != null ? `Exit when green by >= +${tp}% or when flow dies (held for a few minutes). Never a stop-loss.` : "Exit when green or when flow dies. Never a stop-loss.",
+        ? `Volume bar: >= ${k(hard)}/min${oneMin ? " on GMGN's 1-minute candles (the bar Eys reads)" : ""} is Eys's literal "ape immediately" tier.`
+        : "Per-minute volume must clear Eys's bar.",
+      feeEntry != null && feeEntry > 0
+        ? `Fee tier: a pool already paying >= ${feeEntry}% of its TVL per hour in fees qualifies at any volume — fees relative to the pool are what pay an LP.`
+        : null,
+      `A softer, dynamic volume tier opens above a market-percentile floor${floor != null ? ` (never below ${k(floor)}/min)` : ""}${softFee != null ? ` when the pool pays >= ${softFee}%/h` : ""}${accel ? ` and volume is accelerating (>= ${accel}x)` : ""}; Jev must then clear a stricter ${soft != null ? soft.toFixed(2) : "composite"} bar.`,
+      hold
+        ? `Exit: no fixed take-profit — the seat holds while the pool keeps paying. It closes when fees fade below ${holdFee ?? 2}%/h, when price falls below the range${holdMin != null ? ` (after ${holdMin} min)` : ""}, or when flow dies. Never a stop-loss.`
+        : tp != null ? `Exit when green by >= +${tp}% or when flow dies (held for a few minutes). Never a stop-loss.` : "Exit when green or when flow dies. Never a stop-loss.",
       idle != null ? `A seat that sits above its range for ${idle} min with no breakout leg open is idle and gets closed.` : null,
       thresholdLine,
     ].filter(Boolean) as string[];
@@ -60,7 +74,7 @@ function playRules(play: ComboPlay, combo: StrategyConfig["combo"], jev: Strateg
     return [
       "A token-sided SECOND position on a token whose seat is open — the seat is never closed on a breakout; it stays as the backup that catches a dump.",
       `Fires only when price breaks above the top of the seat's range, volume is ${mult ?? 3}x the threshold the seat entered under (Eys: 100k -> 300k per minute) and the last 5m candle is up >= ${spike ?? 10}%.`,
-      "Swap SOL for the token and deposit it above price (a fixed ticket; token-sided money is money you are okay losing).",
+      "Swap SOL for the token and deposit it Spot above price over the default range (a fixed ticket; token-sided money is money you are okay losing).",
       tp != null ? `Exit when the range has fully converted to SOL, when green by >= +${tp}%, or when flow dies.` : "Exit when the range has fully converted to SOL, when green, or when flow dies.",
       thresholdLine,
     ].filter(Boolean) as string[];
@@ -100,12 +114,15 @@ function playRules(play: ComboPlay, combo: StrategyConfig["combo"], jev: Strateg
   const sol = num(combo, "ape_sol");
   const feeMin = num(combo, "ape_fee_min_sol");
   const rangeUp = num(combo, "ape_range_up_pct");
+  const apeBins = num(combo, "ape_bins");
   const live = bool(combo, "ape_live_enabled");
   return [
     "Token-sided ape on fresh coins (<= 48h, >= $100k mcap, >= 10 SOL fees) whose pool collects fees in SOL only (read from the pool's on-chain fee mode) — from the whole Meteora sweep, Stonks Launchpad coins get priority.",
     sol != null ? `Fixed ${sol} SOL ticket — not a % of the active budget.` : "Fixed-size ticket.",
     feeMin != null ? `Lifetime fee floor: >= ${feeMin} SOL, and the same fees-per-mcap fake-volume rule as the seat.` : null,
-    rangeUp != null ? `Token-sided range up to +${rangeUp}% above price.` : null,
+    apeBins != null
+      ? `Spot, token-sided, the default range (${apeBins} bins above price) — held while SOL fees flow; it closes when price runs through the top (all SOL) or flow dies.`
+      : rangeUp != null ? `Token-sided range up to +${rangeUp}% above price.` : null,
     "Max 1 concurrent. Can go to zero — no stop loss, by design.",
     live ? "Live trading is ON for token-sided plays." : "Live trading is OFF for token-sided plays (paper-only kill switch set).",
     thresholdLine,
