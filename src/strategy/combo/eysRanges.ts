@@ -50,3 +50,15 @@ export function planTightRange(
   const n = Math.max(2, Math.min(bins, BINS_PER_POSITION * maxPositionAccounts));
   return build(activeBin - n + 1, activeBin, currentPrice, binStep, decimalsX);
 }
+
+/**
+ * Re-seat depth in bins (owner, 2026-10-03): from the current price down to where
+ * the pump started (the recent low), clamped to [minBins, maxBins]. Backtest over
+ * 238 pumps (>= 15% in 60 min, pools >= 5%/h, hold-while-paying exits): [30, 69]
+ * bins to the pump origin +2.47 SOL vs Eys's flat 69 bins +1.98 SOL.
+ */
+export function pumpOriginBins(price: number, recentLow: number | null, binStep: number, minBins: number, maxBins: number): number {
+  if (!(price > 0) || recentLow == null || !(recentLow > 0) || recentLow >= price) return maxBins;
+  const bins = Math.round(Math.log(price / recentLow) / Math.log(1 + binStep / 10_000));
+  return Math.min(maxBins, Math.max(minBins, bins));
+}

@@ -38,7 +38,7 @@ import {
   dynamicVolFloor, eysVolTier, feePerMusd, estimateLifetimePoolFeesSol, lastCandleSpikePct, hasMajorDump, recentRangePct, volumePeakDropPct, belowAthPct,
   type Play, type PlayCandidateFeatures, type VolTier, type DynamicVolFloor,
 } from "../strategy/combo/plays.js";
-import { planSeatRange, planTightRange } from "../strategy/combo/eysRanges.js";
+import { planSeatRange, planTightRange, pumpOriginBins } from "../strategy/combo/eysRanges.js";
 import { poolDataStale } from "../db/db.js";
 import { readOnchainCollectFeeMode } from "../strategy/combo/feeMode.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
@@ -162,6 +162,9 @@ const fellDeep = new Set<number>();                   // escape hatch armed (als
 const p0CrashSkippedLogged = new Set<number>();          // p0_crash_skipped_combo logged once per position
 const comboFlowDeadSince = new Map<number, number>();
 const comboFeeFadedSince = new Map<number, number>();   // eys_seat fee_hold: when fee/TVL per hour last dropped below the hold floor
+// eys_seat reposition (owner, 2026-10-03): mint -> unix s until which a re-seat of a
+// seat just closed above its range skips the Jev ENTRY consult (same trade, moved).
+const comboReseatPass = new Map<string, number>();
 const comboAboveSince = new Map<number, number>();   // combo: when price last went above this position's range (unix s); cleared in/below range
 const everFilled = new Set<number>();                 // combo: has this ladder ever actually converted SOL->token? (also persisted)
 const peakPnl = new Map<number, number>();            // give-back telemetry: best fee-inclusive PnL (persisted)
@@ -262,6 +265,7 @@ export function resetManagerStateForTests(): void {
   everFilled.clear();
   comboFlowDeadSince.clear();
   comboFeeFadedSince.clear();
+  comboReseatPass.clear();
   comboAboveSince.clear();
   p0CrashSkippedLogged.clear();
   peakPnl.clear();
@@ -1298,15 +1302,22 @@ export async function managePositions(exec: Executor): Promise<void> {
         // eys_breakout open on the mint -> close. With a breakout open the seat stays;
         // once the breakout closes the rule applies at once if the time above range
         // has already elapsed.
-        const idleAboveMin = comboCfgExit.eys_seat_idle_above_min ?? 20;
+        // Reposition: while the pool still pays the fee-tier rate, a seat above its range
+        // (100% SOL, so moving it realizes nothing but tx fees) is moved under the
+        // current price after eys_reseat_above_min instead of idling for the full window.
+        const reseat = seatIdleCooldownH(comboCfgExit, mark.feeTvl30mPct * 2) === 0;
+        const idleAboveMin = reseat ? (comboCfgExit.eys_reseat_above_min ?? 3) : (comboCfgExit.eys_seat_idle_above_min ?? 20);
         if (pos.play === "eys_seat" && mark.aboveRange && comboAboveMin >= idleAboveMin) {
           const breakoutOpen = openComboOnToken(pos.tokenMint).some((p) => p.play === "eys_breakout");
           if (!breakoutOpen) {
             await closeAndReport(exec, pos, "eys_seat_idle", config().exec.exit_slippage_bps, "close",
-              `eys_seat idle: above its range ${Math.round(comboAboveMin)}m with no breakout leg open`);
+              reseat
+                ? `eys_seat reposition: above its range ${Math.round(comboAboveMin)}m, pool still paying ${(mark.feeTvl30mPct * 2).toFixed(1)}%/h — re-seating under the new price`
+                : `eys_seat idle: above its range ${Math.round(comboAboveMin)}m with no breakout leg open`);
             clearRangeTimers(pos.id);
-            const cooldownH = seatIdleCooldownH(comboCfgExit, mark.feeTvl30mPct * 2);
+            const cooldownH = reseat ? 0 : seatIdleCooldownH(comboCfgExit, mark.feeTvl30mPct * 2);
             if (cooldownH > 0) blacklist(pos.tokenMint, "token", "eys_seat idle — token ran away", cooldownH);
+            if (reseat) comboReseatPass.set(pos.tokenMint, now() + 15 * 60);
             recordDecision(pos.tokenMint, pos.poolAddress, "exited", "eys_seat_idle", null, {
               play: pos.play, ageH, aboveMin: comboAboveMin, idleAboveMin, mark, cooldownH, reseat: cooldownH === 0,
             });
@@ -2600,6 +2611,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         //  seat / tight: Spot, SOL-side, top bin = active bin; breakout / ape: token-sided
         //  ABOVE price; dump bonus: deep Bid-Ask SOL-side (-85..-90%).
         const maxAccts = config().entry.max_position_accounts;
+        const reseatPassActive = classified.play === "eys_seat" && (comboReseatPass.get(cand.tokenMint) ?? 0) > now();
         let plannedRange: RangePlan;
         switch (classified.play) {
           case "eys_tight":
@@ -2618,7 +2630,14 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           default:
             // Eys: "Spot SOL-side using the default range" — Meteora's default is
             // a bin count (eys_seat_bins, 69), not a % depth; same geometry as tight.
-            plannedRange = cc.eys_seat_bins
+            plannedRange = reseatPassActive
+              // Re-seat: down to the pump's origin (recent low), clamped [eys_reseat_bins_min, eys_seat_bins].
+              ? planTightRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, pumpOriginBins(
+                  entryPrice,
+                  candles.length > 0 ? Math.min(...candles.slice(-(cc.eys_reseat_lookback_candles ?? 12)).map((k) => k.low)) : null,
+                  cand.pool.binStep, cc.eys_reseat_bins_min ?? 30, cc.eys_seat_bins ?? 69,
+                ), maxAccts)
+              : cc.eys_seat_bins
               ? planTightRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.eys_seat_bins, maxAccts)
               : planSeatRange(entryPrice, cand.pool.binStep, cand.pool.decimalsX, cc.eys_seat_range_below_pct ?? 12, maxAccts);
         }
@@ -2732,7 +2751,12 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
           playbook: COMBO_PLAYBOOK,
         };
 
-        const jevResult = await jevConsult({
+        // Reposition of a seat just closed above its range: the trade was already
+        // approved; Eys's entry rules above still had to pass, Jev is not re-asked.
+        const reseatEntry = reseatPassActive;
+        const jevResult: Awaited<ReturnType<typeof jevConsult>> = reseatEntry
+          ? ({ consulted: false, verdict: "yes", fallback: false, outcome: "reseat", latencyMs: 0, slow: false } as unknown as Awaited<ReturnType<typeof jevConsult>>)
+          : await jevConsult({
           lane: "enter",
           state: jevState,
           fallbackVerdict: "yes",
@@ -2777,6 +2801,7 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         }
         play = classified.play;
         volThresholdOuter = classified.volThreshold ?? null;
+        if (reseatEntry) comboReseatPass.delete(cand.tokenMint);
         // Pool-share cap still binds the combo's own size (clamped above only
         // for the seed); skip if clamping would take it under combo's floor.
         if (comboSize > poolShareCapSol) {

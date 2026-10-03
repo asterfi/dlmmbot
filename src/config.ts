@@ -417,6 +417,12 @@ export interface Config {
     eys_seat_idle_above_min?: number;
     /** After an idle close, re-seat at the new price (no cooldown) while the pool pays >= eys_fee_entry_pct_per_h. */
     eys_reseat_on_idle?: boolean;
+    /** Reposition: minutes above range before a seat is moved under the new price (while the pool pays the fee-tier rate). */
+    eys_reseat_above_min?: number;
+    /** Re-seat range: at least this many bins, down to the pump origin (recent low), capped at eys_seat_bins. */
+    eys_reseat_bins_min?: number;
+    /** Re-seat range: recent low over this many 5m candles. */
+    eys_reseat_lookback_candles?: number;
 
     // --- eys_breakout (token-sided second position on an open seat) ---
     /** Breakout volume bar = this x whichever per-minute threshold the seat entered under (Eys: 100k -> 300k). */

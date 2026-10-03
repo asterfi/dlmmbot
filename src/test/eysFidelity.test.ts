@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { poolGates } from "../scanner/gates.js";
 import { parseKlinePeakUsd } from "../scanner/gmgn.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
-import { planTightRange } from "../strategy/combo/eysRanges.js";
+import { planTightRange, pumpOriginBins } from "../strategy/combo/eysRanges.js";
 import { installConfig, restoreConfig } from "./config.js";
 import { makePool } from "./pool.js";
 
@@ -90,5 +90,22 @@ describe("default 69-bin ranges", () => {
     const r = planApeRange(0.77, 100, 6, 50, 2);
     expect(r.topPricePct).toBeGreaterThan(45);
     expect(r.topPricePct).toBeLessThan(55);
+  });
+});
+
+describe("pumpOriginBins (re-seat range)", () => {
+  it("covers the pump back to its origin on a 1% step pool", () => {
+    // price 1.40 after a pump from 1.00: ln(1.4)/ln(1.01) = 33.8 -> 34 bins
+    expect(pumpOriginBins(1.4, 1.0, 100, 30, 69)).toBe(34);
+  });
+  it("never narrower than the minimum", () => {
+    expect(pumpOriginBins(1.1, 1.0, 100, 30, 69)).toBe(30);
+  });
+  it("never wider than one account (the default range)", () => {
+    expect(pumpOriginBins(3.0, 1.0, 100, 30, 69)).toBe(69);
+  });
+  it("falls back to the default when the low is unknown or not below price", () => {
+    expect(pumpOriginBins(1.4, null, 100, 30, 69)).toBe(69);
+    expect(pumpOriginBins(1.4, 1.5, 100, 30, 69)).toBe(69);
   });
 });
