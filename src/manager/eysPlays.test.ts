@@ -192,7 +192,8 @@ describe("eys_seat — hard and soft volume tiers", () => {
   });
 
   it("sweet spot: floor comes from this sweep's DLMM pools (p90), and the pool must pay >= 1.5%/h fee/TVL", async () => {
-    installConfig((c) => { const cc = c.combo!; cc.eys_vol_floor_usd_per_min = 1000; cc.eys_vol_percentile = 0.9; cc.eys_vol_accel_min = 0; cc.eys_soft_fee_tvl_per_hour_min = 1.5; });
+    // fee tier off: this pins the soft (volume-floor) tier on its own
+    installConfig((c) => { const cc = c.combo!; cc.eys_vol_floor_usd_per_min = 1000; cc.eys_vol_percentile = 0.9; cc.eys_vol_accel_min = 0; cc.eys_soft_fee_tvl_per_hour_min = 1.5; cc.eys_fee_entry_pct_per_h = 0; });
     vi.mocked(trendingByMint).mockResolvedValue(new Map());
     // 6 rejected DLMM pools at 300..1800 $/min + the candidate itself (80k/30 = 2667) -> p90 = 2146.67
     const rej = [300, 600, 900, 1200, 1500, 1800].map((v, i) => cand(pool({ address: `Rej${i}1111111111111111111111111111111111`, vol30mUsd: v * 30 })));

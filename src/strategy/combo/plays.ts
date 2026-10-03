@@ -40,7 +40,8 @@ export function isTokenSidedPlay(p: Play): boolean {
 /** Owner's slot priority: breakout (for an open seat) > seat > tight > ape > dump bonus. */
 export const DEFAULT_PLAY_PRIORITY: Play[] = ["eys_breakout", "eys_seat", "eys_tight", "eys_ape", "eys_dump_bonus"];
 
-export type VolTier = "hard" | "soft";
+/** hard = Eys's literal 100k/min; fee = pool paying >= eys_fee_entry_pct_per_h of TVL per hour; soft = dynamic volume floor. */
+export type VolTier = "hard" | "fee" | "soft";
 
 // ------------------------------------------------------------------ candle helpers (pure)
 
@@ -177,6 +178,8 @@ export interface ComboConfigLike {
   eys_vol_accel_min?: number;
   /** Soft tier also needs the pool to be paying >= this % of its TVL per hour (fee/TVL 30m x 2). */
   eys_soft_fee_tvl_per_hour_min?: number;
+  /** Fee tier: a pool paying >= this % of its TVL per hour qualifies whatever its volume (0/unset = off). */
+  eys_fee_entry_pct_per_h?: number;
   /** Fake-volume rule: lifetime fees (SOL) per $1M of mcap must reach this. */
   eys_fee_per_musd_min?: number;
   /** Eys's red-flag band: inside [lo, hi] mcap, fees must be strictly above 10 SOL. */
@@ -207,22 +210,39 @@ export function feePerMusd(feesEarnedPoolSol: number | null, mcapUsd: number): n
   return feesEarnedPoolSol / (mcapUsd / 1_000_000);
 }
 
-/** Per-minute volume tier: hard (>= literal bar), soft (>= dynamic floor AND accelerating), else null. */
+/**
+ * Entry tier: hard (>= literal volume bar), fee (pool paying >= eys_fee_entry_pct_per_h
+ * of TVL per hour, any volume), soft (>= dynamic volume floor AND fee floor), else null.
+ */
 export function eysVolTier(
   f: PlayCandidateFeatures, c: ComboConfigLike,
 ): { tier: VolTier; threshold: number } | null {
   const hard = hardTier(c);
   if (f.flowUsdPerMin >= hard) return { tier: "hard", threshold: hard };
+  const feePerHour = f.feeTvl30mPct != null ? f.feeTvl30mPct * 2 : null;
+  // Fee tier (owner, 2026-10-03): what pays an LP is fees relative to the pool, not
+  // raw volume. Backtest over 46h of pool snapshots (69-bin seat): pools paying
+  // >= 5%/h won ~83% of seats; below 3%/h fees did not cover dumps + costs.
+  // Threshold stays the hard bar so a later breakout still needs Eys's 300k/min.
+  const feeEntry = c.eys_fee_entry_pct_per_h ?? 0;
+  if (feeEntry > 0 && feePerHour != null && feePerHour >= feeEntry) return { tier: "fee", threshold: hard };
   const floor = f.dynamicVolFloor;
   // Soft tier (owner, 2026-10-03: "find a sweet spot… make it dynamic"): volume above the
   // market-relative floor AND the pool actually paying LPs fast enough to reach our target
   // (fee/TVL per hour). Acceleration is optional (eys_vol_accel_min, 0 = off).
-  const feePerHour = f.feeTvl30mPct != null ? f.feeTvl30mPct * 2 : null;
   const feeOk = (c.eys_soft_fee_tvl_per_hour_min ?? 0) <= 0 || (feePerHour != null && feePerHour >= (c.eys_soft_fee_tvl_per_hour_min ?? 0));
   if (floor != null && floor < hard && f.flowUsdPerMin >= floor && feeOk && (f.volAccel ?? 0) >= (c.eys_vol_accel_min ?? 2)) {
     return { tier: "soft", threshold: floor };
   }
   return null;
+}
+
+function tierReason(f: PlayCandidateFeatures, tier: { tier: VolTier; threshold: number }, c: ComboConfigLike): string {
+  if (tier.tier === "fee") {
+    const perHour = (f.feeTvl30mPct ?? 0) * 2;
+    return `pool paying ${perHour.toFixed(1)}%/h of TVL >= ${c.eys_fee_entry_pct_per_h}%/h (fee tier; flow $${f.flowUsdPerMin.toFixed(0)}/min)`;
+  }
+  return `flow $${f.flowUsdPerMin.toFixed(0)}/min >= $${tier.threshold.toFixed(0)}/min (${tier.tier} tier)`;
 }
 
 /** Eys's hard gates shared by every SOL-side entry: mcap, fees earned, and the fake-volume ratio. */
@@ -257,7 +277,7 @@ function classifySeat(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassif
     volThreshold: tier.threshold,
     reasons: [
       ...base,
-      `flow $${f.flowUsdPerMin.toFixed(0)}/min >= $${tier.threshold.toFixed(0)}/min (${tier.tier} tier)`,
+      tierReason(f, tier, c),
       f.devFeesKnownZero ? "dev fees known zero" : "dev fees unknown (not a blocking gate)",
     ],
   };
@@ -279,7 +299,7 @@ function classifyTight(f: PlayCandidateFeatures, c: ComboConfigLike): PlayClassi
     volThreshold: tier.threshold,
     reasons: [
       ...base,
-      `flow $${f.flowUsdPerMin.toFixed(0)}/min >= $${tier.threshold.toFixed(0)}/min (${tier.tier} tier)`,
+      tierReason(f, tier, c),
       `watched ${f.observedMin.toFixed(1)}m >= ${minObserved}m, no major dump, chopping in a small range`,
     ],
   };

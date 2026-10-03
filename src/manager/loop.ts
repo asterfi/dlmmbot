@@ -161,6 +161,7 @@ const fellDeep = new Set<number>();                   // escape hatch armed (als
 // combo flow-death confirmation (owner, 2026-10-03): the raw flowDead / flowCollapsed condition must hold continuously for combo.flow_dead_confirm_min before it may trigger an exit. In-memory: a restart just restarts the confirmation window, which is the safe direction.
 const p0CrashSkippedLogged = new Set<number>();          // p0_crash_skipped_combo logged once per position
 const comboFlowDeadSince = new Map<number, number>();
+const comboFeeFadedSince = new Map<number, number>();   // eys_seat fee_hold: when fee/TVL per hour last dropped below the hold floor
 const comboAboveSince = new Map<number, number>();   // combo: when price last went above this position's range (unix s); cleared in/below range
 const everFilled = new Set<number>();                 // combo: has this ladder ever actually converted SOL->token? (also persisted)
 const peakPnl = new Map<number, number>();            // give-back telemetry: best fee-inclusive PnL (persisted)
@@ -260,6 +261,7 @@ export function resetManagerStateForTests(): void {
   fellDeep.clear();
   everFilled.clear();
   comboFlowDeadSince.clear();
+  comboFeeFadedSince.clear();
   comboAboveSince.clear();
   p0CrashSkippedLogged.clear();
   peakPnl.clear();
@@ -343,6 +345,7 @@ function clearRangeTimers(posId: number): void {
   fellDeep.delete(posId);
   everFilled.delete(posId);
   comboFlowDeadSince.delete(posId);
+  comboFeeFadedSince.delete(posId);
   comboAboveSince.delete(posId);
   p0CrashSkippedLogged.delete(posId);
   clearHolderWatch(posId);
@@ -1209,6 +1212,11 @@ export async function managePositions(exec: Executor): Promise<void> {
         // the moment the condition clears.
         const confirmS = (cc.flow_dead_confirm_min ?? 3) * 60;
         const flowDead = flowConfirmed(comboFlowDeadSince, pos.id, flowDeadRaw, now(), confirmS);
+        // eys_seat fee_hold: the pool's fee/TVL per hour (30m ratio x 2) below the
+        // hold floor, held for the same confirmation window as flow death.
+        const feeFaded = flowConfirmed(
+          comboFeeFadedSince, pos.id, mark.feeTvl30mPct * 2 < (cc.eys_hold_fee_min_pct_per_h ?? 2), now(), confirmS,
+        );
         // Continuous time above the range (eys_seat idle rule below).
         if (!mark.aboveRange) { comboAboveSince.delete(pos.id); comboAboveMin = 0; }
         else {
@@ -1221,6 +1229,9 @@ export async function managePositions(exec: Executor): Promise<void> {
             everFilled: everFilled.has(pos.id) || (getDb().prepare("SELECT ever_filled AS f FROM positions WHERE id = ?")
               .get(pos.id) as { f: number } | undefined)?.f === 1,
             aboveRange: mark.aboveRange,
+            belowRange: mark.belowRange,
+            feeFaded,
+            holdMin: (now() - pos.entryTs) / 60,
           },
           cc,
         );

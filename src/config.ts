@@ -397,6 +397,14 @@ export interface Config {
     eys_reject_mcap_hi_usd: number;
     /** Take profit once green by this much (Eys: "whether it's 1%, 2%, or 3%"). */
     eys_tp_pct: number;
+    /** eys_seat exit: "tp" (eys_tp_pct) or "fee_hold" (hold while the pool pays; exit on fee fade / below range). */
+    eys_seat_exit?: "tp" | "fee_hold";
+    /** fee_hold: exit once the pool's fee/TVL per hour stays below this %. */
+    eys_hold_fee_min_pct_per_h?: number;
+    /** fee_hold: minimum minutes held before the fee/range exits may fire. */
+    eys_hold_min_minutes?: number;
+    /** Fee tier: a pool paying >= this % of its TVL per hour qualifies whatever its volume (0/unset = off). */
+    eys_fee_entry_pct_per_h?: number;
     /** eys_seat default Spot range depth below price, % (top bin = active bin). */
     eys_seat_range_below_pct?: number;
     /** eys_seat range as a bin count below the active bin (Meteora's default range, 69). Overrides eys_seat_range_below_pct when set. */

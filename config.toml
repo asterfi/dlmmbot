@@ -791,7 +791,8 @@ eys_vol_percentile = 0.9         # floor rises with the market: p90 of per-minut
 eys_vol_accel_min = 0            # acceleration optional (0 = off); passed to Jev as info
 eys_vol_1m_enabled = true        # per-minute volume from GMGN 1m candles (Eys reads the 1m bar); 5m trending window is the fallback
 eys_vol_1m_bars = 3              # highest of the last 3 one-minute bars (current minute included)
-eys_soft_fee_tvl_per_hour_min = 1.5  # soft tier must be paying >= 1.5%/h of TVL (our +3% within ~2h)
+eys_soft_fee_tvl_per_hour_min = 5  # soft tier must be paying >= 5%/h of TVL (backtest: below 3%/h fees did not cover dumps + costs)
+eys_fee_entry_pct_per_h = 5      # fee tier: a pool paying >= 5%/h of TVL qualifies whatever its volume (backtest: ~83% seat win rate)
 jev_eys_soft_bar = 0.65
 # Datapi has no documented freshness guarantee and no timestamp in its pool payload:
 # a candidate whose newest snapshot is older than this, or whose volume/fee fields
@@ -800,8 +801,12 @@ jev_eys_soft_bar = 0.65
 datapi_max_age_s = 120
 
 # --- eys_seat: Spot SOL-side, default range below price (top bin = active bin) ---
-# Exit: green >= eys_tp_pct OR flow death (held flow_dead_confirm_min) — never a stop.
+# Exit (eys_seat_exit = "fee_hold"): fees fade below eys_hold_fee_min_pct_per_h, price below the range,
+# or flow death (each held flow_dead_confirm_min where noted) — never a stop. "tp" = green >= eys_tp_pct.
 eys_tp_pct = 3                      # Eys: "whether it's 1%, 2%, or 3%". 3% while tickets are ~0.08 SOL: 2% (0.0016) only equals the round-trip cost estimate
+eys_seat_exit = "fee_hold"         # owner 2026-10-03: seat holds while the pool pays (backtest: 3% TP -0.12 SOL vs hold +1.27 SOL over 46h); eys_tight keeps eys_tp_pct
+eys_hold_fee_min_pct_per_h = 2      # fee_hold: exit once the pool pays < 2%/h of TVL for flow_dead_confirm_min, or price falls below the range
+eys_hold_min_minutes = 10           # fee_hold: fee/range exits wait this long after entry (flow death / P0 still apply)
 eys_seat_range_below_pct = 12       # same depth as the Spot majors default range
 eys_seat_bins = 69                  # Eys: "Spot SOL-side using the default range" = Meteora default 69 bins below price (overrides the % depth)
 # A seat above its range (about all SOL, flat) for this long with no breakout leg open on
