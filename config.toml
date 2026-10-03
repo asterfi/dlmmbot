@@ -913,6 +913,7 @@ timeout_ms = 4000            # per-consult deadline; hard-clamped to <=6000ms in
 max_concurrent = 4           # bounded concurrent consults so a slow API call cannot serialize the whole tick
 max_consults_per_min = 20    # belt-and-braces rate cap against a runaway loop (API allows 40 req/s)
 max_response_bytes = 131072
+reseat_range_shadow = true  # shadow test: on each seat reposition ask Jev which of 3 ranges it would pick; logged to jev_shadow only, never changes the trade
 retain_days = 30             # jev_decisions age retention (not yet wired into pruneHistory — manual cleanup until then)
 
 # Composite-scoring policy (strategy/jev/policy.ts) — every number here is a

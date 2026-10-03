@@ -44,6 +44,7 @@ import { readOnchainCollectFeeMode } from "../strategy/combo/feeMode.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
 import { canaryPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
 import { comboExitCheck, seatIdleCooldownH } from "../strategy/combo/exits.js";
+import { jevReseatRangeShadow } from "../strategy/jev/rangeShadow.js";
 import { planDeepBidAskRange } from "../strategy/combo/deepBidAskRange.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
 import { COMBO_PLAYBOOK } from "../strategy/combo/playbook.js";
@@ -2802,6 +2803,26 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
         play = classified.play;
         volThresholdOuter = classified.volThreshold ?? null;
         if (reseatEntry) comboReseatPass.delete(cand.tokenMint);
+        if (reseatEntry) {
+          // Shadow only (not awaited, logs to jev_shadow): which re-seat range would Jev pick?
+          const low = candles.length > 0 ? Math.min(...candles.slice(-(cc.eys_reseat_lookback_candles ?? 12)).map((k) => k.low)) : null;
+          const step = 1 + cand.pool.binStep / 10_000;
+          const opt = (bins: number) => ({ bins, bottomPct: (Math.pow(step, -bins) - 1) * 100 });
+          const fibDepth = low != null && low < entryPrice ? 0.786 * (entryPrice - low) / entryPrice : null;
+          const fibBins = fibDepth != null ? Math.round(Math.log(1 / (1 - fibDepth)) / Math.log(step)) : (cc.eys_seat_bins ?? 69);
+          jevReseatRangeShadow({
+            mint: cand.tokenMint, pool: cand.pool.address, symbol: cand.symbol, ruleChoice: "pump_origin_clamped",
+            options: {
+              eys_default: opt(cc.eys_seat_bins ?? 69),
+              pump_origin_clamped: opt(range.binCount),
+              fib_0786_pullback: opt(Math.min(cc.eys_seat_bins ?? 69, Math.max(20, fibBins))),
+            },
+            context: {
+              pool: { bin_step: cand.pool.binStep, tvl_usd: cand.pool.tvlUsd, fee_tvl_per_hour_pct: cand.pool.feeTvl30mPct * 2, vol_per_min_usd: features.flowUsdPerMin },
+              pump: { recent_low_vs_price_pct: low != null ? (low / entryPrice - 1) * 100 : null, spike_5m_pct: features.spike5mPct ?? null },
+            },
+          });
+        }
         // Pool-share cap still binds the combo's own size (clamped above only
         // for the seed); skip if clamping would take it under combo's floor.
         if (comboSize > poolShareCapSol) {
