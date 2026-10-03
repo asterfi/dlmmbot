@@ -36,6 +36,19 @@ describe("combo_skip_gates", () => {
   });
 });
 
+describe("fee-tier pools skip the raw vol_30m floor", () => {
+  afterEach(() => restoreConfig());
+  it("exempt at >= eys_fee_entry_pct_per_h, not below", () => {
+    installConfig((c) => { c.combo!.enabled = true; c.combo!.eys_fee_entry_pct_per_h = 5; });
+    expect(poolGates(makePool({ vol30mUsd: 3_000, feeTvl30mPct: 2.5 })).map((f) => f.gate)).not.toContain("vol_30m");
+    expect(poolGates(makePool({ vol30mUsd: 3_000, feeTvl30mPct: 2.4 })).map((f) => f.gate)).toContain("vol_30m");
+  });
+  it("not exempt with combo off", () => {
+    installConfig((c) => { c.combo!.enabled = false; c.combo!.eys_fee_entry_pct_per_h = 5; });
+    expect(poolGates(makePool({ vol30mUsd: 3_000, feeTvl30mPct: 10 })).map((f) => f.gate)).toContain("vol_30m");
+  });
+});
+
 describe("parseKlinePeakUsd", () => {
   const T = 1_790_947_260_000;
   const raw = JSON.stringify({ list: [

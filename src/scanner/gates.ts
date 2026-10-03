@@ -82,8 +82,14 @@ export function poolGates(p: PoolInfo & { extras: RawPoolExtras }): GateFailure[
   // filters are not in the Eys playbook (his fee rules — >=10 SOL earned and
   // the fake-volume check — run in the combo classifier) and dropped coins he
   // would trade (PEPE at ~$53k/min on fee_tvl_24h). Safety gates still apply.
-  const skip = config().combo?.enabled ? g.combo_skip_gates : undefined;
-  return skip?.length ? fails.filter((f) => !skip.includes(f.gate)) : fails;
+  const combo = config().combo;
+  const skip = combo?.enabled ? g.combo_skip_gates : undefined;
+  // A pool already paying the fee-tier rate (combo.eys_fee_entry_pct_per_h of TVL
+  // per hour) is exempt from the raw vol_30m floor: small pools that pay well
+  // were as profitable in the fee-tier backtest as the busy ones.
+  const feeEntry = combo?.enabled ? (combo.eys_fee_entry_pct_per_h ?? 0) : 0;
+  const feeTier = feeEntry > 0 && p.feeTvl30mPct * 2 >= feeEntry;
+  return fails.filter((f) => !(skip?.includes(f.gate)) && !(feeTier && f.gate === "vol_30m"));
 }
 
 /**
