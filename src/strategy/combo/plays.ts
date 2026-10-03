@@ -204,6 +204,18 @@ export interface PlayClassification {
 
 const hardTier = (c: ComboConfigLike) => c.eys_vol_hard_usd_per_min ?? c.eys_flow_usd_per_min_min;
 
+/**
+ * Lifetime fees earned in a pool (SOL), from its 24h fee figure (USD) and age.
+ * A pool younger than a day: the 24h window IS its whole life, so lifetime = 24h
+ * fees (the old age-scaled formula multiplied by e.g. 0.025 days and put a
+ * 36-min-old pool with ~50 SOL of fees at 1.3 SOL, blocking fresh pumps).
+ * Older: the 24h figure held flat over the age (capped at a year). null = unknown.
+ */
+export function estimateLifetimePoolFeesSol(fees24hUsd: number, ageDays: number | null, solUsd: number | null): number | null {
+  if (!solUsd || !(solUsd > 0) || ageDays === null || !Number.isFinite(ageDays)) return null;
+  return (fees24hUsd * Math.min(Math.max(ageDays, 1), 365)) / solUsd;
+}
+
 /** Fees (SOL) per $1M of mcap — null when mcap or fees are unknown. */
 export function feePerMusd(feesEarnedPoolSol: number | null, mcapUsd: number): number | null {
   if (feesEarnedPoolSol === null || !(mcapUsd > 0)) return null;

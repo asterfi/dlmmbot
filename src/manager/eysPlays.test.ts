@@ -242,19 +242,19 @@ describe("eys fee gates", () => {
     vi.mocked(readOnchainCollectFeeMode).mockResolvedValue(1);
     installConfig((c) => { c.combo!.play_priority = ["eys_ape", "eys_seat", "eys_tight", "eys_breakout", "eys_dump_bonus"]; });
     vi.mocked(vetToken).mockResolvedValue(vet({ tokenAgeMinutes: 20 }));
-    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ marketCapUsd: 800_000, tvlUsd: 144_000, feeTvl24hPct: 40 }))], rejected: [], sweptPools: 1 });
+    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ marketCapUsd: 800_000, tvlUsd: 6_000, feeTvl24hPct: 40, createdAt: new Date(Date.now() - 20 * 60_000).toISOString() }))], rejected: [], sweptPools: 1 });
     await enterNewPositions(exec);
     expect(exec.opens).toHaveLength(0);
   });
 
   it("fake volume: a 800k mcap with ~12 SOL of fees (15 SOL per $1M) is rejected; at 500k (24/M) it enters", async () => {
-    // age 20min clamps to 1h: fees = tvl*fee%/day * (1/24) / sol_usd = 144000*.4*(1/24)/200 = 12 SOL
+    // 20-min-old pool: lifetime fees = its 24h fees = tvl*fee%/sol_usd = 6000*.4/200 = 12 SOL
     vi.mocked(vetToken).mockResolvedValue(vet({ tokenAgeMinutes: 20 }));
-    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ marketCapUsd: 800_000, tvlUsd: 144_000, feeTvl24hPct: 40 }))], rejected: [], sweptPools: 1 });
+    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ marketCapUsd: 800_000, tvlUsd: 6_000, feeTvl24hPct: 40, createdAt: new Date(Date.now() - 20 * 60_000).toISOString() }))], rejected: [], sweptPools: 1 });
     await enterNewPositions(exec);
     expect(exec.opens).toHaveLength(0);
 
-    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ marketCapUsd: 500_000, tvlUsd: 144_000, feeTvl24hPct: 40 }))], rejected: [], sweptPools: 1 });
+    vi.mocked(scan).mockResolvedValue({ candidates: [cand(pool({ marketCapUsd: 500_000, tvlUsd: 6_000, feeTvl24hPct: 40, createdAt: new Date(Date.now() - 20 * 60_000).toISOString() }))], rejected: [], sweptPools: 1 });
     await enterNewPositions(exec);
     expect(exec.opens).toHaveLength(1);
   });

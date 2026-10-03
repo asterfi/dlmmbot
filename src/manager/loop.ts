@@ -35,7 +35,7 @@ import type { Candidate, ExitReason, Position, RangePlan } from "../types.js";
 import { vetToken } from "../vetting/vet.js";
 import {
   classifyAllPlays, pickByPriority, DEFAULT_PLAY_PRIORITY, isKnownPlay, isTokenSidedPlay,
-  dynamicVolFloor, eysVolTier, feePerMusd, lastCandleSpikePct, hasMajorDump, recentRangePct, volumePeakDropPct, belowAthPct,
+  dynamicVolFloor, eysVolTier, feePerMusd, estimateLifetimePoolFeesSol, lastCandleSpikePct, hasMajorDump, recentRangePct, volumePeakDropPct, belowAthPct,
   type Play, type PlayCandidateFeatures, type VolTier, type DynamicVolFloor,
 } from "../strategy/combo/plays.js";
 import { planSeatRange, planTightRange } from "../strategy/combo/eysRanges.js";
@@ -2411,16 +2411,14 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
       }
       const ageMin = vet.facts.tokenAgeMinutes;
       const ageDays = ageMin !== null ? ageMin / 1440 : null;
-      // Lifetime fees earned in the pool, approximated from the 24h fee
-      // run-rate (tvlUsd * feeTvl24hPct/100, $/day) held flat over the pool's
-      // observed age and converted at the live SOL/USD price — a conservative
-      // proxy (STRATEGY §2.1 already uses the same feeTvl24hPct figure for its
-      // own hot/cold read). Unknown SOL price or pool age fails eys_seat's
-      // fee gate closed rather than guessing.
+      // Lifetime fees earned in the pool (Eys: ">= 10 SOL in fees"), from the 24h
+      // fee figure and the POOL's age — see estimateLifetimePoolFeesSol. Unknown
+      // SOL price or age fails eys_seat's fee gate closed rather than guessing.
+      const poolAgeDays = cand.pool.createdAt ? (Date.now() - Date.parse(cand.pool.createdAt)) / 86_400_000 : null;
       const feeRunRateUsdPerDay = cand.pool.tvlUsd * (cand.pool.feeTvl24hPct / 100);
-      const feesEarnedPoolSol = (solUsd && solUsd > 0 && ageDays !== null)
-        ? (feeRunRateUsdPerDay * Math.min(Math.max(ageDays, 1 / 24), 365)) / solUsd
-        : null;
+      const feesEarnedPoolSol = estimateLifetimePoolFeesSol(
+        feeRunRateUsdPerDay, poolAgeDays !== null && poolAgeDays >= 0 ? poolAgeDays : ageDays, solUsd,
+      );
       // Eys's own volume reading (strategy-fidelity fix, 2026-10-02, re-read:
       // "100K+ volume PER MINUTE... strong upward spikes") — vol30mUsd/30 is a
       // 30-minute AVERAGE and smooths out exactly the spike Eys is watching

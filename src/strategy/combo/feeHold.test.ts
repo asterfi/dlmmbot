@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { comboExitCheck, type ComboExitConfig, type ComboExitInput } from "./exits.js";
-import { eysVolTier, type ComboConfigLike, type PlayCandidateFeatures } from "./plays.js";
+import { eysVolTier, estimateLifetimePoolFeesSol, type ComboConfigLike, type PlayCandidateFeatures } from "./plays.js";
 
 // Owner, 2026-10-03: seats hold while the pool pays (fee_hold) and a pool paying
 // >= eys_fee_entry_pct_per_h of TVL per hour qualifies whatever its volume.
@@ -57,5 +57,18 @@ describe("fee entry tier", () => {
   });
   it("off when eys_fee_entry_pct_per_h is unset", () => {
     expect(eysVolTier(f({ feeTvl30mPct: 10 }), { ...CFG, eys_fee_entry_pct_per_h: undefined, eys_soft_fee_tvl_per_hour_min: 0 })).toBeNull();
+  });
+});
+
+describe("estimateLifetimePoolFeesSol", () => {
+  it("a pool younger than a day counts its whole 24h fees (Encyclopedia: 36 min old, $3.6k fees)", () => {
+    expect(estimateLifetimePoolFeesSol(3_636, 0.025, 72)).toBeCloseTo(50.5, 1);
+  });
+  it("an older pool holds the 24h figure flat over its age", () => {
+    expect(estimateLifetimePoolFeesSol(720, 3, 72)).toBeCloseTo(30, 6);
+  });
+  it("unknown age or SOL price is null (fails the fee gate closed)", () => {
+    expect(estimateLifetimePoolFeesSol(1000, null, 72)).toBeNull();
+    expect(estimateLifetimePoolFeesSol(1000, 1, null)).toBeNull();
   });
 });
