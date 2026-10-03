@@ -595,9 +595,10 @@ export async function trendingByMint(): Promise<Map<string, GmgnPresence>> {
 
 // --- 1-minute volume (Eys's chart reading, owner 2026-10-03) ---
 // Eys reads "100K+ volume per minute" off the 1m bar of GMGN's chart. One
-// `market kline` call (weight 2) per candidate mint, cached a minute; an
-// optional call, so it yields to the throttle and the caller falls back to the
-// trending 5m window.
+// `market kline` call (weight 2) per candidate mint, cached a minute. Not an
+// optional enrichment (it is the entry rule itself), so it runs through the
+// adaptive throttle rather than yielding to it; a ban or exhausted bucket
+// falls back to the trending 5m window.
 
 const KLINE_TTL_MS = 60_000;
 const KLINE_STALE_MS = 180_000;
@@ -628,7 +629,7 @@ export async function gmgnOneMinutePeakUsd(mint: string, bars = 3): Promise<numb
   const hit = klineCache.get(mint);
   const age = hit ? Date.now() - hit.at : Infinity;
   if (hit && age < KLINE_TTL_MS) return hit.v;
-  if (!gmgnSpendOk(gmgnRouteWeight(["market", "kline"]), "market", { optional: true })) {
+  if (!gmgnSpendOk(gmgnRouteWeight(["market", "kline"]), "market")) {
     return hit && age < KLINE_STALE_MS ? hit.v : null;
   }
   const nowMs = Date.now();
