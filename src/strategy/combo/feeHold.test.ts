@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { comboExitCheck, type ComboExitConfig, type ComboExitInput } from "./exits.js";
+import { comboExitCheck, seatIdleCooldownH, type ComboExitConfig, type ComboExitInput } from "./exits.js";
 import { eysVolTier, estimateLifetimePoolFeesSol, type ComboConfigLike, type PlayCandidateFeatures } from "./plays.js";
 
 // Owner, 2026-10-03: seats hold while the pool pays (fee_hold) and a pool paying
@@ -70,5 +70,18 @@ describe("estimateLifetimePoolFeesSol", () => {
   it("unknown age or SOL price is null (fails the fee gate closed)", () => {
     expect(estimateLifetimePoolFeesSol(1000, null, 72)).toBeNull();
     expect(estimateLifetimePoolFeesSol(1000, 1, null)).toBeNull();
+  });
+});
+
+describe("seatIdleCooldownH (re-seat after the token runs above the seat)", () => {
+  const cfg = { reentry_cooldown_h: 3, eys_reseat_on_idle: true, eys_fee_entry_pct_per_h: 5 };
+  it("no cooldown while the pool still pays the fee-tier rate", () => {
+    expect(seatIdleCooldownH(cfg, 7)).toBe(0);
+  });
+  it("normal cooldown once the pool pays less", () => {
+    expect(seatIdleCooldownH(cfg, 4.9)).toBe(3);
+  });
+  it("normal cooldown when re-seat is off", () => {
+    expect(seatIdleCooldownH({ ...cfg, eys_reseat_on_idle: false }, 9)).toBe(3);
   });
 });

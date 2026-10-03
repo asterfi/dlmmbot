@@ -415,6 +415,8 @@ export interface Config {
     eys_vol_1m_bars?: number;
     /** A seat sitting above its range (about all SOL) this long, with no breakout leg open on the mint, is closed (eys_seat_idle). */
     eys_seat_idle_above_min?: number;
+    /** After an idle close, re-seat at the new price (no cooldown) while the pool pays >= eys_fee_entry_pct_per_h. */
+    eys_reseat_on_idle?: boolean;
 
     // --- eys_breakout (token-sided second position on an open seat) ---
     /** Breakout volume bar = this x whichever per-minute threshold the seat entered under (Eys: 100k -> 300k). */

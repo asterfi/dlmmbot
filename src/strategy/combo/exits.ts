@@ -104,3 +104,18 @@ export function comboExitCheck(input: ComboExitInput, cfg: ComboExitConfig): Com
       return { shouldExit: false, reason: "" };
   }
 }
+
+/**
+ * Cooldown (hours) after an eys_seat idle close (token ran above the seat's
+ * range). Owner, 2026-10-03: while the pool still pays the fee-tier rate, re-seat
+ * at the new price instead of benching the token — the seat belongs under the
+ * current price, ready for the dump. The 24h re-entry cap still bounds churn.
+ */
+export function seatIdleCooldownH(
+  cfg: { reentry_cooldown_h?: number; eys_reseat_on_idle?: boolean; eys_fee_entry_pct_per_h?: number },
+  poolFeePerHourPct: number,
+): number {
+  const feeEntry = cfg.eys_fee_entry_pct_per_h ?? 0;
+  if (cfg.eys_reseat_on_idle && feeEntry > 0 && poolFeePerHourPct >= feeEntry) return 0;
+  return cfg.reentry_cooldown_h ?? 3;
+}

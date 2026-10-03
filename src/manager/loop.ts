@@ -43,7 +43,7 @@ import { poolDataStale } from "../db/db.js";
 import { readOnchainCollectFeeMode } from "../strategy/combo/feeMode.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
 import { canaryPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
-import { comboExitCheck } from "../strategy/combo/exits.js";
+import { comboExitCheck, seatIdleCooldownH } from "../strategy/combo/exits.js";
 import { planDeepBidAskRange } from "../strategy/combo/deepBidAskRange.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
 import { COMBO_PLAYBOOK } from "../strategy/combo/playbook.js";
@@ -1305,10 +1305,10 @@ export async function managePositions(exec: Executor): Promise<void> {
             await closeAndReport(exec, pos, "eys_seat_idle", config().exec.exit_slippage_bps, "close",
               `eys_seat idle: above its range ${Math.round(comboAboveMin)}m with no breakout leg open`);
             clearRangeTimers(pos.id);
-            const cooldownH = comboCfgExit.reentry_cooldown_h ?? 3;
+            const cooldownH = seatIdleCooldownH(comboCfgExit, mark.feeTvl30mPct * 2);
             if (cooldownH > 0) blacklist(pos.tokenMint, "token", "eys_seat idle — token ran away", cooldownH);
             recordDecision(pos.tokenMint, pos.poolAddress, "exited", "eys_seat_idle", null, {
-              play: pos.play, ageH, aboveMin: comboAboveMin, idleAboveMin, mark,
+              play: pos.play, ageH, aboveMin: comboAboveMin, idleAboveMin, mark, cooldownH, reseat: cooldownH === 0,
             });
             continue;
           }

@@ -814,6 +814,7 @@ eys_seat_bins = 69                  # Eys: "Spot SOL-side using the default rang
 # open the seat stays as the backup; once the breakout closes the rule applies at once if
 # the 20 minutes above range already elapsed.
 eys_seat_idle_above_min = 20
+eys_reseat_on_idle = true          # idle close while the pool still pays >= eys_fee_entry_pct_per_h: no cooldown, re-seat under the new price (24h re-entry cap still applies)
 
 # --- eys_breakout: token-sided SECOND position while the same token's seat is open ---
 # Trigger: price breaks above the seat's top, per-minute volume >= eys_breakout_mult x the
