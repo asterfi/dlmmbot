@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { comboExitCheck, seatIdleCooldownH, type ComboExitConfig, type ComboExitInput } from "./exits.js";
+import { comboExitCheck, dumpBonusIdleAbove, seatIdleCooldownH, type ComboExitConfig, type ComboExitInput } from "./exits.js";
 import { eysVolTier, estimateLifetimePoolFeesSol, type ComboConfigLike, type PlayCandidateFeatures } from "./plays.js";
 
 // Owner, 2026-10-03: seats hold while the pool pays (fee_hold) and a pool paying
@@ -83,5 +83,21 @@ describe("seatIdleCooldownH (re-seat after the token runs above the seat)", () =
   });
   it("normal cooldown when re-seat is off", () => {
     expect(seatIdleCooldownH({ ...cfg, eys_reseat_on_idle: false }, 9)).toBe(3);
+  });
+});
+
+describe("dumpBonusIdleAbove (filled ladder, price back above it)", () => {
+  const cfg = { eys_dump_idle_above_min: 30 };
+  it("closes a filled ladder that has been above its range for 30 min", () => {
+    expect(dumpBonusIdleAbove(true, true, 31, cfg)).toBe(true);
+  });
+  it("waits while it has been above for less than 30 min", () => {
+    expect(dumpBonusIdleAbove(true, true, 10, cfg)).toBe(false);
+  });
+  it("keeps a filled ladder that is in or below its range (waiting for the bounce)", () => {
+    expect(dumpBonusIdleAbove(true, false, 999, cfg)).toBe(false);
+  });
+  it("never-filled ladders are left to the eys_dump_idle_max_h timeout", () => {
+    expect(dumpBonusIdleAbove(false, true, 999, cfg)).toBe(false);
   });
 });

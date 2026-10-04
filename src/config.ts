@@ -448,6 +448,8 @@ export interface Config {
     eys_dump_down_max_pct?: number;
     /** A never-filled bonus ladder is closed after this many hours (it is not a seat; nothing else frees its slot). */
     eys_dump_idle_max_h?: number;
+    /** A filled bonus ladder back above its whole range (all SOL) this many minutes is closed. */
+    eys_dump_idle_above_min?: number;
 
     // --- sizing / slots ---
     /** Canary account sizing (owner addition 2026-10-01, ~0.3 SOL accounts). */

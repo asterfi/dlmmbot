@@ -851,6 +851,7 @@ eys_dump_window_candles = 12
 eys_dump_down_min_pct = 85
 eys_dump_down_max_pct = 90
 eys_dump_idle_max_h = 2
+eys_dump_idle_above_min = 30       # a FILLED bonus ladder back above its whole range (all SOL) this long is closed: frees the slot + rent
 
 # eys_ape (owner addition, 2026-10-01; widened 2026-10-02): token-sided ape, range above
 # price, SOL-fee (quote-only) pools (Eys "0.1->10 SOL" $CTO article: "even if the token

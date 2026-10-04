@@ -43,7 +43,7 @@ import { poolDataStale, STRANDED_GRACE_S } from "../db/db.js";
 import { readOnchainCollectFeeMode } from "../strategy/combo/feeMode.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
 import { canaryPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
-import { comboExitCheck, seatIdleCooldownH } from "../strategy/combo/exits.js";
+import { comboExitCheck, dumpBonusIdleAbove, seatIdleCooldownH } from "../strategy/combo/exits.js";
 import { jevReseatRangeShadow } from "../strategy/jev/rangeShadow.js";
 import { planDeepBidAskRange } from "../strategy/combo/deepBidAskRange.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
@@ -1352,6 +1352,15 @@ export async function managePositions(exec: Executor): Promise<void> {
             });
             continue;
           }
+        }
+        if (pos.play === "eys_dump_bonus" && dumpBonusIdleAbove(filled, mark.aboveRange, comboAboveMin, comboCfgExit)) {
+          await closeAndReport(exec, pos, "combo_idle_timeout" as ExitReason, config().exec.exit_slippage_bps, "close",
+            `eys_dump_bonus idle: filled earlier, price back above the whole ladder for ${Math.round(comboAboveMin)}m (all SOL, earning nothing)`);
+          clearRangeTimers(pos.id);
+          recordDecision(pos.tokenMint, pos.poolAddress, "exited", "combo_idle_timeout", null, {
+            play: pos.play, ageH, aboveMin: comboAboveMin, filled, mark,
+          });
+          continue;
         }
         // eys_dump_bonus never-filled timeout: a deep Bid-Ask ladder the market
         // never came back down to holds a slot for nothing.

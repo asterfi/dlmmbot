@@ -119,3 +119,17 @@ export function seatIdleCooldownH(
   if (cfg.eys_reseat_on_idle && feeEntry > 0 && poolFeePerHourPct >= feeEntry) return 0;
   return cfg.reentry_cooldown_h ?? 3;
 }
+
+/**
+ * eys_dump_bonus that already filled and whose price went back ABOVE the whole
+ * ladder (owner audit, 2026-10-04: knightcat pos#44 sat +108% above its ladder,
+ * 100% SOL, for hours): the bounce came but never reached the take-profit, so it
+ * earns nothing while holding a slot and its position rent. Close it once it has
+ * been above the range for `eys_dump_idle_above_min` minutes. (A ladder that never
+ * filled is handled by the separate eys_dump_idle_max_h timeout.)
+ */
+export function dumpBonusIdleAbove(
+  filled: boolean, aboveRange: boolean, aboveMin: number, cfg: { eys_dump_idle_above_min?: number },
+): boolean {
+  return filled && aboveRange && aboveMin >= (cfg.eys_dump_idle_above_min ?? 30);
+}
