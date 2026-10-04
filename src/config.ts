@@ -540,6 +540,10 @@ export interface Env {
   privyWalletAddress: string | undefined;
   privyBotSignerId: string | undefined;
   privyBotAuthKey: string | undefined;
+  /** Signing guard (2-of-2 co-signer): GUARD_URL + GUARD_TOKEN, GUARD_MODE shadow|enforce. */
+  guardUrl: string | undefined;
+  guardToken: string | undefined;
+  guardMode: string | undefined;
   farmerMode: string;
 }
 
@@ -734,6 +738,9 @@ export function env(): Env {
     privyWalletAddress: process.env.PRIVY_WALLET_ADDRESS || undefined,
     privyBotSignerId: process.env.PRIVY_BOT_SIGNER_ID || undefined,
     privyBotAuthKey: process.env.PRIVY_BOT_AUTH_KEY || undefined,
+    guardUrl: process.env.GUARD_URL || undefined,
+    guardToken: process.env.GUARD_TOKEN || undefined,
+    guardMode: process.env.GUARD_MODE || undefined,
     farmerMode: process.env.FARMER_MODE ?? "paper",
   };
 }

@@ -1,7 +1,7 @@
 import { Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { readFileSync } from "node:fs";
 import bs58 from "bs58";
-import { PrivyClient } from "@privy-io/node";
+import { PrivyClient, formatRequestForAuthorizationSignature } from "@privy-io/node";
 
 /**
  * Load the burner-wallet keypair. Sources, in priority order:
@@ -75,13 +75,56 @@ export class KeypairSigner implements WalletSigner {
  * this class. This is just the wire protocol: serialize unsigned (or
  * partially signed) → send to Privy → deserialize what comes back.
  */
+/**
+ * Signing guard (deploy/hardened/guard): an independent service holding the
+ * second key of a 2-of-2 Privy signer. "shadow" asks it about every transaction
+ * in the background and only logs the verdict; "enforce" makes its signature
+ * part of the request, so a transaction it refuses cannot be signed at all.
+ */
+export interface GuardOptions {
+  url: string;
+  token: string;
+  mode: "shadow" | "enforce";
+  appId: string;
+}
+
+interface GuardAnswer { ok: boolean; signature?: string; reasons: string[] }
+
+async function askGuard(g: GuardOptions, payload: Uint8Array): Promise<GuardAnswer> {
+  const res = await fetch(`${g.url.replace(/\/$/, "")}/sign`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${g.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ payload: Buffer.from(payload).toString("base64") }),
+    signal: AbortSignal.timeout(8000),
+  });
+  const j = (await res.json().catch(() => ({}))) as { ok?: boolean; signature?: string; reasons?: string[] };
+  return { ok: res.ok && j.ok === true, signature: j.signature, reasons: j.reasons ?? [`HTTP ${res.status}`] };
+}
+
 export class PrivySigner implements WalletSigner {
   constructor(
     private readonly privy: PrivyClient,
     private readonly walletId: string,
     readonly publicKey: PublicKey,
     private readonly authKey: string,
+    private readonly guard?: GuardOptions,
   ) {}
+
+  /** Shadow mode: the same request the SDK will sign, sent to the guard; never blocks or throws. */
+  private shadowCheck(transaction: string): void {
+    const g = this.guard!;
+    const payload = formatRequestForAuthorizationSignature({
+      version: 1, method: "POST", url: `https://api.privy.io/v1/wallets/${this.walletId}/rpc`,
+      body: { method: "signTransaction", chain_type: "solana", params: { transaction, encoding: "base64" } },
+      headers: { "privy-app-id": g.appId, "privy-request-expiry": String(Date.now() + 5 * 60_000) },
+    });
+    askGuard(g, payload).then(
+      (r) => r.ok
+        ? console.log("[guard-shadow] allow")
+        : console.warn(`[guard-shadow] REFUSED: ${r.reasons.join("; ")}`),
+      (e: unknown) => console.warn(`[guard-shadow] unreachable: ${(e as Error).message}`),
+    );
+  }
 
   async signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T> {
     const versioned = tx instanceof VersionedTransaction;
@@ -89,9 +132,21 @@ export class PrivySigner implements WalletSigner {
       ? Buffer.from((tx as VersionedTransaction).serialize())
       : (tx as Transaction).serialize({ requireAllSignatures: false, verifySignatures: false });
 
+    const transaction = serialized.toString("base64");
+    const g = this.guard;
+    if (g?.mode === "shadow") this.shadowCheck(transaction);
     const { signed_transaction } = await this.privy.wallets().solana().signTransaction(this.walletId, {
-      transaction: serialized.toString("base64"),
-      authorization_context: { authorization_private_keys: [this.authKey] },
+      transaction,
+      authorization_context: g?.mode === "enforce"
+        ? {
+            authorization_private_keys: [this.authKey],
+            sign_fns: [async (payload: Uint8Array) => {
+              const r = await askGuard(g, payload);
+              if (!r.ok || !r.signature) throw new Error(`signing guard refused: ${r.reasons.join("; ")}`);
+              return r.signature;
+            }],
+          }
+        : { authorization_private_keys: [this.authKey] },
     });
 
     const signedBytes = Buffer.from(signed_transaction, "base64");
@@ -110,6 +165,9 @@ export interface SignerEnv {
   privyWalletId: string | undefined;
   privyWalletAddress: string | undefined;
   privyBotAuthKey: string | undefined;
+  guardUrl?: string | undefined;
+  guardToken?: string | undefined;
+  guardMode?: string | undefined;
 }
 
 /**
@@ -130,7 +188,12 @@ export function loadSigner(env: SignerEnv): WalletSigner {
       throw new Error("PRIVY_WALLET_ID is set but PRIVY_BOT_AUTH_KEY is missing");
     }
     const privy = new PrivyClient({ appId: env.privyAppId, appSecret: env.privyAppSecret });
-    return new PrivySigner(privy, env.privyWalletId, new PublicKey(env.privyWalletAddress), env.privyBotAuthKey);
+    let guard: GuardOptions | undefined;
+    if (env.guardUrl && env.guardToken) {
+      const mode = env.guardMode === "enforce" ? "enforce" : "shadow";
+      guard = { url: env.guardUrl, token: env.guardToken, mode, appId: env.privyAppId };
+    }
+    return new PrivySigner(privy, env.privyWalletId, new PublicKey(env.privyWalletAddress), env.privyBotAuthKey, guard);
   }
   return new KeypairSigner(loadKeypair(env.walletPrivateKey, env.walletKeypairPath));
 }

@@ -155,3 +155,58 @@ describe("loadSigner", () => {
     })).toThrow(/PRIVY_BOT_AUTH_KEY/);
   });
 });
+
+describe("PrivySigner signing guard", () => {
+  const tx = () => {
+    const kp = Keypair.generate();
+    const t = new Transaction({ feePayer: kp.publicKey, recentBlockhash: Keypair.generate().publicKey.toBase58() });
+    t.add(SystemProgram.transfer({ fromPubkey: kp.publicKey, toPubkey: Keypair.generate().publicKey, lamports: 1 }));
+    return { kp, t };
+  };
+  const guard = (mode: "shadow" | "enforce") => ({ url: "https://guard.example/", token: "tok", mode, appId: "app-1" });
+
+  it("enforce: adds a sign_fn that returns the guard's signature", async () => {
+    const { kp, t } = tx();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, signature: "GUARDSIG" }), { status: 200 })));
+    let ctx: any;
+    const { client } = fakePrivy(async (_w, input: any) => { ctx = input.authorization_context; return { signed_transaction: t.serialize({ requireAllSignatures: false, verifySignatures: false }).toString("base64") }; });
+    await new PrivySigner(client, "wallet-1", kp.publicKey, "bot-key", guard("enforce")).signTransaction(t);
+    expect(ctx.authorization_private_keys).toEqual(["bot-key"]);
+    expect(await ctx.sign_fns[0](new Uint8Array([1, 2, 3]))).toBe("GUARDSIG");
+    vi.unstubAllGlobals();
+  });
+
+  it("enforce: a guard refusal makes the sign_fn throw (the transaction cannot be signed)", async () => {
+    const { kp, t } = tx();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: false, reasons: ["SOL transfer to X not allowed"] }), { status: 403 })));
+    let ctx: any;
+    const { client } = fakePrivy(async (_w, input: any) => { ctx = input.authorization_context; return { signed_transaction: t.serialize({ requireAllSignatures: false, verifySignatures: false }).toString("base64") }; });
+    await new PrivySigner(client, "wallet-1", kp.publicKey, "bot-key", guard("enforce")).signTransaction(t);
+    await expect(ctx.sign_fns[0](new Uint8Array([1]))).rejects.toThrow(/signing guard refused: SOL transfer/);
+    vi.unstubAllGlobals();
+  });
+
+  it("shadow: signs with the bot key alone and asks the guard without waiting on it", async () => {
+    const { kp, t } = tx();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: false, reasons: ["x"] }), { status: 403 }));
+    vi.stubGlobal("fetch", fetchMock);
+    let ctx: any;
+    const { client } = fakePrivy(async (_w, input: any) => { ctx = input.authorization_context; return { signed_transaction: t.serialize({ requireAllSignatures: false, verifySignatures: false }).toString("base64") }; });
+    await new PrivySigner(client, "wallet-1", kp.publicKey, "bot-key", guard("shadow")).signTransaction(t);
+    expect(ctx).toEqual({ authorization_private_keys: ["bot-key"] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    const payload = JSON.parse(Buffer.from(body.payload, "base64").toString());
+    expect(payload.url).toBe("https://api.privy.io/v1/wallets/wallet-1/rpc");
+    expect(payload.body.method).toBe("signTransaction");
+    vi.unstubAllGlobals();
+  });
+
+  it("no guard configured: unchanged behaviour", async () => {
+    const { kp, t } = tx();
+    let ctx: any;
+    const { client } = fakePrivy(async (_w, input: any) => { ctx = input.authorization_context; return { signed_transaction: t.serialize({ requireAllSignatures: false, verifySignatures: false }).toString("base64") }; });
+    await new PrivySigner(client, "wallet-1", kp.publicKey, "bot-key").signTransaction(t);
+    expect(ctx).toEqual({ authorization_private_keys: ["bot-key"] });
+  });
+});
