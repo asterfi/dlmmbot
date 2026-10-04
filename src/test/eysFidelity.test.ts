@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { poolGates } from "../scanner/gates.js";
 import { parseKlinePeakUsd } from "../scanner/gmgn.js";
+import { sanitizeCandles } from "../scanner/candles.js";
 import { planApeRange } from "../strategy/combo/apeRange.js";
 import { planTightRange, pumpOriginBins } from "../strategy/combo/eysRanges.js";
 import { installConfig, restoreConfig } from "./config.js";
@@ -107,5 +108,33 @@ describe("pumpOriginBins (re-seat range)", () => {
   it("falls back to the default when the low is unknown or not below price", () => {
     expect(pumpOriginBins(1.4, null, 100, 30, 69)).toBe(69);
     expect(pumpOriginBins(1.4, 1.5, 100, 30, 69)).toBe(69);
+  });
+});
+
+describe("sanitizeCandles (freak wick prints)", () => {
+  const bar = (o: number, h: number, l: number, c: number, i: number) => ({ timestamp: i, open: o, high: h, low: l, close: c, volume: 1 });
+  // knightcat 2026-10-04: real bars ~1.2e-5 with lows of 1.5e-9 and one open at 2e-8
+  const raw = [
+    bar(1.09e-5, 1.43e-5, 9.1e-6, 1.43e-5, 1),
+    bar(1.43e-5, 1.59e-5, 1.5e-9, 1.27e-5, 2),
+    bar(1.27e-5, 1.44e-5, 1.04e-5, 1.33e-5, 3),
+    bar(1.33e-5, 1.98e-5, 7.8e-9, 2.03e-8, 4),
+    bar(2.03e-8, 1.77e-5, 1.05e-8, 1.33e-5, 5),
+    bar(1.33e-5, 1.40e-5, 1.3e-8, 1.20e-5, 6),
+    bar(1.20e-5, 1.39e-5, 3.4e-9, 1.23e-5, 7),
+  ];
+  const clean = sanitizeCandles(raw);
+  it("removes the ~1000x-off prints", () => {
+    expect(Math.min(...clean.map((c) => c.low))).toBeGreaterThan(9e-6);
+    expect(clean[3]!.close).toBeCloseTo(1.33e-5, 10);
+    expect(clean[4]!.open).toBeCloseTo(1.33e-5, 10);
+  });
+  it("keeps real bars untouched", () => {
+    expect(clean[0]).toEqual(raw[0]);
+    expect(clean[2]).toEqual(raw[2]);
+  });
+  it("keeps a real 3x move", () => {
+    const pump = [1, 1.1, 1.3, 1.8, 2.4, 3.0, 3.2].map((p, i) => bar(p * 0.95, p * 1.05, p * 0.9, p, i));
+    expect(sanitizeCandles(pump)).toEqual(pump);
   });
 });

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolveBuildLabel } from "../buildLabel.js";
 import { config, configToml, currentMode, env, isLive, onConfigChange, syncFarmerModeFromDisk,
   escapeDrawdownPct, ESCAPE_ARM_DRAWDOWN_PCT, ESCAPE_RECOVER_DRAWDOWN_PCT } from "../config.js";
@@ -39,7 +39,7 @@ import {
   type Play, type PlayCandidateFeatures, type VolTier, type DynamicVolFloor,
 } from "../strategy/combo/plays.js";
 import { planSeatRange, planTightRange, pumpOriginBins } from "../strategy/combo/eysRanges.js";
-import { poolDataStale } from "../db/db.js";
+import { poolDataStale, STRANDED_GRACE_S } from "../db/db.js";
 import { readOnchainCollectFeeMode } from "../strategy/combo/feeMode.js";
 import { classifyApe, type ApeCandidateFeatures, type ApeSource } from "../strategy/combo/ape.js";
 import { canaryPositionSize, sizeComboPlay, checkAffordability, eysCostSkip, type ComboOpenCounts, type CanarySizingConfig, type EysCostConfig } from "../strategy/combo/sizing.js";
@@ -166,6 +166,8 @@ const comboFeeFadedSince = new Map<number, number>();   // eys_seat fee_hold: wh
 // eys_seat reposition (owner, 2026-10-03): mint -> unix s until which a re-seat of a
 // seat just closed above its range skips the Jev ENTRY consult (same trade, moved).
 const comboReseatPass = new Map<string, number>();
+// Latest on-chain mark per open position (value incl. unclaimed fees) for the account alert.
+const lastMarks = new Map<number, { valueSol: number; ts: number }>();
 const comboAboveSince = new Map<number, number>();   // combo: when price last went above this position's range (unix s); cleared in/below range
 const everFilled = new Set<number>();                 // combo: has this ladder ever actually converted SOL->token? (also persisted)
 const peakPnl = new Map<number, number>();            // give-back telemetry: best fee-inclusive PnL (persisted)
@@ -267,6 +269,7 @@ export function resetManagerStateForTests(): void {
   comboFlowDeadSince.clear();
   comboFeeFadedSince.clear();
   comboReseatPass.clear();
+  lastMarks.clear();
   comboAboveSince.clear();
   p0CrashSkippedLogged.clear();
   peakPnl.clear();
@@ -351,6 +354,7 @@ function clearRangeTimers(posId: number): void {
   everFilled.delete(posId);
   comboFlowDeadSince.delete(posId);
   comboFeeFadedSince.delete(posId);
+  lastMarks.delete(posId);
   comboAboveSince.delete(posId);
   p0CrashSkippedLogged.delete(posId);
   clearHolderWatch(posId);
@@ -528,36 +532,59 @@ async function flushProfitBurn(
 }
 
 /**
- * Account-level PnL since the mode's baseline, sent after every close. The
- * baseline (wallet + capital already in positions) is captured once, on the
- * first close after this feature ships, and persisted in meta.
+ * Account P&L after every close, from on-chain balances (owner, 2026-10-04: the
+ * old version valued open positions at ENTRY, ignored their refundable rent and
+ * any tokens still held, and counted a position mid-close as zero — it printed
+ * -11.5% while the account was up). Equity = wallet SOL + each open position's
+ * latest on-chain mark (liquidity + unclaimed fees) + its refundable rent +
+ * tokens awaiting the sweep. Measured against net deposits from the last
+ * on-chain audit (scripts/truth-pnl.ts, daily); the meta baseline is only a
+ * fallback when no audit exists yet.
  */
 async function accountPnlAlert(exec: Executor): Promise<void> {
   const db = getDb();
   const wallet = await exec.walletSol();
-  const openSol = (db.prepare(
-    "SELECT COALESCE(SUM(entry_sol), 0) AS s FROM positions WHERE state IN ('open','pending') AND mode = ?"
-  ).get(exec.mode) as { s: number }).s;
-  const key = `baseline_sol_${exec.mode}`;
-  let baseline: number;
-  const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
-  if (row) {
-    baseline = Number(row.value);
-  } else {
-    baseline = wallet + openSol;
-    db.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run(key, String(baseline));
+  const open = db.prepare(
+    "SELECT id, entry_sol, open_cost_sol FROM positions WHERE state IN ('open','pending','closing') AND mode = ?"
+  ).all(exec.mode) as Array<{ id: number; entry_sol: number; open_cost_sol: number | null }>;
+  let posSol = 0, rentSol = 0, unmarked = 0;
+  for (const p of open) {
+    const m = lastMarks.get(p.id);
+    if (m) posSol += m.valueSol; else { posSol += p.entry_sol; unmarked++; }
+    if (p.open_cost_sol != null) rentSol += Math.max(0, p.open_cost_sol - p.entry_sol - 0.0005);
   }
-  const closed = db.prepare(
-    `SELECT COUNT(*) AS c, COALESCE(SUM(${REALIZED_PNL_SQL}), 0) AS r
-     FROM positions WHERE exit_ts IS NOT NULL AND mode = ?`
-  ).get(exec.mode) as { c: number; r: number };
-  const acct = wallet + openSol - baseline; // open positions counted at entry value
-  const pct = baseline > 0 ? (acct / baseline) * 100 : 0;
+  const tokensSol = (db.prepare(
+    "SELECT COALESCE(SUM(stranded_sol), 0) AS s FROM positions WHERE stranded_sol > 0 AND stranded_at > ? AND mode = ?"
+  ).get(now() - STRANDED_GRACE_S, exec.mode) as { s: number }).s;
+  const equity = wallet + posSol + rentSol + tokensSol;
+
+  let base: number | null = null;
+  let baseLabel = "";
+  if (exec.mode === "live" && process.env.FARMER_DB_PATH) {
+    try {
+      const lines = readFileSync(join(dirname(process.env.FARMER_DB_PATH), "truth-pnl.jsonl"), "utf8").trim().split("\n");
+      const last = JSON.parse(lines[lines.length - 1]!) as { net_deposits_sol?: number; ts?: string };
+      if (typeof last.net_deposits_sol === "number") {
+        base = last.net_deposits_sol;
+        baseLabel = `net deposits ${base.toFixed(4)} (on-chain audit ${String(last.ts ?? "").slice(0, 16).replace("T", " ")} UTC)`;
+      }
+    } catch { /* no audit yet: fall back below */ }
+  }
+  if (base === null) {
+    const key = `baseline_sol_${exec.mode}`;
+    const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+    base = row ? Number(row.value) : equity;
+    if (!row) db.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run(key, String(base));
+    baseLabel = `start ${base.toFixed(4)}`;
+  }
+  const pnl = equity - base;
+  const pct = base > 0 ? (pnl / base) * 100 : 0;
   await alert(
     "account",
-    `account since start: ${acct >= 0 ? "+" : ""}${acct.toFixed(4)} SOL (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)\n` +
-    `wallet ${wallet.toFixed(3)} + in positions ${openSol.toFixed(3)} vs start ${baseline.toFixed(3)}\n` +
-    `closed ${closed.c} | realized on positions ${closed.r >= 0 ? "+" : ""}${closed.r.toFixed(4)} SOL`
+    `account (on-chain): ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} SOL (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)\n` +
+    `equity ${equity.toFixed(4)} = wallet ${wallet.toFixed(4)} + positions ${posSol.toFixed(4)} + rent ${rentSol.toFixed(4)}` +
+    (tokensSol > 0 ? ` + tokens ${tokensSol.toFixed(4)}` : "") + `\nvs ${baseLabel}` +
+    (unmarked > 0 ? `\n(${unmarked} position(s) not marked yet — counted at entry)` : "")
   );
 }
 
@@ -957,6 +984,7 @@ export async function managePositions(exec: Executor): Promise<void> {
     try {
       if (error !== undefined) throw error;
       const mark = value!;
+      lastMarks.set(pos.id, { valueSol: mark.valueSol, ts: now() });
       // Adopted rows (reconcile inserts entry_sol = 0, no basis) get their cost
       // basis from the first successful mark — "PnL from adoption point", as the
       // adoption event promises. Without this the row has no P1 stop (value/0),
@@ -2816,6 +2844,8 @@ export async function enterNewPositions(exec: Executor): Promise<void> {
               eys_default: opt(cc.eys_seat_bins ?? 69),
               pump_origin_clamped: opt(range.binCount),
               fib_0786_pullback: opt(Math.min(cc.eys_seat_bins ?? 69, Math.max(20, fibBins))),
+              medium_40: opt(40),
+              tight_30: opt(30),
             },
             context: {
               pool: { bin_step: cand.pool.binStep, tvl_usd: cand.pool.tvlUsd, fee_tvl_per_hour_pct: cand.pool.feeTvl30mPct * 2, vol_per_min_usd: features.flowUsdPerMin },
@@ -3248,10 +3278,11 @@ export async function runLoop(): Promise<void> {
             let restated = "";
             if (r.positionId) {
               const p = getDb().prepare(
-                "SELECT open_cost_sol o, close_return_sol c, fees_measured_sol f, recovered_sol v, withdrawn_sol w FROM positions WHERE id = ?"
-              ).get(r.positionId) as { o: number | null; c: number | null; f: number; v: number; w: number } | undefined;
+                "SELECT open_cost_sol o, close_return_sol c, fees_measured_sol f, recovered_sol v, withdrawn_sol w, refunds_sol r FROM positions WHERE id = ?"
+              ).get(r.positionId) as { o: number | null; c: number | null; f: number; v: number; w: number; r: number } | undefined;
               if (p?.o != null && p.c != null) {
-                restated = `\n${r.symbol} pos#${r.positionId} true PnL now ${(p.c + p.f + p.v + p.w - p.o >= 0 ? "+" : "")}${(p.c + p.f + p.v + p.w - p.o).toFixed(4)} SOL`;
+                const t = p.c + p.f + p.v + p.w + (p.r ?? 0) - p.o;
+                restated = `\n${r.symbol} pos#${r.positionId} final PnL (on-chain, incl. this sale): ${t >= 0 ? "+" : ""}${t.toFixed(4)} SOL`;
               }
             }
             await alert("claim", `🧹 [sweep] sold stranded ${r.symbol}${tag} residue for ${r.soldSol.toFixed(4)} SOL${restated}`);

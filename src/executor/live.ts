@@ -1733,6 +1733,7 @@ export class LiveExecutor implements Executor {
           positionId, now(), "ata_cleanup", sig, delta, 0.001,
           JSON.stringify({ closed: batch.map((c) => ({ account: c.pubkey.toBase58(), mint: c.mint })) })
         );
+        if (positionId != null) getDb().prepare("UPDATE positions SET refunds_sol = refunds_sol + ? WHERE id = ?").run(delta, positionId);
         console.log(`[live] ATA cleanup: closed ${batch.length} empty account(s), reclaimed ${delta.toFixed(6)} SOL (${sig.slice(0, 8)}…)`);
       } catch (e) {
         console.error(`[live] ATA cleanup: batch of ${batch.length} failed (non-blocking):`, (e as Error).message.split("\n")[0]);
@@ -1787,6 +1788,7 @@ export class LiveExecutor implements Executor {
       positionId, now(), "dust_burn", sig, reclaimedSol, Number(burnedRaw), 0.001,
       JSON.stringify({ mint, burnedRaw: burnedRaw.toString(), accountsClosed: closes, reclaimedSol }),
     );
+    if (positionId != null) getDb().prepare("UPDATE positions SET refunds_sol = refunds_sol + ? WHERE id = ?").run(reclaimedSol, positionId);
     return { sig, burnedRaw, reclaimedSol };
   }
 

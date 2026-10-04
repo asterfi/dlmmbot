@@ -61,6 +61,36 @@ export function parseGeckoTerminal(body: unknown): Candle[] {
   return out.sort((a, b) => a.timestamp - b.timestamp);
 }
 
+/**
+ * Drop freak prints (owner, 2026-10-04). A thin DLMM pool can print a single
+ * trade into a near-empty bin ~1000x below the market (knightcat: lows of
+ * 1.5e-9 among real 1.2e-5 bars, a "73,258% 5m spike"), which poisons every
+ * low/spike/range feature and the re-seat pump-origin low. Each bar is checked
+ * against the median close of its 7-bar neighbourhood; any price more than
+ * `factor` x off it is replaced (open/close by the previous clean close, the
+ * wick by the bar's body). Real 20x moves inside ~35 minutes do not happen.
+ */
+export function sanitizeCandles(candles: Candle[], factor = 20): Candle[] {
+  if (candles.length < 3) return candles;
+  const closes = candles.map((c) => c.close);
+  const out: Candle[] = [];
+  let prevClose: number | null = null;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i]!;
+    const w = closes.slice(Math.max(0, i - 3), i + 4).filter((x) => x > 0).sort((a, b) => a - b);
+    const ref = w.length > 0 ? w[Math.floor(w.length / 2)]! : null;
+    if (ref === null) { out.push(c); prevClose = c.close; continue; }
+    const bad = (x: number) => !(x > ref / factor && x < ref * factor);
+    const close: number = bad(c.close) ? (prevClose ?? ref) : c.close;
+    const open: number = bad(c.open) ? (prevClose ?? ref) : c.open;
+    const high = bad(c.high) ? Math.max(open, close) : Math.max(c.high, open, close);
+    const low = bad(c.low) ? Math.min(open, close) : Math.min(c.low, open, close);
+    out.push({ ...c, open, high, low, close });
+    prevClose = close;
+  }
+  return out;
+}
+
 async function fetchGeckoTerminal(poolAddress: string, timeframe: "5m" | "1h", limit: number): Promise<Candle[]> {
   const base = config().apis.geckoterminal ?? "https://api.geckoterminal.com/api/v2";
   // `currency=token` — bars in the QUOTE token (SOL for every pool we trade),
@@ -102,12 +132,13 @@ export async function fetchCandlesDeep(
       // still know it, so only cache and return the deep answer when it has
       // more to say than the fallback would.
       if (deep.length > 10) {
-        cache.set(key, { at: Date.now(), candles: deep });
-        return deep;
+        const clean = sanitizeCandles(deep);
+        cache.set(key, { at: Date.now(), candles: clean });
+        return clean;
       }
     } catch { /* fall through to datapi */ }
   }
-  const shallow = await fetchDatapiCandles(poolAddress, timeframe);
+  const shallow = sanitizeCandles(await fetchDatapiCandles(poolAddress, timeframe));
   cache.set(key, { at: Date.now(), candles: shallow });
   return shallow;
 }

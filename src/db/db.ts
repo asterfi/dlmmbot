@@ -293,6 +293,14 @@ function migrate(database: Database.Database): void {
   try {
     database.exec("ALTER TABLE positions ADD COLUMN recovered_sol REAL NOT NULL DEFAULT 0");
   } catch { /* column already exists */ }
+  // Token-account rent reclaimed after a close (ata_cleanup / dust_burn events):
+  // the open paid it (inside open_cost_sol), so the trade must be credited when it
+  // comes back. Derived from the events ledger, recomputed at every boot.
+  try {
+    database.exec("ALTER TABLE positions ADD COLUMN refunds_sol REAL NOT NULL DEFAULT 0");
+  } catch { /* column already exists */ }
+  database.exec(`UPDATE positions SET refunds_sol = COALESCE((SELECT SUM(e.sol_delta) FROM events e
+    WHERE e.position_id = positions.id AND e.type IN ('ata_cleanup', 'dust_burn')), 0)`);
   try {
     database.exec("ALTER TABLE positions ADD COLUMN fees_at_close_sol REAL NOT NULL DEFAULT 0");
   } catch { /* column already exists */ }
@@ -581,6 +589,7 @@ export const REALIZED_PNL_SQL = `
             + COALESCE(fees_measured_sol, 0)
             + COALESCE(withdrawn_sol, 0)
             + COALESCE(recovered_sol, 0)
+            + COALESCE(refunds_sol, 0)
             + ${STRANDED_CREDIT_SQL}
             - COALESCE(open_cost_sol, entry_sol + COALESCE(rent_paid_sol, 0))
        WHEN entry_sol > 0 AND exit_sol IS NOT NULL

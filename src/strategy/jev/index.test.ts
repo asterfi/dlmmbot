@@ -166,6 +166,27 @@ describe("jevConsult — entry policy (composite scoring)", () => {
     expect(r.reason).toMatch(/redflag_veto/);
   });
 
+  it("eys_dump_bonus: an exhausted spike is its premise, not a veto", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    const answers = {
+      ...GOOD_ENTRY_ANSWERS,
+      redflag_exhausted_spike: { type: "noul", noul: 0.8 },
+      play: { type: "choice", choice: "eys_dump_bonus", probabilities: { eys_dump_bonus: 0.9 }, confidence: 0.9 },
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers, usage: {} })));
+    const r = await jevConsult(enterInput({ play: "eys_dump_bonus", state: { candidate: { rule_play: "eys_dump_bonus" } } }));
+    expect(r.verdict).toBe("yes");
+  });
+
+  it("eys_seat: an exhausted spike still vetoes", async () => {
+    vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
+    const answers = { ...GOOD_ENTRY_ANSWERS, redflag_exhausted_spike: { type: "noul", noul: 0.8 } };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ model: "jev-1.13.0", answers, usage: {} })));
+    const r = await jevConsult(enterInput());
+    expect(r.verdict).toBe("no");
+    expect(r.reason).toMatch(/redflag_veto/);
+  });
+
   it("rejects on play mismatch", async () => {
     vi.stubEnv("TYPESAFE_API_KEY", "test-key-not-real");
     const answers = { ...GOOD_ENTRY_ANSWERS, play: { type: "choice", choice: "none", probabilities: { none: 0.9, eys_seat: 0.05 }, confidence: 0.9 } };

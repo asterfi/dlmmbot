@@ -216,6 +216,10 @@ export async function jevConsult(input: JevConsultInput): Promise<JevConsultResu
     if (input.lane === "enter") {
       const redflags: Record<string, number> = {};
       for (const id of ["redflag_wash_volume", "redflag_security", "redflag_exhausted_spike", "redflag_insider_dumping", "redflag_stablecoin_major"]) {
+        // eys_dump_bonus is placed BECAUSE the move is fading ("once the token has
+        // reached its peak volume or starts slowing down") — an exhausted spike is
+        // its premise, not a veto (it vetoed 30 of 32 qualifying dump bonuses).
+        if (input.play === "eys_dump_bonus" && id === "redflag_exhausted_spike") continue;
         redflags[id] = noul(res.answers, id);
       }
       const positives: Record<string, number> = {};
