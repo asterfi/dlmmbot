@@ -3278,10 +3278,10 @@ export async function runLoop(): Promise<void> {
             let restated = "";
             if (r.positionId) {
               const p = getDb().prepare(
-                "SELECT open_cost_sol o, close_return_sol c, fees_measured_sol f, recovered_sol v, withdrawn_sol w, refunds_sol r FROM positions WHERE id = ?"
-              ).get(r.positionId) as { o: number | null; c: number | null; f: number; v: number; w: number; r: number } | undefined;
+                "SELECT open_cost_sol o, close_return_sol c, fees_measured_sol f, recovered_sol v, withdrawn_sol w FROM positions WHERE id = ?"
+              ).get(r.positionId) as { o: number | null; c: number | null; f: number; v: number; w: number } | undefined;
               if (p?.o != null && p.c != null) {
-                const t = p.c + p.f + p.v + p.w + (p.r ?? 0) - p.o;
+                const t = p.c + p.f + p.v + p.w - p.o;
                 restated = `\n${r.symbol} pos#${r.positionId} final PnL (on-chain, incl. this sale): ${t >= 0 ? "+" : ""}${t.toFixed(4)} SOL`;
               }
             }

@@ -84,7 +84,6 @@ export const REALIZED_PNL = `
        THEN close_return_sol
             + COALESCE(fees_measured_sol, 0)
             + COALESCE(recovered_sol, 0)
-            + COALESCE(refunds_sol, 0)
             + ${STRANDED_CREDIT}
             - COALESCE(open_cost_sol, entry_sol + COALESCE(rent_paid_sol, 0))
        WHEN entry_sol > 0
